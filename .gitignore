@@ -1,0 +1,13 @@
+/target/
+**/*.rs.bk
+.cargo/
+*.step
+*.stl
+*.glb
+*.brep
+*.svg
+*.png
+!assets/**
+!examples/**/*.png
+.DS_Store
+*.swp

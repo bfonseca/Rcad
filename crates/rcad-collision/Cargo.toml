@@ -1,0 +1,17 @@
+[package]
+name = "rcad-collision"
+description = "Real-time collision checks for mechanisms (Rapier)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rcad-geom.workspace = true
+glam.workspace = true
+rapier3d = { workspace = true, optional = true }
+serde.workspace = true
+
+[features]
+default = ["rapier"]
+rapier = ["dep:rapier3d"]

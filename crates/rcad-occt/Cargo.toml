@@ -1,0 +1,13 @@
+[package]
+name = "rcad-occt"
+description = "OpenCascade geometry backend for rcad (via cadrum)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rcad-geom.workspace = true
+glam.workspace = true
+thiserror.workspace = true
+cadrum = "0.8.20"

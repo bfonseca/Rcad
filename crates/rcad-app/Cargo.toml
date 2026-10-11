@@ -1,0 +1,37 @@
+[package]
+name = "rcad-app"
+description = "Desktop UI for rcad (egui + wgpu)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "rcad"
+
+[[bin]]
+name = "rcad"
+path = "src/main.rs"
+
+[dependencies]
+rcad-geom.workspace = true
+rcad-occt.workspace = true
+rcad-doc.workspace = true
+rcad-param.workspace = true
+rcad-sketch.workspace = true
+rcad-features.workspace = true
+rcad-skeleton.workspace = true
+rcad-underlay.workspace = true
+rcad-assembly.workspace = true
+rcad-mechanism.workspace = true
+rcad-collision.workspace = true
+rcad-animation.workspace = true
+rcad-cae.workspace = true
+eframe.workspace = true
+egui.workspace = true
+glam.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rfd = "0.15"
+uuid.workspace = true
+image.workspace = true
+rcad-table.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "rcad-skeleton"
+description = "Top-down skeleton parts and published references for rcad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rcad-doc.workspace = true
+rcad-features.workspace = true
+uuid.workspace = true
+serde.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "rcad-param"
+description = "Parametric feature-tree rebuild engine for rcad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rcad-geom.workspace = true
+rcad-doc.workspace = true
+glam.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

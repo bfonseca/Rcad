@@ -1,0 +1,17 @@
+[package]
+name = "rcad-truck"
+description = "Optional Truck-based geometry backend for rcad (experimental)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rcad-geom.workspace = true
+glam.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []
+# Enable when wiring truck-modeling as a second GeometryBackend.
+truck = []

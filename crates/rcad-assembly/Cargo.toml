@@ -1,0 +1,14 @@
+[package]
+name = "rcad-assembly"
+description = "Assemblies and mate solving for rcad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rcad-doc.workspace = true
+glam.workspace = true
+uuid.workspace = true
+serde.workspace = true
+thiserror.workspace = true

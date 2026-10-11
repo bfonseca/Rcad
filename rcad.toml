@@ -1,0 +1,40 @@
+# rcad.toml - Manifesto do projeto para o rcad
+# Este arquivo contém a configuração global do projeto rcad.
+
+[project]
+name = "rcad"
+version = "0.0.1"
+description = "CAD paramétrico open-source em Rust"
+authors = ["Bruno Fonseca"]
+license = "MIT"
+repository = "https://github.com/bfonseca/Rcad"
+
+# Tolerância geral do projeto (em mm)
+[general_tolerance]
+linear = 0.01
+angular = 0.1
+
+# Parâmetros globais do projeto
+[global_parameters]
+# Exemplo: comprimento padrão de extrusão
+default_extrusion_length = 10.0
+
+# Mapeamento de cores de superfície por cliente (RGB)
+# Os valores são tabelas onde a chave é o tipo de superfície lógica e o valor é um array de 3 inteiros (0-255)
+[surface_colors]
+# Exemplo: roscas
+threads = [255, 165, 0]   # Laranja
+# Superfícies de ajuste
+fit_surfaces = [0, 255, 0]    # Verde
+# Zonas de vedação
+sealing_zones = [255, 0, 0]   # Vermelho
+
+# Configuração para componentes guiados por tabelas externas
+# Esta secção define como ler e interpretar ficheiros Excel/CSV para parametrização
+[external_tables]
+# Caminho padrão para as tabelas (relativo ao diretório do projeto)
+default_path = "tables"
+# Formato padrão (csv, xlsx, xls)
+default_format = "xlsx"
+# Cache de tabelas em memória (boolean)
+cache_in_memory = true

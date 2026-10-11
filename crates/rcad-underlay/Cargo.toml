@@ -1,0 +1,14 @@
+[package]
+name = "rcad-underlay"
+description = "Image underlays with scale calibration for reverse engineering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rcad-doc.workspace = true
+serde.workspace = true
+uuid.workspace = true
+image.workspace = true
+thiserror.workspace = true

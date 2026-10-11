@@ -1,0 +1,12 @@
+[package]
+name = "rcad-animation"
+description = "Editable timeline and keyframes for mechanism animation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rcad-cae.workspace = true
+serde.workspace = true
+uuid.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "rcad-mechanism"
+description = "Mechanism joints and actuators (post-MVP API surface)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rcad-assembly.workspace = true
+rcad-doc.workspace = true
+serde.workspace = true
+uuid.workspace = true
+glam.workspace = true

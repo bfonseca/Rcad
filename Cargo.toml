@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rcad-geom",
+    "crates/rcad-occt",
+    "crates/rcad-truck",
+    "crates/rcad-doc",
+    "crates/rcad-param",
+    "crates/rcad-sketch",
+    "crates/rcad-features",
+    "crates/rcad-skeleton",
+    "crates/rcad-underlay",
+    "crates/rcad-table",
+    "crates/rcad-assembly",
+    "crates/rcad-mechanism",
+    "crates/rcad-collision",
+    "crates/rcad-animation",
+    "crates/rcad-cae",
+    "crates/rcad-app",
+]
+default-members = ["crates/rcad-app"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/bfonseca/Rcad"
+authors = ["Bruno Fonseca"]
+rust-version = "1.80"
+
+[workspace.dependencies]
+rcad-geom = { path = "crates/rcad-geom" }
+rcad-occt = { path = "crates/rcad-occt" }
+rcad-truck = { path = "crates/rcad-truck" }
+rcad-doc = { path = "crates/rcad-doc" }
+rcad-param = { path = "crates/rcad-param" }
+rcad-sketch = { path = "crates/rcad-sketch" }
+rcad-features = { path = "crates/rcad-features" }
+rcad-skeleton = { path = "crates/rcad-skeleton" }
+rcad-underlay = { path = "crates/rcad-underlay" }
+rcad-assembly = { path = "crates/rcad-assembly" }
+rcad-mechanism = { path = "crates/rcad-mechanism" }
+rcad-collision = { path = "crates/rcad-collision" }
+rcad-animation = { path = "crates/rcad-animation" }
+rcad-cae = { path = "crates/rcad-cae" }
+
+glam = "0.30"
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1.3"
+thiserror = "2"
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+eframe = { version = "0.32", default-features = true, features = ["default_fonts", "wgpu"] }
+egui = "0.32"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rcad-table = { path = "crates/rcad-table" }
+rapier3d = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
