@@ -1397,6 +1397,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
+name = "euclid"
+version = "0.22.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "event-listener"
 version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3188,7 +3197,7 @@ checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "rcad-animation"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "rcad-cae",
  "serde",
@@ -3197,7 +3206,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-app"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -3226,18 +3235,19 @@ dependencies = [
 
 [[package]]
 name = "rcad-assembly"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "glam 0.30.10",
  "rcad-doc",
  "serde",
+ "slvs",
  "thiserror 2.0.21",
  "uuid",
 ]
 
 [[package]]
 name = "rcad-cae"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "rcad-geom",
  "serde",
@@ -3247,7 +3257,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-collision"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "glam 0.30.10",
  "rapier3d",
@@ -3257,7 +3267,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-doc"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "glam 0.30.10",
  "rcad-geom",
@@ -3269,7 +3279,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-features"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "rcad-doc",
  "rcad-geom",
@@ -3280,7 +3290,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-geom"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "glam 0.30.10",
  "serde",
@@ -3289,7 +3299,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-mechanism"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "glam 0.30.10",
  "rcad-assembly",
@@ -3300,7 +3310,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-occt"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "cadrum",
  "glam 0.30.10",
@@ -3310,7 +3320,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-param"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "glam 0.30.10",
  "rcad-doc",
@@ -3321,7 +3331,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-skeleton"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "rcad-doc",
  "rcad-features",
@@ -3331,7 +3341,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-sketch"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "glam 0.30.10",
  "rcad-geom",
@@ -3343,7 +3353,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-table"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "calamine",
@@ -3356,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "rcad-truck"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "glam 0.30.10",
  "rcad-geom",
@@ -3365,8 +3375,9 @@ dependencies = [
 
 [[package]]
 name = "rcad-underlay"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
+ "glam 0.30.10",
  "image",
  "rcad-doc",
  "serde",
@@ -3797,13 +3808,15 @@ dependencies = [
 
 [[package]]
 name = "slvs"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b79d4649c8b3170f27a123f6527d945d55a292075dd1b795d8970e7da229301d"
+checksum = "b60e8c7e5929d55292d0459567cbecccf380b3ce08823b2221900c3fae2a3ac3"
 dependencies = [
  "bindgen",
  "cc",
  "dunce",
+ "euclid",
+ "serde",
 ]
 
 [[package]]

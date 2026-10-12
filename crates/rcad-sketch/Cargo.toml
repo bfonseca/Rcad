@@ -13,7 +13,7 @@ uuid.workspace = true
 thiserror.workspace = true
 glam.workspace = true
 # SolveSpace bindings (rust_slvs ecosystem). Optional until FFI is wired in CI.
-slvs = { version = "0.5.0", optional = true }
+slvs = { version = "0.6.0", optional = true }
 
 [features]
 default = []

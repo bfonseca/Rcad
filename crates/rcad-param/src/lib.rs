@@ -134,6 +134,41 @@ fn eval_feature(
                 .map(Some)
                 .map_err(|e| e.to_string())
         }
+        FeatureKind::Loft { profiles, solid } => {
+            if profiles.is_empty() {
+                return Err("loft needs at least one profile".to_string());
+            }
+            if *solid {
+                backend
+                    .loft_profiles(profiles, true)
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            } else {
+                backend
+                    .loft_profiles(profiles, false)
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            }
+        }
+        FeatureKind::Boundary { u_curves, v_curves } => {
+            if u_curves.is_empty() || v_curves.is_empty() {
+                return Err("boundary needs U and V curves".to_string());
+            }
+            backend
+                .boundary_surface(u_curves, v_curves)
+                .map(Some)
+                .map_err(|e| e.to_string())
+        }
+        FeatureKind::Thicken { surface_feature, distance, both_sides } => {
+            let surface = named
+                .get(surface_feature)
+                .copied()
+                .ok_or_else(|| "thicken surface feature missing".to_string())?;
+            backend
+                .thicken(surface, *distance, *both_sides)
+                .map(Some)
+                .map_err(|e| e.to_string())
+        }
         FeatureKind::Construction { .. } => Ok(None),
     }
 }

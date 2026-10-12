@@ -135,6 +135,29 @@ Isto é o “coração” do MVP — sem feature tree estável o resto não esca
 ---
 
 
+## Parametrização e Metodologia Creo
+
+### Intent Manager no Sketcher
+
+O **Intent Manager** gere a transição entre restrições fracas (geradas automaticamente) e fortes (definidas pelo utilizador):
+
+- **Cotas Fracas (Weak Dimensions):** Criadas automaticamente pelo solver `rust_slvs` para garantir que o sketch nunca fica sub-restringido. São visualmente distintas (ex: cor cinza, linha tracejada) e podem ser promovidas a fortes.
+- **Cotas Fortes (Strong Dimensions):** Introduzidas explicitamente pelo utilizador. Substituem automaticamente as cotas fracas correspondentes.
+- **Restrições Virtuais Temporárias:** Geridas internamente pelo `rcad-sketch` para estabilizar a solução durante a edição interativa.
+
+### Workflow de Skeletons (Top-Down Design)
+
+Mecanismos explícitos inspirados no Creo:
+
+- **Publish Geometry:** No skeleton, o utilizador seleciona entidades de construção (planos, eixos, pontos, curvas, sólidos de referência) e publica-as com nomes semânticos.
+- **Copy Geometry:** Na peça filha, o utilizador referencia o skeleton e escolhe quais geometrias publicadas copiar. As referências mantêm associatividade: alterações no skeleton propagam para as peças filhas.
+- **External References:** Gestão de dependências externas com indicador visual de estado (atualizado / desatualizado / quebrado).
+
+**Intenção:** Assegurar que a modelação paramétrica é previsível e robusta a alterações, evitando falhas em cadeia ao redefinir dimensões.
+
+---
+
+
 ### Subsecção: Gestão de Projeto via `rcad.toml`
 Adição do esquema e exemplo em TOML do manifesto de projeto.
 Inclusão dos campos de tolerância geral (`general_tolerance`) e parâmetros globais.

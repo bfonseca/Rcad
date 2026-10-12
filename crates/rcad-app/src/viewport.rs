@@ -4,6 +4,115 @@ use rcad_geom::TriangleMesh;
 
 use crate::camera::OrbitCamera;
 
+/// 3D ray for picking
+#[derive(Debug, Clone, Copy)]
+pub struct Ray3D {
+    pub origin: Vec3,
+    pub direction: Vec3,
+}
+
+impl Ray3D {
+    /// Create ray from screen position
+    pub fn from_screen(pos: Pos2, rect: Rect, camera: &OrbitCamera) -> Self {
+        let aspect = rect.width() / rect.height().max(1.0);
+        let vp = camera.view_proj(aspect);
+        
+        // Convert screen to NDC
+        let x = (pos.x - rect.left()) / rect.width() * 2.0 - 1.0;
+        let y = 1.0 - (pos.y - rect.top()) / rect.height() * 2.0;
+        
+        // Near and far plane points in clip space
+        let near_clip = Vec4::new(x, y, -1.0, 1.0);
+        let far_clip = Vec4::new(x, y, 1.0, 1.0);
+        
+        // Inverse view-projection
+        let inv_vp = vp.inverse();
+        
+        let near_world = inv_vp * near_clip;
+        let far_world = inv_vp * far_clip;
+        
+        let near = Vec3::new(
+            near_world.x / near_world.w,
+            near_world.y / near_world.w,
+            near_world.z / near_world.w,
+        );
+        let far = Vec3::new(
+            far_world.x / far_world.w,
+            far_world.y / far_world.w,
+            far_world.z / far_world.w,
+        );
+        
+        let direction = (far - near).normalize_or_zero();
+        
+        Self {
+            origin: near,
+            direction,
+        }
+    }
+    
+    /// Test ray-triangle intersection
+    pub fn intersect_triangle(&self, v0: Vec3, v1: Vec3, v2: Vec3) -> Option<f32> {
+        let edge1 = v1 - v0;
+        let edge2 = v2 - v0;
+        let h = self.direction.cross(edge2);
+        let a = edge1.dot(h);
+        
+        if a.abs() < 1e-6 {
+            return None; // Parallel
+        }
+        
+        let f = 1.0 / a;
+        let s = self.origin - v0;
+        let u = f * s.dot(h);
+        if u < 0.0 || u > 1.0 {
+            return None;
+        }
+        
+        let q = s.cross(edge1);
+        let v = f * self.direction.dot(q);
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+        
+        let t = f * edge2.dot(q);
+        if t > 1e-4 {
+            Some(t)
+        } else {
+            None
+        }
+    }
+}
+
+/// Pickable entity types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickTarget {
+    Triangle(usize),
+    Edge(usize),
+    Vertex(usize),
+    None,
+}
+
+/// Selection state
+#[derive(Debug, Default, Clone)]
+pub struct SelectionState {
+    pub selected_triangle: Option<usize>,
+    pub selected_edge: Option<usize>,
+    pub selected_vertex: Option<usize>,
+    pub hover_triangle: Option<usize>,
+    pub hover_edge: Option<usize>,
+    pub hover_vertex: Option<usize>,
+    pub pick_mode: PickMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PickMode {
+    #[default]
+    Object,
+    Face,
+    Edge,
+    Vertex,
+}
+
 pub fn draw_viewport(
      ui: &mut Ui,
      mesh: &TriangleMesh,
@@ -83,7 +192,7 @@ fn project(vp: Mat4, rect: Rect, p: Vec3) -> Option<Pos2> {
 
 fn draw_grid(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
     let vp = view_proj(rect, camera);
-    let stroke = Stroke::new(1.0, Color32::from_rgb(50, 54, 60));
+    let stroke = Stroke::new(1.0_f32, Color32::from_rgb(50, 54, 60));
     for i in -10..=10 {
         let t = i as f32 * 10.0;
         if let (Some(a), Some(b)) = (
@@ -112,7 +221,7 @@ fn draw_axes(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
     if let Some(op) = project(vp, rect, o) {
         for (end, color) in axes {
             if let Some(ep) = project(vp, rect, end) {
-                painter.line_segment([op, ep], Stroke::new(2.0, color));
+                painter.line_segment([op, ep], Stroke::new(2.0_f32, color));
             }
         }
     }
@@ -167,4 +276,67 @@ fn draw_mesh(painter: &egui::Painter, rect: Rect, mesh: &TriangleMesh, camera: &
      for (_, pts, color) in tris {
          painter.add(Shape::convex_polygon(pts.to_vec(), color, Stroke::NONE));
      }
+}
+
+/// Pick triangle under mouse cursor
+pub fn pick_triangle(
+   pos: Pos2,
+   rect: Rect,
+   mesh: &TriangleMesh,
+   camera: &OrbitCamera,
+) -> Option<usize> {
+   let ray = Ray3D::from_screen(pos, rect, camera);
+   
+   let mut closest_t = f32::INFINITY;
+   let mut closest_tri = None;
+   
+   for (tri_idx, tri) in mesh.indices.chunks_exact(3).enumerate() {
+       let i0 = tri[0] as usize;
+       let i1 = tri[1] as usize;
+       let i2 = tri[2] as usize;
+       
+       let v0 = Vec3::from(mesh.positions[i0]);
+       let v1 = Vec3::from(mesh.positions[i1]);
+       let v2 = Vec3::from(mesh.positions[i2]);
+       
+       if let Some(t) = ray.intersect_triangle(v0, v1, v2) {
+           if t < closest_t {
+               closest_t = t;
+               closest_tri = Some(tri_idx);
+           }
+       }
+   }
+   
+   closest_tri
+}
+
+/// Handle picking interaction in viewport
+pub fn handle_picking(
+   ui: &mut Ui,
+   rect: Rect,
+   mesh: &TriangleMesh,
+   camera: &OrbitCamera,
+   selection: &mut SelectionState,
+) {
+   if ui.rect_contains_pointer(rect) {
+       let pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
+       
+       // Update hover
+       if let Some(tri) = pick_triangle(pos, rect, mesh, camera) {
+           selection.hover_triangle = Some(tri);
+       } else {
+           selection.hover_triangle = None;
+       }
+       
+       // Handle click for selection
+       if ui.input(|i| i.pointer.primary_clicked()) {
+           if let Some(tri) = pick_triangle(pos, rect, mesh, camera) {
+               selection.selected_triangle = Some(tri);
+           } else {
+               selection.selected_triangle = None;
+           }
+       }
+   } else {
+       selection.hover_triangle = None;
+   }
 }

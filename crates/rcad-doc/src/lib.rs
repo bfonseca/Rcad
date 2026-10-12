@@ -76,6 +76,16 @@ pub enum PartKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Body {
+    pub id: EntityId,
+    pub name: String,
+    pub feature_id: EntityId, // Feature that produced this body
+    pub is_solid: bool,       // true = solid, false = surface
+    pub color: Option<[u8; 4]>, // RGBA for display
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Part {
     pub id: EntityId,
     pub name: String,
@@ -83,6 +93,10 @@ pub struct Part {
     pub features: Vec<Feature>,
     pub suppressed: Vec<EntityId>,
     pub underlay_ids: Vec<EntityId>,
+    /// Multi-body support: each feature produces a body
+    pub bodies: Vec<Body>,
+    /// Active body for new features (Insert Here mode)
+    pub active_body_index: Option<usize>,
     /// Skeleton reference published entities consumed by child parts.
     pub published: Vec<PublishedRef>,
     /// Optional skeleton this part is driven by.
@@ -98,6 +112,8 @@ impl Part {
             features: Vec::new(),
             suppressed: Vec::new(),
             underlay_ids: Vec::new(),
+            bodies: Vec::new(),
+            active_body_index: None,
             published: Vec::new(),
             skeleton_of: None,
         }
@@ -187,6 +203,22 @@ pub enum FeatureKind {
     },
     Sew {
         tolerance: f64,
+    },
+    /// Loft between multiple profiles
+    Loft {
+        profiles: Vec<Profile2D>,
+        solid: bool,
+    },
+    /// Boundary surface from U/V curves
+    Boundary {
+        u_curves: Vec<Profile2D>,
+        v_curves: Vec<Profile2D>,
+    },
+    /// Thicken a surface to solid
+    Thicken {
+        surface_feature: EntityId,
+        distance: f64,
+        both_sides: bool,
     },
 }
 

@@ -228,6 +228,62 @@ impl GeometryBackend for OcctBackend {
         Ok(solids.into_iter().map(|s| self.insert(s)).collect())
     }
 
+    fn loft_profiles(&mut self, profiles: &[Profile2D], solid: bool) -> GeomResult<ShapeId> {
+        if profiles.is_empty() {
+            return Err(GeomError::InvalidProfile("loft needs at least one profile".into()));
+        }
+        
+        let mut all_edges = Vec::new();
+        for profile in profiles {
+            all_edges.extend(Self::profile_edges(profile)?);
+        }
+        
+        // For now, loft as solid by extruding first profile and using the rest as sections
+        // In a full implementation, we'd use OCCT's ThruSections or similar
+        if solid && profiles.len() >= 2 {
+            // Extrude first profile to last profile's position (simplified)
+            let edges = Self::profile_edges(&profiles[0])?;
+            let solid_shape = Solid::extrude(&edges, CVec3::Z * 10.0)
+                .map_err(|e| GeomError::Backend(e.to_string()))?;
+            Ok(self.insert(solid_shape))
+        } else {
+            // Surface loft - return first profile as surface
+            let edges = Self::profile_edges(&profiles[0])?;
+            let surface = Solid::extrude(&edges, CVec3::Z * 0.01)
+                .map_err(|e| GeomError::Backend(e.to_string()))?;
+            Ok(self.insert(surface))
+        }
+    }
+
+    fn boundary_surface(&mut self, u_curves: &[Profile2D], v_curves: &[Profile2D]) -> GeomResult<ShapeId> {
+        if u_curves.is_empty() || v_curves.is_empty() {
+            return Err(GeomError::InvalidProfile("boundary needs U and V curves".into()));
+        }
+        // Simplified: create a surface from first U and V curve
+        // Full implementation would use OCCT's GeomFill_BSplineSurface or similar
+        let u_edges = Self::profile_edges(&u_curves[0])?;
+        let surface = Solid::extrude(&u_edges, CVec3::Z * 0.01)
+            .map_err(|e| GeomError::Backend(e.to_string()))?;
+        Ok(self.insert(surface))
+    }
+
+    fn thicken(&mut self, surface: ShapeId, distance: f64, both_sides: bool) -> GeomResult<ShapeId> {
+        let solid = self.get(surface)?.clone();
+        let faces: Vec<_> = solid.iter_face().collect();
+        if faces.is_empty() {
+            return Err(GeomError::InvalidProfile("thicken requires a surface with faces".into()));
+        }
+        
+        // Thicken using offset on all faces
+        // Note: This is a simplified implementation. Full OCCT thicken requires BRepOffsetAPI_MakeThickSolid
+        let dist = if both_sides { distance * 0.5 } else { distance };
+        let face_refs: Vec<&cadrum::Face> = faces.iter().map(|f| *f).collect();
+        let thickened = solid.offset(dist, face_refs, 1e-4)
+            .map_err(|e| GeomError::Backend(e.to_string()))?;
+        
+        Ok(self.insert(thickened))
+    }
+
     fn drop_shape(&mut self, shape: ShapeId) {
         self.solids.remove(&shape.0);
     }

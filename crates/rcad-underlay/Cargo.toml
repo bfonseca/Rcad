@@ -12,3 +12,4 @@ serde.workspace = true
 uuid.workspace = true
 image.workspace = true
 thiserror.workspace = true
+glam.workspace = true

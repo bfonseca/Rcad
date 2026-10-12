@@ -95,6 +95,15 @@ pub trait GeometryBackend: Send {
     /// Sew open shells / faces into a solid (surface → solid path).
     fn sew(&mut self, shapes: &[ShapeId], tolerance: f64) -> GeomResult<ShapeId>;
 
+    /// Loft through multiple profiles (solid or surface).
+    fn loft_profiles(&mut self, profiles: &[Profile2D], solid: bool) -> GeomResult<ShapeId>;
+
+    /// Create boundary surface from U/V curves.
+    fn boundary_surface(&mut self, u_curves: &[Profile2D], v_curves: &[Profile2D]) -> GeomResult<ShapeId>;
+
+    /// Thicken a surface to solid.
+    fn thicken(&mut self, surface: ShapeId, distance: f64, both_sides: bool) -> GeomResult<ShapeId>;
+
     fn tessellate(&mut self, shape: ShapeId) -> GeomResult<TriangleMesh>;
     fn tessellate_many(&mut self, shapes: &[ShapeId]) -> GeomResult<TriangleMesh>;
 

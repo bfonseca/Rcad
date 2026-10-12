@@ -82,5 +82,14 @@ impl GeometryBackend for TruckBackend {
     fn read_step(&mut self, _path: &Path) -> GeomResult<Vec<ShapeId>> {
         Err(unsupported())
     }
+    fn loft_profiles(&mut self, _profiles: &[Profile2D], _solid: bool) -> GeomResult<ShapeId> {
+        Err(unsupported())
+    }
+    fn boundary_surface(&mut self, _u_curves: &[Profile2D], _v_curves: &[Profile2D]) -> GeomResult<ShapeId> {
+        Err(unsupported())
+    }
+    fn thicken(&mut self, _shape: ShapeId, _distance: f64, _both_sides: bool) -> GeomResult<ShapeId> {
+        Err(unsupported())
+    }
     fn drop_shape(&mut self, _shape: ShapeId) {}
 }

@@ -32,6 +32,8 @@ pub struct Underlay {
     /// Plane origin and normal (same convention as sketches).
     pub plane_origin: [f64; 3],
     pub plane_normal: [f64; 3],
+    pub plane_x_axis: [f64; 3],
+    pub plane_y_axis: [f64; 3],
     /// Two calibration points in image pixel coordinates.
     pub scale_p0: Option<[f64; 2]>,
     pub scale_p1: Option<[f64; 2]>,
@@ -39,6 +41,12 @@ pub struct Underlay {
     pub scale_distance: Option<f64>,
     /// Offset of image centre in plane UV.
     pub offset_uv: [f64; 2],
+    /// Rotation of image in degrees around centre.
+    pub rotation_deg: f64,
+    /// Whether underlay is visible.
+    pub visible: bool,
+    /// Display order (lower = behind).
+    pub display_order: i32,
 }
 
 impl Underlay {
@@ -55,10 +63,15 @@ impl Underlay {
             locked: false,
             plane_origin: [0.0, 0.0, 0.0],
             plane_normal: [0.0, 0.0, 1.0],
+            plane_x_axis: [1.0, 0.0, 0.0],
+            plane_y_axis: [0.0, 1.0, 0.0],
             scale_p0: None,
             scale_p1: None,
             scale_distance: None,
             offset_uv: [0.0, 0.0],
+            rotation_deg: 0.0,
+            visible: true,
+            display_order: 0,
         })
     }
 
@@ -66,6 +79,77 @@ impl Underlay {
         self.scale_p0 = Some(p0);
         self.scale_p1 = Some(p1);
         self.scale_distance = Some(real_distance);
+    }
+
+    /// Set the underlay plane (origin, normal, x_axis).
+    pub fn set_plane(&mut self, origin: [f64; 3], normal: [f64; 3], x_axis: [f64; 3]) {
+        use glam::DVec3;
+        let n = DVec3::from(normal).normalize();
+        let x = DVec3::from(x_axis);
+        let y = n.cross(x).normalize();
+        self.plane_origin = origin;
+        self.plane_normal = n.into();
+        self.plane_x_axis = x.into();
+        self.plane_y_axis = y.into();
+    }
+
+    /// Align underlay to a sketch plane.
+    pub fn align_to_sketch_plane(&mut self, origin: [f64; 3], normal: [f64; 3], x_axis: [f64; 3]) {
+        self.set_plane(origin, normal, x_axis);
+        // Center the image on the plane origin
+        self.offset_uv = [0.0, 0.0];
+    }
+
+    /// Set rotation in degrees.
+    pub fn set_rotation(&mut self, degrees: f64) {
+        self.rotation_deg = degrees;
+    }
+
+    /// Set visibility.
+    pub fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+
+    /// Set display order (for layering multiple underlays).
+    pub fn set_display_order(&mut self, order: i32) {
+        self.display_order = order;
+    }
+
+    /// Convert a 3D point on the plane to image pixel coordinates.
+    pub fn uv_to_pixel(&self, uv: [f64; 2]) -> Result<[f64; 2], UnderlayError> {
+        let upp = self.units_per_pixel()?;
+        let cx = self.pixel_size[0] as f64 * 0.5;
+        let cy = self.pixel_size[1] as f64 * 0.5;
+        let px = (uv[0] - self.offset_uv[0]) / upp + cx;
+        let py = cy - (uv[1] - self.offset_uv[1]) / upp;
+        Ok([px, py])
+    }
+
+    /// Convert 3D world point to image pixel (if on plane).
+    pub fn world_to_pixel(&self, point_3d: [f64; 3]) -> Result<[f64; 2], UnderlayError> {
+        use glam::DVec3;
+        let p = DVec3::from(point_3d) - DVec3::from(self.plane_origin);
+        let x_axis = DVec3::from(self.plane_x_axis);
+        let y_axis = DVec3::from(self.plane_y_axis);
+        let uv = [p.dot(x_axis), p.dot(y_axis)];
+        self.uv_to_pixel(uv)
+    }
+
+    /// Snap a world point to nearest feature on underlay (for tracing).
+    /// Returns the snapped UV coordinate and the pixel distance.
+    pub fn snap_to_feature(&self, point_3d: [f64; 3], snap_threshold_px: f64) -> Result<Option<[f64; 2]>, UnderlayError> {
+        // Convert world point to pixel
+        let pixel = self.world_to_pixel(point_3d)?;
+        // For now, just return the pixel if within threshold of image bounds
+        let w = self.pixel_size[0] as f64;
+        let h = self.pixel_size[1] as f64;
+        if pixel[0] >= -snap_threshold_px && pixel[0] <= w + snap_threshold_px &&
+           pixel[1] >= -snap_threshold_px && pixel[1] <= h + snap_threshold_px {
+            let uv = self.pixel_to_uv(pixel[0], pixel[1])?;
+            Ok(Some(uv))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Model units per image pixel.
@@ -141,10 +225,15 @@ mod tests {
             locked: false,
             plane_origin: [0.0, 0.0, 0.0],
             plane_normal: [0.0, 0.0, 1.0],
+            plane_x_axis: [1.0, 0.0, 0.0],
+            plane_y_axis: [0.0, 1.0, 0.0],
             scale_p0: None,
             scale_p1: None,
             scale_distance: None,
             offset_uv: [0.0, 0.0],
+            rotation_deg: 0.0,
+            visible: true,
+            display_order: 0,
         };
         u.set_scale_points([0.0, 0.0], [100.0, 0.0], 50.0);
         assert!((u.units_per_pixel().unwrap() - 0.5).abs() < 1e-9);

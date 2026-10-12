@@ -63,6 +63,65 @@ pub fn add_sew(part: &mut Part, name: &str, tolerance: f64) {
         .push(Feature::new(name, FeatureKind::Sew { tolerance }));
 }
 
+pub fn add_loft(part: &mut Part, name: &str, profiles: Vec<Profile2D>, solid: bool) {
+    part.features.push(Feature::new(
+        name,
+        FeatureKind::Loft { profiles, solid },
+    ));
+}
+
+pub fn add_boundary(part: &mut Part, name: &str, u_curves: Vec<Profile2D>, v_curves: Vec<Profile2D>) {
+    part.features.push(Feature::new(
+        name,
+        FeatureKind::Boundary { u_curves, v_curves },
+    ));
+}
+
+pub fn add_thicken(part: &mut Part, name: &str, surface_feature: uuid::Uuid, distance: f64, both_sides: bool) {
+    part.features.push(Feature::new(
+        name,
+        FeatureKind::Thicken { surface_feature, distance, both_sides },
+    ));
+}
+
+/// Feature tree UX helpers
+
+/// Move a feature to a new position in the tree (reorder)
+pub fn move_feature(part: &mut Part, feature_id: uuid::Uuid, new_index: usize) -> bool {
+    if let Some(current_index) = part.features.iter().position(|f| f.id == feature_id) {
+        if current_index == new_index {
+            return true;
+        }
+        let feature = part.features.remove(current_index);
+        let insert_index = new_index.min(part.features.len());
+        part.features.insert(insert_index, feature);
+        true
+    } else {
+        false
+    }
+}
+
+/// Set the active body index for Insert Here mode
+pub fn set_active_body(part: &mut Part, body_index: Option<usize>) {
+    part.active_body_index = body_index;
+}
+
+/// Get the insert position for new features (Insert Here mode)
+pub fn get_insert_position(part: &Part) -> usize {
+    part.active_body_index.map(|i| i + 1).unwrap_or(part.features.len())
+}
+
+/// Edit a feature's parameters (returns the feature for editing)
+pub fn edit_feature<'a>(part: &'a mut Part, feature_id: uuid::Uuid) -> Option<&'a mut Feature> {
+    part.features.iter_mut().find(|f| f.id == feature_id)
+}
+
+/// Insert a feature at a specific position (Insert Here mode)
+pub fn insert_feature_at(part: &mut Part, index: usize, feature: Feature) {
+    let insert_index = index.min(part.features.len());
+    part.features.insert(insert_index, feature);
+}
+
 pub fn suppress(part: &mut Part, feature_id: uuid::Uuid) {
     if let Some(f) = part.features.iter_mut().find(|f| f.id == feature_id) {
         f.suppressed = true;
