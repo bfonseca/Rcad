@@ -1,7 +1,7 @@
 //! Rebuild a [`rcad_doc::Part`] feature tree against a [`GeometryBackend`].
 
 use glam::{dvec3, DVec3};
-use rcad_doc::{dvec3_from, FeatureKind, Part, RebuildResult};
+use rcad_doc::{dvec3_from, ConstructionKind, FeatureKind, Part, RebuildResult};
 use rcad_geom::{BooleanOp, GeometryBackend, Profile2D, ShapeId};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -21,14 +21,25 @@ pub fn rebuild_part(part: &Part, backend: &mut dyn GeometryBackend) -> RebuildRe
     let mut current: Option<ShapeId> = None;
     let mut named: HashMap<Uuid, ShapeId> = HashMap::new();
 
+    // Collect all visible shapes for tessellation (including construction geometry)
+    let mut visible_shapes: Vec<ShapeId> = Vec::new();
+    
     for feature in &part.features {
         if feature.suppressed || part.suppressed.contains(&feature.id) {
+            continue;
+        }
+        // Skip invisible features (but still process them if they're reference features)
+        if !feature.visible && !matches!(feature.kind, FeatureKind::Construction { .. }) {
             continue;
         }
         match eval_feature(&feature.kind, current, &named, &result.shapes, backend) {
             Ok(Some(shape)) => {
                 named.insert(feature.id, shape);
                 result.shapes.push((feature.id, shape));
+                // Collect all visible shapes for tessellation
+                if feature.visible {
+                    visible_shapes.push(shape);
+                }
                 // Boolean / fillet / transform update the active body; raw tools
                 // that only exist to be referenced keep `current` unchanged when
                 // they are not the latest body-producing op after a boolean.
@@ -45,9 +56,26 @@ pub fn rebuild_part(part: &Part, backend: &mut dyn GeometryBackend) -> RebuildRe
         }
     }
 
+    // Tessellate the current body (last solid/surface)
     if let Some(shape) = current {
         match backend.tessellate(shape) {
             Ok(mesh) => result.display_mesh = mesh,
+            Err(e) => result.errors.push(e.to_string()),
+        }
+    }
+    
+    // Also tessellate all visible construction geometry and add to display mesh
+    if !visible_shapes.is_empty() {
+        match backend.tessellate_many(&visible_shapes) {
+            Ok(construction_mesh) => {
+                // Merge construction mesh with display mesh
+                let offset = result.display_mesh.positions.len() as u32;
+                result.display_mesh.positions.extend(construction_mesh.positions);
+                result.display_mesh.normals.extend(construction_mesh.normals);
+                for idx in construction_mesh.indices {
+                    result.display_mesh.indices.push(idx + offset);
+                }
+            }
             Err(e) => result.errors.push(e.to_string()),
         }
     }
@@ -169,7 +197,36 @@ fn eval_feature(
                 .map(Some)
                 .map_err(|e| e.to_string())
         }
-        FeatureKind::Construction { .. } => Ok(None),
+        FeatureKind::Construction { kind, origin, direction } => {
+            let origin_vec = DVec3::from(*origin);
+            let dir_vec = DVec3::from(*direction);
+            match kind {
+                ConstructionKind::Plane => backend
+                    .plane(origin_vec, dir_vec, 100.0)
+                    .map(Some)
+                    .map_err(|e| e.to_string()),
+                ConstructionKind::Axis => backend
+                    .axis(origin_vec, dir_vec, 100.0)
+                    .map(Some)
+                    .map_err(|e| e.to_string()),
+                ConstructionKind::Point => backend
+                    .point(origin_vec, 5.0)
+                    .map(Some)
+                    .map_err(|e| e.to_string()),
+                ConstructionKind::CoordSystem => backend
+                    .coordinate_system(
+                        origin_vec,
+                        DVec3::X,  // X direction
+                        DVec3::Y,  // Y direction
+                        DVec3::Z,  // Z direction
+                        100.0
+                    )
+                    .map(Some)
+                    .map_err(|e| e.to_string()),
+                ConstructionKind::Curve => Ok(None), // Curves need special handling
+                ConstructionKind::Solid => Ok(None), // Solids handled elsewhere
+            }
+        }
     }
 }
 

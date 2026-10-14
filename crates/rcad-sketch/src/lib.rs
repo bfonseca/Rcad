@@ -38,6 +38,8 @@ pub struct Sketch {
     pub constrained_constraints: Vec<ConstrainedConstraint>,
     /// Reference geometry projected onto sketch plane (edges, vertices from 3D model)
     pub reference_geometry: Vec<ReferenceGeometry>,
+    /// When true, sketch is waiting for user to select a plane in the viewport
+    pub in_placement_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +88,7 @@ impl Sketch {
             constraints: Vec::new(),
             constrained_constraints: Vec::new(),
             reference_geometry: Vec::new(),
+            in_placement_mode: false,
         }
     }
 

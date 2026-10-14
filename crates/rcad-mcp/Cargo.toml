@@ -1,0 +1,28 @@
+[package]
+name = "rcad-mcp"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+authors = { workspace = true }
+
+[[bin]]
+name = "rcad-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rcad-geom = { workspace = true }
+rcad-doc = { workspace = true }
+rcad-param = { workspace = true }
+rcad-sketch = { workspace = true }
+rcad-features = { workspace = true }
+rcad-skeleton = { workspace = true }
+rcad-assembly = { workspace = true }
+rcad-table = { workspace = true }
+mcp_rs = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+clap = { version = "4", features = ["derive"] }

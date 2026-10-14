@@ -5,6 +5,7 @@ mod camera;
 mod shortcuts;
 mod undo;
 mod viewport;
+mod ui;
 
 use app::RcadApp;
 use tracing_subscriber::EnvFilter;

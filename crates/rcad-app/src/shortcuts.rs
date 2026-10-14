@@ -249,8 +249,9 @@ pub fn shortcuts_list() -> Vec<(&'static str, &'static str)> {
         ("7", "Isometric view"),
         ("Home", "Reset view"),
         ("Middle Mouse + Drag", "Orbit"),
-        ("Shift + Middle Mouse + Drag", "Pan"),
+        ("Right Mouse + Drag", "Pan"),
         ("Scroll Wheel", "Zoom"),
+        ("Right Click", "Context Menu"),
         ("", ""),
         // File Operations
         ("File Operations", ""),

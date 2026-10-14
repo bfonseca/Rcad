@@ -38,3 +38,49 @@ default_path = "tables"
 default_format = "xlsx"
 # Cache de tabelas em memória (boolean)
 cache_in_memory = true
+
+# Configuração de inicialização e projetos recentes
+[startup]
+# Se verdadeiro, auto-abre o último projeto na inicialização
+auto_open_last = true
+# Caminho para o ficheiro de projetos recentes (usando diretório de config da plataforma)
+# Linux: ~/.config/rcad/recent.json, macOS: ~/Library/Application Support/rcad/recent.json, Windows: %APPDATA%\rcad\recent.json
+recent_projects_file = ""  # vazio = padrão da plataforma
+# Número máximo de projetos recentes a manter
+max_recent_projects = 10
+
+# Configuração de trail log (auditoria/debug)
+[trail_log]
+# Ativar trail log
+enabled = true
+# Formato: "jsonl" (JSON Lines) ou "text"
+format = "jsonl"
+# Nível de detalhe: "full" (tudo), "replay" (apenas ações replicáveis), "errors" (apenas erros)
+level = "full"
+# Rotação: tamanho máximo em MB antes de rotacionar
+max_size_mb = 10
+# Manter quantos ficheiros rotacionados
+max_files = 5
+
+# Configuração de extensões de ficheiro
+[file_extensions]
+project = ".rcad"
+part = ".rcadprt"
+skeleton = ".rcadskl"
+assembly = ".rcadasm"
+trail = ".rcadlog"
+# Registrar associações MIME/OS na primeira execução (requer permissões)
+register_on_first_run = true
+
+# Configuração do MCP Server (integração IA)
+[mcp_server]
+# Ativar servidor MCP
+enabled = true
+# Porta para transporte TCP (0 = desabilitado, usar apenas stdio)
+tcp_port = 0
+# Host para TCP (apenas se tcp_port > 0)
+tcp_host = "127.0.0.1"
+# Permitir operações de escrita (create/modify) via MCP
+allow_write = true
+# Timeout de requests em segundos
+request_timeout_secs = 30

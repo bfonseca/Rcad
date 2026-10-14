@@ -16,7 +16,9 @@ members = [
     "crates/rcad-collision",
     "crates/rcad-animation",
     "crates/rcad-cae",
+    "crates/rcad-mcp",
     "crates/rcad-app",
+    "examples",
 ]
 default-members = ["crates/rcad-app"]
 
@@ -38,11 +40,13 @@ rcad-sketch = { path = "crates/rcad-sketch" }
 rcad-features = { path = "crates/rcad-features" }
 rcad-skeleton = { path = "crates/rcad-skeleton" }
 rcad-underlay = { path = "crates/rcad-underlay" }
+rcad-table = { path = "crates/rcad-table" }
 rcad-assembly = { path = "crates/rcad-assembly" }
 rcad-mechanism = { path = "crates/rcad-mechanism" }
 rcad-collision = { path = "crates/rcad-collision" }
 rcad-animation = { path = "crates/rcad-animation" }
 rcad-cae = { path = "crates/rcad-cae" }
+rcad-mcp = { path = "crates/rcad-mcp" }
 
 glam = "0.30"
 serde = { version = "1", features = ["derive"] }
@@ -53,10 +57,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 eframe = { version = "0.32", default-features = true, features = ["default_fonts", "wgpu"] }
 egui = "0.32"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-rcad-table = { path = "crates/rcad-table" }
 rapier3d = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+mcp_rs = "0.1"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
 
 [profile.release]
 lto = "thin"

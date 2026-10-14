@@ -10,18 +10,30 @@ todos:
       status: completed
     - id: fase-b-parametric-skeleton
       content: "Fase B: sketch+constraints, features solidas/superficies, feature tree, skeletons"
-      status: in progress
+      status: completed
   - id: fase-c-underlay
     content: "Fase C: import imagem com escala, underlay no plano de sketch"
-    status: pending
+    status: completed
   - id: fase-d-assembly
     content: "Fase D: assemblagens com mates basicos via rust_slvs"
     status: pending
   - id: fase-e-poc-publico
     content: "Fase E: undo/redo, exemplos, README/licencas, labels de contribuicao no repo rcad"
-    status: pending
+    status: in progress
   - id: roadmap-pos-mvp
     content: Reservar APIs/crates para mechanism, collision, animation, CAE (pos-6-meses)
+    status: pending
+  - id: ui-vertical-toolbar
+    content: "UI: barra vertical dockable (icones/texto) + arvore historico overlay com blur wgpu"
+    status: pending
+  - id: rcad-toml-integration
+    content: "Integracao rcad.toml no rcad-app (parser tolerancias, cores RGB, tabelas externas)"
+    status: pending
+  - id: surface-color-rendering
+    content: "Aplicar mapeamento de cores RGB por tipo de superficie no viewport"
+    status: pending
+  - id: rcad-table-integration
+    content: "Conectar rcad-table a features/partes para parametrizacao por CSV/Excel"
     status: pending
 isProject: false
 
@@ -63,7 +75,8 @@ flowchart TB
   end
   subgraph core [Núcleo]
     rcad_doc[rcad-doc]
-     rcad_table[rcad-table]
+    rcad_param[rcad-param]
+    rcad_table[rcad-table]
     rcad_sketch[rcad-sketch]
     rcad_feat[rcad-features]
     rcad_skel[rcad-skeleton]
@@ -74,6 +87,9 @@ flowchart TB
     occt_backend[rcad-occt]
     truck_backend[rcad-truck optional]
   end
+  subgraph integration [Integração / IA]
+    rcad_mcp[rcad-mcp MCP Server]
+  end
   subgraph later [Pós-MVP]
     rcad_asm[rcad-assembly]
     rcad_mech[rcad-mechanism]
@@ -82,13 +98,22 @@ flowchart TB
     rcad_cae[rcad-cae]
   end
   rcad_app --> rcad_doc
+  rcad_app --> rcad_underlay
+  rcad_app --> rcad_sketch
+  rcad_mcp --> rcad_doc
+  rcad_mcp --> rcad_param
+  rcad_mcp --> rcad_sketch
+  rcad_mcp --> rcad_feat
+  rcad_mcp --> rcad_asm
   rcad_doc --> rcad_param
   rcad_param --> rcad_table
-    rcad_table --> rcad_feat
+  rcad_param --> rcad_feat
+  rcad_param --> rcad_skel
+  rcad_table --> rcad_feat
   rcad_feat --> rcad_geom
   rcad_sketch --> rcad_geom
   rcad_skel --> rcad_doc
-  rcad_underlay --> rcad_app
+  rcad_underlay --> rcad_sketch
   rcad_geom --> occt_backend
   rcad_geom --> truck_backend
   rcad_asm --> rcad_doc
@@ -113,8 +138,10 @@ flowchart TB
 | CAE (fase 6)               | CalculiX / OpenFOAM como **processos externos** + adaptadores de mesh/BC                                                                     | Não reimplementar solvers FEA/CFD                               |
 | Formato nativo             | Documento versionado (MessagePack ou CBOR + schema) + export STEP/STL via OCCT                                                               | Interop industrial desde cedo                                   |
 | Imagens underlay           | `image` + textura wgpu; calibração de escala no UI                                                                                           | Prioridade 1.1                                                  |
-| Parsing de Tabelas | `calamine` | Para ler ficheiros `.xlsx` e `.csv` |
-| Shaders wgpu | Shaders personalizados | Para efeitos de *blur* na árvore de histórico |
+| Parsing de Tabelas         | `calamine`                                                                                                                                   | Para ler ficheiros `.xlsx` e `.csv`                             |
+| Shaders wgpu               | Shaders personalizados                                                                                                                       | Para efeitos de *blur* na árvore de histórico                   |
+| Extensões de ficheiro      | `.rcad` (projeto), `.rcadprt` (peça), `.rcadskl` (skeleton), `.rcadasm` (assemblagem), `.rcadlog` (trail)                                 | Convenção curta, consistente, registável no OS                  |
+| MCP Server (IA)            | `mcp-rs` (crate `rcad-mcp`, binário separado)                                                                                                | Resources/tools/prompts para modelação; transporte stdio/TCP    |
 
 
 Trait `GeometryBackend` em `rcad-geom`: criar sólido/superfície, booleanos, extrude/revolve/loft/sweep, fillet/chamfer, sew → solid, thicken, tessellate, STEP I/O. O app só fala com o trait; o backend OCCT é o default.
@@ -185,41 +212,58 @@ Especificação da ligação entre a feature da peça e tabelas externas (`.xlsx
 
 ## MVP a 6 meses (utilizável)
 
-### Fase A — Fundação (semanas 1–4)
+### Fase A — Fundação (semanas 1–4) ✅ **CONCLUÍDA**
 
 - Scaffold workspace no repo `rcad` + CI (build Linux, clippy, testes básicos).
 - `rcad-app`: janela egui, viewport wgpu (orbit/pan/zoom), grelha, seleção por picking de mesh.
-- `rcad-doc` + serialização mínima (abrir/guardar projecto).
+- `rcad-doc` + serialização mínima (abrir/guardar projecto, MessagePack/CBOR).
 - Integração OCCT: primitiva → tessellate → mostrar no viewport; export STL/STEP.
-- **Novidades:** desenvolvimento do layout 16:9 com barra vertical dockable; implementação da árvore transparente adaptativa com shader de *blur*; parser inicial do `rcad.toml` (tolerâncias globais e cores RGB por cliente).
+- **Pendente (movido para tarefas UI):** layout 16:9 com barra vertical dockable; árvore transparente adaptativa com shader de *blur*; parser inicial do `rcad.toml` (tolerâncias globais e cores RGB por cliente).
 
-### Fase B — Modelação paramétrica + skeletons (semanas 5–14) — prioridade 1
+### Fase B — Modelação paramétrica + skeletons (semanas 5–14) — prioridade 1 ✅ **CONCLUÍDA**
 
-- Sketch 2D: linhas/arcos/círculos, cotas e constraints via `rust_slvs`, planos de sketch.
+- Sketch 2D: linhas/arcos/círculos, cotas e constraints via solver iterativo + `rust_slvs` placeholder, planos de sketch.
 - Features sólidas mínimas: Extrude, Revolve, Boolean (union/cut/intersect), Fillet/Chamfer básicos, planos/eixos/pontos de construção.
 - Multi-body numa peça; tree UI (reordenar / suprimir / editar parâmetros → rebuild).
-- Superfícies básicas (ex.: extrude surface, boundary/loft simples se OCCT permitir na API exposta) + **Sew** e **Thicken** (superfície → sólido).
-- **Skeletons:** criar skeleton part, publicar geometria de referência, criar peça filha que consome essas referências.
-- **Novidades:** inclusão da crate `rcad-table` para suporte a tabelas Excel; implementação do *Intent Manager* no Sketcher (cotas fracas vs. fortes).
+- Superfícies básicas: extrude surface, loft, boundary + **Sew** e **Thicken** (superfície → sólido).
+- **Skeletons:** criar skeleton part, publicar geometria de referência (Publish Geometry), criar peça filha que consome referências (Copy Geometry), gestão de referências externas.
+- **Intent Manager:** cotas fracas/fortes, restrições virtuais temporárias, análise de DOF, status de constraint.
+- **Pendente:** integração completa `rcad-table` com features; `rust_slvs` SolveSpace backend completo.
 
-### Fase C — Engenharia reversa por imagem (semanas 10–16, em paralelo com B) — prioridade 1.1
+### Fase C — Engenharia reversa por imagem (semanas 10–16, em paralelo com B) — prioridade 1.1 ✅ **CONCLUÍDA**
 
 - Import PNG/JPEG/SVG rasterizado como underlay num plano.
 - Definição de escala (dois pontos + distância real).
-- Opacidade, bloqueio, alinhamento ao sketch activo; tracing manual sobre a imagem (não OCR/auto-mesh 3D nesta fase).
+- Opacidade, bloqueio, alinhamento ao sketch activo; tracing manual sobre a imagem.
+- Rotação, ordem de exibição, snap a features, conversão world↔pixel.
 
-### Fase D — Assemblagens mínimas (semanas 15–22) — prioridade 2
+### Fase D — Assemblagens mínimas (semanas 15–22) — prioridade 2 🔄 **EM ANDAMENTO**
 
-- Inserir instâncias de peças; hierarquia; mates básicos (coincident / concentric / distance) com solver.
+- Inserir instâncias de peças; hierarquia; mates básicos (coincident / concentric / distance) com solver `rust_slvs`.
 - Exploded view simples opcional; não exigir skeletons de movimento ainda.
+- **Estado:** crate `rcad-assembly` existe mas é placeholder; precisa implementação.
 
-### Fase E — Fecho “usável” (semanas 20–26)
+### Fase E — Fecho "usável" (semanas 20–26) 🔄 **EM ANDAMENTO**
 
-- Estabilidade de rebuild, undo/redo, atalhos, documentação de contribuição em [bfonseca/Rcad](https://github.com/bfonseca/Rcad).
-- POC anunciável: README, licenças, roadmap, issues etiquetadas `good first issue` por crate.
-- Smoke tests e 2–3 modelos de exemplo (peça + skeleton + underlay + assembly simples).
+- Estabilidade de rebuild, undo/redo ✅, atalhos ✅, documentação de contribuição.
+- POC anunciável: README ✅, licenças ✅, roadmap ✅, issues etiquetadas `good first issue` por crate ⏳.
+- Smoke tests e 2–3 modelos de exemplo (peça + skeleton + underlay + assembly simples) ⏳.
 
 **Critério de sucesso aos 6 meses:** modelar uma peça paramétrica multi-feature, usar skeleton + underlay com escala, montar 2–3 peças com mates básicos, gravar/reabrir e exportar STEP/STL.
+
+### Tarefas Transversais (UI/Integração) — **PENDENTES**
+
+- **UI-1:** Barra de ferramentas vertical dockable (ícones/texto) + árvore de histórico overlay com blur wgpu.
+- **UI-2:** Parser `rcad.toml` no `rcad-app` (tolerâncias, cores RGB por cliente, tabelas externas).
+- **UI-3:** Aplicar mapeamento de cores RGB por tipo de superfície no viewport.
+- **UI-4:** Conectar `rcad-table` a features/partes para parametrização por CSV/Excel.
+
+### Novas Funcionalidades de Projeto e Integração — **PENDENTES**
+
+- **PRJ-1:** Inicialização do projeto — se não houver projeto, pedir para criar; gerenciar "recent projects" em `~/.config/rcad/recent.json` (max 10); auto-abrir último projeto na inicialização.
+- **PRJ-2:** Trail log (auditoria/debug) — JSON Lines (`.rcadlog`) no diretório do projeto com: timestamp, action, params, result, duration. Futuro: modo "replay" para replicar sessão.
+- **PRJ-3:** Extensões de ficheiro padronizadas — `.rcad` (projeto), `.rcadprt` (peça), `.rcadskl` (skeleton), `.rcadasm` (assemblagem), `.rcadlog` (trail). Registo de associação no OS (Linux `.desktop`/MIME, macOS UTI, Windows registry).
+- **PRJ-4:** MCP Server (`rcad-mcp` crate, binário separado) — usar `mcp-rs`; expor resources (project/parts/sketches), tools (create_part, add_sketch, extrude, revolve, boolean, create_assembly, add_mate, export_step/stl), prompts (workflows comuns); transporte stdio/TCP para uso headless/CI.
 
 ---
 

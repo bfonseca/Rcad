@@ -1,0 +1,285 @@
+# Detailed Task Breakdown - Creo Workflow Implementation for rcad
+
+Based on the approved plan in `plans/creo-workflow-analysis.md`, this document breaks down each phase into actionable coding tasks.
+
+---
+
+## Phase 1: Core UI Architecture - Vertical Toolbar + Adaptive History Overlay 🔴
+
+### 1.1 Remove Top Menu Bar & Create Vertical Toolbar
+- [ ] **1.1.1** Create `crates/rcad-app/src/ui/toolbar.rs` with `VerticalToolbar`, `ToolbarTab`, `ToolbarButton` structs
+- [ ] **1.1.2** Define `ToolbarAction` enum for all toolbar actions (mapping to existing app methods)
+- [ ] **1.1.3** Implement 6 tabs: Model, Sketch, Assembly, Analysis, View, Tools with Creo-parity buttons
+- [ ] **1.1.4** Add collapse/expand toggle (icon-only vs icon+text mode)
+- [ ] **1.1.5** Add dockable position state (left/right) with persistence
+- [ ] **1.1.6** Remove `egui::TopBottomPanel::top("menu_bar")` from `app.rs`
+- [ ] **1.1.7** Move File/Help actions to hamburger menu (☰) in toolbar header
+
+### 1.2 Adaptive History Overlay (Right Side)
+- [ ] **1.2.1** Create `crates/rcad-app/src/ui/history_overlay.rs` with `HistoryOverlay` struct
+- [ ] **1.2.2** Implement hover detection → blur + darken effect (wgpu shader)
+- [ ] **1.2.3** Render feature tree with Parent/Child indentation, visual indicators
+- [ ] **1.2.4** Add Insert Here (▶) and Rollback (⏪) markers
+- [ ] **1.2.5** Implement right-click context menu (Edit Definition, Suppress, Delete, Rollback, etc.)
+- [ ] **1.2.6** Add drag-reorder with validation (no circular refs)
+- [ ] **1.2.7** Implement virtual scrolling for large trees
+- [ ] **1.2.8** Persist expanded/collapsed state across sessions
+
+### 1.3 Viewport Integration
+- [ ] **1.3.1** Update `app.rs` layout: CentralPanel for viewport, SidePanel for toolbar, overlay for history
+- [ ] **1.3.2** Keep status bar at bottom
+- [ ] **1.3.3** Add mini-toolbar on selection (context-sensitive)
+- [ ] **1.3.4** Implement blur shader for history overlay (Gaussian blur when hovered)
+
+### 1.4 Keyboard Shortcuts Integration
+- [ ] **1.4.1** Map toolbar actions to existing shortcut system
+- [ ] **1.4.2** Update F1 shortcuts dialog with new toolbar actions
+- [ ] **1.4.3** Add toolbar-specific shortcuts (Tab switching, collapse, etc.)
+
+---
+
+## Phase 2: rcad.toml Integration in rcad-app 🔴
+
+### 2.1 Config Module
+- [ ] **2.1.1** Create `crates/rcad-app/src/config.rs` with all structs from plan
+- [ ] **2.1.2** Implement `AppConfig::load()` and `save()` with TOML
+- [ ] **2.1.3** Add `ConfigError` type with proper error handling
+- [ ] **2.1.4** Implement `Default` for all config structs matching rcad.toml
+- [ ] **2.1.5** Add helper methods: `get_surface_color()`, `get_global_param()`
+
+### 2.2 RcadApp Integration
+- [ ] **2.2.1** Add `config: AppConfig`, `recent_projects: Vec<RecentProject>`, `trail_logger: Option<TrailLogger>` to `RcadApp`
+- [ ] **2.2.2** Load config in `RcadApp::new()`, initialize trail logger
+- [ ] **2.2.3** Implement recent projects loading/saving (platform config dir)
+- [ ] **2.2.4** Auto-open last project on startup if configured
+- [ ] **2.2.5** Add config watcher (notify crate) for hot-reload
+
+### 2.3 Runtime Application
+- [ ] **2.3.1** Pass tolerances to sketch solver (`rcad-sketch`)
+- [ ] **2.3.2** Pass tolerances to feature rebuild (`rcad-param`)
+- [ ] **2.3.3** Apply surface colors in viewport rendering (`Body.surface_type` → config)
+- [ ] **2.3.4** Load external tables on startup via `rcad-table`
+- [ ] **2.3.5** Spawn MCP server process if enabled
+
+### 2.4 Config UI (Tools → Options)
+- [ ] **2.4.1** Create Options dialog with tabs: General, Tolerances, Colors, Tables, Startup, Logging, Extensions, MCP
+- [ ] **2.4.2** Live preview of color changes in viewport
+- [ ] **2.4.3** "Reset to Defaults" button
+- [ ] **2.4.4** Auto-save on dialog close
+
+---
+
+## Phase 3: Feature Tree / Model Tree Enhancements 🔴
+
+### 3.1 Data Model Extensions (rcad-doc)
+- [ ] **3.1.1** Add `FeatureReferences`, `Reference`, `ReferenceType` to `rcad-doc/src/lib.rs`
+- [ ] **3.1.2** Add `FeatureParameters`, `ParameterValue` to `Feature`
+- [ ] **3.1.3** Add `parent_features`, `child_features`, `insert_here_marker`, `rollback_marker`, timestamps to `Feature`
+- [ ] **3.1.4** Add `insert_here_index`, `rollback_index`, `layers`, `parameters`, `relations`, `family_table`, `regeneration_mode` to `Part`
+- [ ] **3.1.5** Add `Layer`, `LayerItem`, `Parameter`, `Relation`, `FamilyTable`, `FamilyColumn`, `FamilyRow`, `ColumnType`, `RegenerationMode`
+- [ ] **3.1.6** Add `#[serde(default)]` for backward compatibility
+- [ ] **3.1.7** Add version migration in `Project::load()`
+
+### 3.2 Feature Tree Operations (rcad-features)
+- [ ] **3.2.1** Enhance `move_feature()` with circular ref validation
+- [ ] **3.2.2** Add `set_insert_here(part, index)` and `set_rollback(part, index)`
+- [ ] **3.2.3** Add `edit_feature_definition(part, feature_id, new_params)` 
+- [ ] **3.2.4** Add `edit_feature_references(part, feature_id, new_refs)`
+- [ ] **3.2.5** Add `get_parents(part, feature_id)` and `get_children(part, feature_id)`
+- [ ] **3.2.6** Add `delete_feature_with_deps(part, feature_id, cascade: bool)`
+- [ ] **3.2.7** Add `copy_feature(part, feature_id)` and `paste_feature(part, feature_id, insert_index)`
+- [ ] **3.2.8** Auto-compute `child_features` from `parent_features` on rebuild
+
+### 3.3 History Overlay Tree Rendering
+- [ ] **3.3.1** Render tree with indentation based on parent/child depth
+- [ ] **3.3.2** Visual indicators: ✅ Active, 🚫 Suppressed, ▶ Insert Here, ⏪ Rollback, ❌ Error, ⚠️ Warning, 🔗 External Ref
+- [ ] **3.3.3** Right-click context menu with all actions
+- [ ] **3.3.4** Click → select feature (highlight in viewport)
+- [ ] **3.3.5** Double-click → Edit Definition dashboard
+- [ ] **3.3.6** Drag → reorder with validation feedback
+- [ ] **3.3.7** Toggle parent/child highlighting
+
+---
+
+## Phase 4: Intent Manager & Sketch Enhancements 🔴
+
+### 4.1 Weak/Strong Dimension UX (rcad-sketch)
+- [ ] **4.1.1** Enhance `ConstrainedConstraint` with `auto_generated`, `promoted_from`, `dimension_text_position`, `dimension_orientation`
+- [ ] **4.1.2** Add `DimensionOrientation` enum (Horizontal, Vertical, Parallel, Radial, Diameter)
+- [ ] **4.1.3** Implement `add_dimension_with_intent()` with auto-promotion logic
+- [ ] **4.1.4** Implement `promote_weak_to_strong()` 
+- [ ] **4.1.5** Implement `analyze_dof_detailed()` returning `DOFAnalysis`
+- [ ] **4.1.6** Implement `find_unconstrained_entities()` for UI highlighting
+- [ ] **4.1.7** Visual distinction in viewport: dashed/gray/italic (weak) vs solid/black/normal (strong)
+- [ ] **4.1.8** Dimension context menu: Toggle Driving/Driven, Promote, Delete, Edit, Flip Arrows
+- [ ] **4.1.9** Drag dimension text → update `dimension_text_position`
+- [ ] **4.1.10** Double-click dimension → in-place value edit (driving only)
+
+### 4.2 Reference Geometry Improvements
+- [ ] **4.2.1** Add `ProjectionMode` enum (OneSide, BothSides, AlongVector)
+- [ ] **4.2.2** Enhance `ReferenceGeometry` with `projection_mode`, `source_feature`, `source_body`, `is_associative`, `status`
+- [ ] **4.2.3** Implement `project_references(entities, mode, source_feature)`
+- [ ] **4.2.4** Implement `update_references(project)` for associative updates
+- [ ] **4.2.4** Create Reference Geometry Panel in Sketch mode
+- [ ] **4.2.5** Auto-projection on sketch creation (pre-selected entities)
+
+### 4.3 Sketch Plane Selection Workflow
+- [ ] **4.3.1** Create `SketchCreator` state machine (SelectPlane → SelectOrientation → Confirm)
+- [ ] **4.3.2** Implement planar face highlighting on hover
+- [ ] **4.3.3** Implement datum plane selection
+- [ ] **4.3.4** Implement orientation edge/axis selection with triad preview
+- [ ] **4.3.5** Show sketch coordinate system triad (X=red/H, Y=green/V, Z=blue)
+- [ ] **4.3.6** Click triad axes to flip orientation
+
+### 4.4 Additional Sketch Tools
+- [ ] **4.4.1** Line Chain tool (continuous click-click-click, Esc to end)
+- [ ] **4.4.2** Tangent Arc tool
+- [ ] **4.4.3** 3-Point Arc tool
+- [ ] **4.4.4** Conic tool (rho parameter)
+- [ ] **4.4.5** Text tool (TrueType as sketch geometry)
+- [ ] **4.4.6** Import DXF/SVG → sketch entities
+- [ ] **4.4.7** Sketch Region auto-detection
+- [ ] **4.4.8** Show DOF arrows toggle
+- [ ] **4.4.9** Highlight conflicts (red on over-constrained)
+- [ ] **4.4.10** Constraint Table (spreadsheet view, editable)
+- [ ] **4.4.11** Drag Test (Shift+drag to test DOF)
+
+---
+
+## Phase 5: Skeleton Workflow Enhancements 🟠
+
+### 5.1 Publish Geometry
+- [ ] **5.1.1** Enhance `PublishedRef` with `description`, `feature_id`, `body_id`, `selection_query`, `publish_type`, `include_children`
+- [ ] **5.1.2** Add `PublishType` enum (Geometry, Shrinkwrap, CopyGeometry, Interface)
+- [ ] **5.1.3** Implement `Part::get_publishable_items()` returning `PublishableItem`
+- [ ] **5.1.4** Create Publish Geometry dialog (Model tab)
+- [ ] **5.1.5** Implement `publish_geometry_dialog(part, selections)`
+
+### 5.2 Copy Geometry
+- [ ] **5.2.1** Add `CopyGeometryOptions` struct
+- [ ] **5.2.2** Create Copy Geometry dialog (Model tab)
+- [ ] **5.2.3** Implement `copy_geometry(project, child_id, skeleton_id, selections, options)`
+- [ ] **5.2.4** Handle "Copy as Reference" (associative) vs "Independent Copy"
+- [ ] **5.2.5** Implement `resolve_published_geometry()` and `create_static_construction_feature()`
+
+### 5.3 External Reference Manager
+- [ ] **5.3.1** Add `status: ExternalRefStatus` to `PublishedRef` (rcad-doc)
+- [ ] **5.3.2** Create External Reference Manager panel (Tools tab)
+- [ ] **5.3.3** Implement `update_external_references(project, part_id)`
+- [ ] **5.3.4** Implement `replace_external_reference()`
+- [ ] **5.3.5** Implement `break_external_reference()`
+- [ ] **5.3.6** Status icons: ✅ UpToDate, ⚠️ OutOfDate, ❌ Broken
+- [ ] **5.3.7** Actions: Update (🔄), Replace (🔗), Break (✂)
+
+### 5.4 Skeleton-Specific Enhancements
+- [ ] **5.4.1** Skeleton Creation Wizard dialog (Model → New Skeleton)
+- [ ] **5.4.2** Template options: Standard, Sheet Metal, Mechanism, etc.
+- [ ] **5.4.3** Auto-publish options
+- [ ] **5.4.4** Skeleton editing in assembly context
+- [ ] **5.4.5** "Update External Refs" button in assembly toolbar
+- [ ] **5.4.6** Visual indicators in assembly tree for out-of-date parts
+
+---
+
+## Phase 6: Surface Color Rendering 🟠
+
+- [ ] **6.1** Add `surface_type: Option<String>` to `Body` struct (rcad-doc)
+- [ ] **6.2** Add "Surface Type" dropdown in feature creation dashboards
+- [ ] **6.3** Implement `apply_surface_colors(mesh, bodies, config)` in viewport rendering
+- [ ] **6.4** Map body triangles to surface colors in tessellation
+- [ ] **6.5** Default types: threads, fit_surfaces, sealing_zones, custom
+
+---
+
+## Phase 7: External Tables Integration 🟠
+
+- [ ] **7.1** Load tables on project open from `external_tables.default_path`
+- [ ] **7.2** Cache tables per `cache_in_memory` setting
+- [ ] **7.3** Watch table files for changes
+- [ ] **7.4** Add "Link Parameter to Table" in Edit Definition dashboard
+- [ ] **7.5** Implement `TableDrivenParameter` struct
+- [ ] **7.6** Map table columns → feature parameters at rebuild time
+
+---
+
+## Phase 8: Trail Logging 🟠
+
+- [ ] **8.1** Create `TrailLogger` struct with JSONL output
+- [ ] **8.2** Implement log rotation (10MB max, 5 files)
+- [ ] **8.3** Log format: timestamp, action, params, result, duration_ms
+- [ ] **8.4** Integration points:
+  - [ ] Feature creation/edit/delete
+  - [ ] Sketch operations
+  - [ ] File operations (open/save/export)
+  - [ ] Rebuild operations
+  - [ ] Assembly mate operations
+- [ ] **8.5** Add "Replay" mode for replicating sessions
+
+---
+
+## Phase 9: Project Initialization & File Associations 🟡
+
+- [ ] **9.1** First-run dialog: "Create New Project" if no recent projects
+- [ ] **9.2** Auto-save to recent.json
+- [ ] **9.3** Linux: `.desktop` file + `xdg-mime` registration
+- [ ] **9.4** macOS: `Info.plist` + `LSHandlers`
+- [ ] **9.5** Windows: Registry keys for `.rcad`, `.rcadprt`, `.rcadskl`, `.rcadasm`, `.rcadlog`
+
+---
+
+## Phase 10: MCP Server Implementation 🟡
+
+- [ ] **10.1** Create `rcad-mcp` binary with `mcp-rs`
+- [ ] **10.2** Resources: `rcad://project/{id}`, `rcad://part/{id}`, `rcad://sketch/{id}`, `rcad://assembly/{id}`
+- [ ] **10.3** Tools: `create_part`, `add_sketch`, `add_extrude`, `add_revolve`, `add_boolean`, `create_assembly`, `add_mate`, `export_step`, `export_stl`, `get_project_state`, `rebuild_part`
+- [ ] **10.4** Prompts: `new_part_from_sketch`, `create_assembly_from_parts`, `create_skeleton_driven_part`, `reverse_engineer_from_image`
+- [ ] **10.5** Transport: stdio (default) + TCP (optional, port from config)
+
+---
+
+## Implementation Order & Dependencies
+
+```
+Phase 1 (UI) ──────────────────┐
+                               ├──→ Phase 3 (Feature Tree needs UI)
+Phase 2 (Config) ──────────────┤
+                               ├──→ Phase 6 (Colors needs Config)
+Phase 3 (Feature Tree) ────────┘
+
+Phase 4 (Sketch) ──────────────┐ (can parallel with Phase 1-3)
+                               ├──→ Phase 5 (Skeleton needs Sketch refs)
+
+Phase 5 (Skeleton) ────────────┘
+
+Phases 6-10: Can be done in parallel after core phases stable
+```
+
+---
+
+## Estimated Task Count
+
+| Phase | Tasks | Est. Days |
+|-------|-------|-----------|
+| 1 | 15 | 10-15 |
+| 2 | 12 | 8-12 |
+| 3 | 15 | 10-15 |
+| 4 | 20 | 15-20 |
+| 5 | 16 | 10-15 |
+| 6 | 5 | 3-5 |
+| 7 | 6 | 5-8 |
+| 8 | 6 | 5-8 |
+| 9 | 5 | 3-5 |
+| 10 | 5 | 5-10 |
+| **Total** | **105** | **74-113** |
+
+---
+
+## Next Steps
+
+1. **Switch to Code mode** to begin Phase 1 implementation
+2. Start with **1.1.1** - Create toolbar module
+3. Set up GitHub issues with `good first issue` labels for each task
+4. Weekly sync on progress
+
+*Document Version: 1.0*
+*Date: 2026-10-12*

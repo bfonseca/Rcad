@@ -13,3 +13,4 @@ rmp-serde.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 glam.workspace = true
+chrono = { version = "0.4", features = ["serde"] }

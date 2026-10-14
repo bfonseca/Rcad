@@ -112,4 +112,10 @@ pub trait GeometryBackend: Send {
     fn read_step(&mut self, path: &std::path::Path) -> GeomResult<Vec<ShapeId>>;
 
     fn drop_shape(&mut self, shape: ShapeId);
+
+    // Datum geometry creation
+    fn plane(&mut self, origin: DVec3, normal: DVec3, size: f64) -> GeomResult<ShapeId>;
+    fn axis(&mut self, origin: DVec3, direction: DVec3, length: f64) -> GeomResult<ShapeId>;
+    fn point(&mut self, position: DVec3, size: f64) -> GeomResult<ShapeId>;
+    fn coordinate_system(&mut self, origin: DVec3, x_dir: DVec3, y_dir: DVec3, z_dir: DVec3, size: f64) -> GeomResult<ShapeId>;
 }

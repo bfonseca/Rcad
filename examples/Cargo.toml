@@ -1,0 +1,32 @@
+[package]
+name = "rcad-examples"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/bfonseca/Rcad"
+
+[dependencies]
+rcad-geom = { path = "../crates/rcad-geom" }
+rcad-occt = { path = "../crates/rcad-occt" }
+rcad-doc = { path = "../crates/rcad-doc" }
+rcad-param = { path = "../crates/rcad-param" }
+rcad-sketch = { path = "../crates/rcad-sketch" }
+rcad-features = { path = "../crates/rcad-features" }
+rcad-assembly = { path = "../crates/rcad-assembly" }
+rcad-skeleton = { path = "../crates/rcad-skeleton" }
+glam = "0.30"
+uuid = { version = "1", features = ["v4", "serde"] }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[[example]]
+name = "box_demo"
+path = "models/box_demo.rs"
+
+[[example]]
+name = "sketch_demo"
+path = "models/sketch_demo.rs"
+
+[[example]]
+name = "assembly_demo"
+path = "models/assembly_demo.rs"

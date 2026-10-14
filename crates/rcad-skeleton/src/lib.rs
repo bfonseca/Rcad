@@ -5,7 +5,7 @@
 //! and consumed by child parts. This implements the Creo-style Publish/Copy Geometry workflow.
 
 use rcad_doc::{
-    ConstructionKind, Feature, FeatureKind, Part, PartKind, Project, PublishedRef,
+    ConstructionKind, ExternalRefStatus, Feature, FeatureKind, Part, PartKind, Project, PublishType, PublishedRef,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -115,6 +115,13 @@ pub fn create_skeleton(project: &mut Project, name: impl Into<String>, options: 
                     id: f.id,
                     name: f.name.clone(),
                     kind,
+                    description: None,
+                    feature_id: f.id,
+                    body_id: None,
+                    selection_query: String::new(),
+                    publish_type: PublishType::Geometry,
+                    include_children: false,
+                    status: ExternalRefStatus::UpToDate,
                 });
             }
         }
@@ -157,6 +164,13 @@ pub fn create_part_from_skeleton(
                 id: ref_feature.id,
                 name: format!("REF_{}", published.name),
                 kind: published.kind,
+                description: None,
+                feature_id: published.feature_id,
+                body_id: published.body_id,
+                selection_query: published.selection_query.clone(),
+                publish_type: published.publish_type,
+                include_children: false,
+                status: ExternalRefStatus::UpToDate,
             });
             part.features.push(ref_feature);
         }
@@ -200,6 +214,7 @@ impl CopyGeometryOptions {
            ConstructionKind::Point => self.copy_points,
            ConstructionKind::Curve => self.copy_curves,
            ConstructionKind::Solid => self.copy_solids,
+           ConstructionKind::CoordSystem => self.copy_planes, // Treat coordinate system as plane-like
        }
    }
 }
@@ -222,6 +237,13 @@ pub fn publish_feature(part: &mut Part, feature_id: Uuid) -> bool {
         id: feature_id,
         name: feature.name.clone(),
         kind,
+        description: None,
+        feature_id,
+        body_id: None,
+        selection_query: String::new(),
+        publish_type: crate::PublishType::Geometry,
+        include_children: false,
+        status: crate::ExternalRefStatus::UpToDate,
     });
     true
 }
@@ -262,6 +284,13 @@ pub fn update_skeleton_and_propagate(
                     id: f.id,
                     name: f.name.clone(),
                     kind,
+                    description: None,
+                    feature_id: f.id,
+                    body_id: None,
+                    selection_query: String::new(),
+                    publish_type: PublishType::Geometry,
+                    include_children: false,
+                    status: ExternalRefStatus::UpToDate,
                 });
             }
         }
@@ -296,6 +325,13 @@ pub fn update_skeleton_and_propagate(
                     id: ref_feature.id,
                     name: format!("REF_{}", published.name),
                     kind: published.kind,
+                    description: None,
+                    feature_id: published.feature_id,
+                    body_id: published.body_id,
+                    selection_query: published.selection_query.clone(),
+                    publish_type: published.publish_type,
+                    include_children: false,
+                    status: ExternalRefStatus::UpToDate,
                 });
                 part.features.push(ref_feature);
             }
@@ -306,16 +342,7 @@ pub fn update_skeleton_and_propagate(
     updated_children
 }
 
-/// External reference status for a child part's copied geometry
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExternalRefStatus {
-    /// Reference is up to date with skeleton
-    UpToDate,
-    /// Skeleton has changed, reference needs update
-    OutOfDate,
-    /// Referenced geometry no longer exists in skeleton
-    Broken,
-}
+// ExternalRefStatus is now defined in rcad-doc and imported above
 
 /// Check external reference status for a child part
 pub fn check_external_refs(project: &Project, part_id: Uuid) -> Vec<(Uuid, ExternalRefStatus)> {
