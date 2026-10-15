@@ -39,15 +39,6 @@ impl DatumKind {
         }
     }
 
-    fn icon(self) -> &'static str {
-        match self {
-            DatumKind::CoordSystem => "datum-datum-csys",
-            DatumKind::Point => "datum-datum-point",
-            DatumKind::Axis => "datum-datum-axis",
-            DatumKind::Plane => "datum-datum-plane",
-        }
-    }
-
     /// Does this family contain the given construction kind?
     pub fn matches_construction(self, kind: ConstructionKind) -> bool {
         matches!(
@@ -329,6 +320,7 @@ impl FloatingBar {
     }
 
     /// Screen rect of a bar button as drawn in the last frame (UI tests).
+#[cfg(test)]
     pub fn button_rect(&self, icon: &str) -> Option<egui::Rect> {
         self.button_rects.get(icon).copied()
     }

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 /// Toolbar action types that map to app methods
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)] // file and help variants are driven from the menu bar
 pub enum ToolbarAction {
     // File actions
     NewDocument,
@@ -217,7 +218,6 @@ fn action_to_icon_id(action: &ToolbarAction) -> Option<&'static str> {
         ToolbarAction::HelpAbout => Some("general-info"),
         ToolbarAction::HelpShortcuts => Some("general-help"),
         
-        _ => None,
     }
 }
 
@@ -297,11 +297,6 @@ impl std::fmt::Debug for IconTextures {
 }
 
 impl IconTextures {
-    /// Number of icons currently decoded and uploaded.
-    pub fn loaded(&self) -> usize {
-        self.textures.len()
-    }
-
     /// Decode and cache the texture for `icon_id` in the given theme.
     pub fn get(
         &mut self,
@@ -336,6 +331,7 @@ fn decode_icon(bytes: &[u8]) -> Option<egui::ColorImage> {
 
 /// Toolbar button definition
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // id is used by the tests and future customisation
 pub struct ToolbarButton {
     pub id: String,
     pub icon: &'static str,           // Fallback emoji/text icon
@@ -373,6 +369,7 @@ impl ToolbarButton {
 
 /// Simple toolbar tab definition (without rcad-icons complexity)
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // tab icons are reserved
 pub struct SimpleToolbarTab {
     pub name: String,
     pub icon: &'static str,
@@ -390,15 +387,7 @@ impl SimpleToolbarTab {
         }
     }
     
-    pub fn with_icon_id(mut self, icon_id: impl Into<String>) -> Self {
-        self.icon_id = Some(icon_id.into());
-        self
-    }
     
-    pub fn add_button(mut self, button: ToolbarButton) -> Self {
-        self.buttons.push(button);
-        self
-    }
     
     pub fn add_buttons(mut self, buttons: Vec<ToolbarButton>) -> Self {
         self.buttons.extend(buttons);
@@ -664,22 +653,8 @@ impl VerticalToolbar {
         tabs.into_iter().filter(|tab| tab.name == "Model").collect()
     }
 
-    /// Get the currently active tab
-    pub fn active_tab(&self) -> &SimpleToolbarTab {
-        &self.tabs[self.active_tab]
-    }
     
-    /// Get mutable reference to active tab
-    pub fn active_tab_mut(&mut self) -> &mut SimpleToolbarTab {
-        &mut self.tabs[self.active_tab]
-    }
     
-    /// Set active tab by index
-    pub fn set_active_tab(&mut self, index: usize) {
-        if index < self.tabs.len() {
-            self.active_tab = index;
-        }
-    }
     
     /// Toggle collapsed state
     pub fn toggle_collapsed(&mut self) {
@@ -699,16 +674,6 @@ impl VerticalToolbar {
         };
     }
     
-    /// Get toolbar width based on state
-    pub fn width(&self) -> f32 {
-        if self.collapsed {
-            48.0
-        } else if self.icon_only_mode {
-            64.0
-        } else {
-            280.0
-        }
-    }
     
     /// Detect theme from egui context
     fn detect_theme(&self, ctx: &egui::Context) -> IconTheme {
@@ -824,6 +789,7 @@ impl VerticalToolbar {
     }
     
     /// Screen rect of a toolbar button as drawn in the last frame.
+#[cfg(test)]
     pub fn button_rect(&self, action: &ToolbarAction) -> Option<egui::Rect> {
         self.button_rects.get(action).copied()
     }
