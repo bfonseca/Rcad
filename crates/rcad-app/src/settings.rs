@@ -5,7 +5,7 @@
 //! deliberately trivial: it keeps the app free of a serialisation dependency
 //! and stays readable if something goes wrong.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Everything the user can adjust that should survive a restart.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +18,29 @@ pub struct AppSettings {
     pub show_grid: bool,
     /// Distance between grid lines, in model units.
     pub grid_spacing: f32,
+    /// Project folders, most recent first.
+    pub recent_projects: Vec<String>,
+    /// Folder of the last project opened, restored on start when
+    /// `auto_open_last` is set in its manifest.
+    pub last_project: Option<String>,
+    /// The colour vocabulary of this installation: logical ids such as
+    /// "fit zone" or "metric thread". The RGB values for these ids live in
+    /// each project file, so two projects can colour the same id differently.
+    pub colour_ids: Vec<String>,
+}
+
+/// Lists are stored in the settings file as one `|`-separated line.
+fn encode_list(items: &[String]) -> String {
+    items.join("|")
+}
+
+fn decode_list(value: &str) -> Vec<String> {
+    value
+        .split('|')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 impl Default for AppSettings {
@@ -27,6 +50,13 @@ impl Default for AppSettings {
             history_width: 260.0,
             show_grid: true,
             grid_spacing: 10.0,
+            recent_projects: Vec::new(),
+            last_project: None,
+            colour_ids: vec![
+                "fit zone".to_string(),
+                "metric thread".to_string(),
+                "high gloss zone".to_string(),
+            ],
         }
     }
 }
@@ -106,6 +136,17 @@ impl AppSettings {
                         settings.grid_spacing = parsed;
                     }
                 }
+                "recent_projects" => settings.recent_projects = decode_list(value),
+                "last_project" => {
+                    settings.last_project =
+                        (!value.is_empty()).then(|| value.to_string());
+                }
+                "colour_ids" => {
+                    let ids = decode_list(value);
+                    if !ids.is_empty() {
+                        settings.colour_ids = ids;
+                    }
+                }
                 _ => {}
             }
         }
@@ -113,6 +154,14 @@ impl AppSettings {
         settings
     }
 
+    /// Remember a project folder: most recent first, and as the one to reopen.
+    pub fn remember_project(&mut self, root: &Path) {
+        let path = root.to_string_lossy().to_string();
+        self.recent_projects.retain(|known| known != &path);
+        self.recent_projects.insert(0, path.clone());
+        self.recent_projects.truncate(10);
+        self.last_project = Some(path);
+    }
     pub fn to_text(&self) -> String {
         format!(
             "# rcad application settings\n\
@@ -120,8 +169,17 @@ impl AppSettings {
              toolbar_width = {:.1}\n\
              history_width = {:.1}\n\
              show_grid = {}\n\
-             grid_spacing = {:.1}\n",
-            self.toolbar_width, self.history_width, self.show_grid, self.grid_spacing,
+             grid_spacing = {:.1}\n\
+             recent_projects = {}\n\
+             last_project = {}\n\
+             colour_ids = {}\n",
+            self.toolbar_width,
+            self.history_width,
+            self.show_grid,
+            self.grid_spacing,
+            encode_list(&self.recent_projects),
+            self.last_project.clone().unwrap_or_default(),
+            encode_list(&self.colour_ids),
         )
     }
 }
@@ -137,6 +195,9 @@ mod tests {
             history_width: 300.0,
             show_grid: false,
             grid_spacing: 25.0,
+            recent_projects: vec!["/a".to_string(), "/b".to_string()],
+            last_project: Some("/b".to_string()),
+            colour_ids: vec!["fit zone".to_string()],
         };
         assert_eq!(AppSettings::parse(&settings.to_text()), settings);
     }

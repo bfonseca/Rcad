@@ -1,0 +1,44 @@
+    /// 0.1: a folder without a manifest becomes a project.
+    #[test]
+    fn opening_a_folder_without_a_manifest_creates_the_project() {
+        let root = temp_project_dir();
+        let mut app = RcadApp::default();
+        app.open_project_folder(root.clone());
+
+        assert_eq!(app.project_root.as_deref(), Some(root.as_path()));
+        assert!(rcad_doc::ProjectManifest::path_in(&root).exists());
+        assert_eq!(
+            app.settings.last_project.as_deref(),
+            Some(root.to_string_lossy().as_ref())
+        );
+        assert!(app.project_error.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 0.1: with no project, the modelling UI must not be reachable at all.
+    #[test]
+    fn without_a_project_the_toolbar_is_not_drawn() {
+        let session = Session::without_project(RcadApp::default());
+        assert!(session.app.project_root.is_none());
+        assert!(
+            session.app.toolbar.button_rect(&ToolbarAction::ModelBox).is_none(),
+            "the modelling toolbar must not exist before a project is open"
+        );
+    }
+
+    /// ...and it appears as soon as a project is open.
+    #[test]
+    fn opening_a_project_reveals_the_modelling_ui() {
+        let mut session = Session::new(RcadApp::default());
+        session.frame();
+        assert!(session.app.toolbar.button_rect(&ToolbarAction::ModelBox).is_some());
+    }
+
+    /// File > New must not throw the project away.
+    #[test]
+    fn a_new_document_keeps_the_project() {
+        let mut session = Session::new(RcadApp::default());
+        let root = session.app.project_root.clone();
+        session.app.new_document();
+        assert_eq!(session.app.project_root, root);
+    }

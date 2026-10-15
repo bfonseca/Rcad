@@ -9,7 +9,7 @@ use crate::ui::{
     VerticalToolbar,
 };
 use rcad_geom::{GeometryBackend, TriangleMesh};
-use rcad_doc::{Project, Feature, FeatureKind, ConstructionKind, Part};
+use rcad_doc::{Project, Feature, FeatureKind, ConstructionKind, Part, ProjectManifest};
 use rcad_features;
 use rcad_occt::OcctBackend;
 use rcad_param::{ShapeCache};
@@ -123,8 +123,15 @@ pub struct RcadApp {
     /// Last settings written to disk, so we only save on an actual change.
     saved_settings: AppSettings,
     /// Whether the Options dialog is open.
-    show_settings: bool,    /// Informational message for the status bar (measurement results etc).
+    show_settings: bool,
+    /// Informational message for the status bar (measurement results etc).
     status: Option<String>,
+    /// Folder of the active project. Modelling is unreachable without one.
+    project_root: Option<PathBuf>,
+    /// The active project's rcad.toml: tolerances, globals, functions, colours.
+    manifest: ProjectManifest,
+    /// Why the last attempt to open a project failed.
+    project_error: Option<String>,
 }
 
 /// Transient state for the feature dialog's "add parameter" row.
@@ -209,7 +216,11 @@ impl RcadApp {
             placing_component: false,
             settings: settings.clone(),
             saved_settings: settings,
-            show_settings: false,            status: None,
+            show_settings: false,
+            status: None,
+            project_root: None,
+            manifest: ProjectManifest::default(),
+            project_error: None,
         };
         
         // Create default datum geometry (coordinate system + datum planes) for new part
@@ -374,6 +385,13 @@ impl RcadApp {
     /// Kept free of eframe types so tests can drive the UI directly with
     /// egui_kittest: click a button, then assert on the resulting state.
     pub fn ui(&mut self, ctx: &egui::Context) {
+        // Nothing can be modelled before a project exists: every component
+        // reads the project tolerances, variables and colours.
+        if self.project_root.is_none() {
+            self.draw_project_gate(ctx);
+            return;
+        }
+
         // Handle keyboard shortcuts
         handle_shortcuts(self, ctx, &self.shortcuts.clone());
         
@@ -820,6 +838,117 @@ impl RcadApp {
         self.handle_capture(ctx);
     }
 
+    /// Open the project in `root`, creating an `rcad.toml` there when the folder
+    /// has none. Nothing can be modelled until this has succeeded.
+    pub fn open_project_folder(&mut self, root: PathBuf) {
+        if !ProjectManifest::path_in(&root).exists() {
+            let name = Self::project_name_from_folder(&root);
+            if let Err(err) = ProjectManifest::create_default(&name).save(&root) {
+                self.project_error = Some(format!(
+                    "Could not create a project in {}: {err}",
+                    root.display()
+                ));
+                return;
+            }
+        }
+
+        match ProjectManifest::load(&root) {
+            Ok(manifest) => {
+                let name = manifest.project.name.clone();
+                self.manifest = manifest;
+                self.settings.remember_project(&root);
+                self.project_root = Some(root);
+                self.project_error = None;
+                self.status = Some(format!("Project '{name}' is open."));
+            }
+            Err(err) => self.project_error = Some(err),
+        }
+    }
+
+    /// Reopen the last project, if it still exists and asks to be reopened.
+    pub fn restore_last_project(&mut self) {
+        let Some(last) = self.settings.last_project.clone() else {
+            return;
+        };
+        let root = PathBuf::from(&last);
+        if !ProjectManifest::path_in(&root).exists() {
+            return;
+        }
+        if let Ok(manifest) = ProjectManifest::load(&root) {
+            if !manifest.startup.auto_open_last {
+                return;
+            }
+        }
+        self.open_project_folder(root);
+    }
+
+    /// The welcome screen: shown instead of the modelling UI until a project is
+    /// open, because every component needs the project's definitions.
+    fn draw_project_gate(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(60.0);
+                ui.heading("rcad");
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("open a project to start modelling")
+                        .size(12.0)
+                        .color(egui::Color32::GRAY),
+                );
+                ui.add_space(20.0);
+                ui.label(
+                    "A project is the folder where your parts, assemblies and skeletons\n\
+                     are saved, together with the definitions they all share:\n\
+                     tolerances, global variables, project functions, and the colour\n\
+                     values used across the project.",
+                );
+                ui.add_space(22.0);
+                ui.horizontal(|ui| {
+                    if ui.button("  Create a new project…  ").clicked() {
+                        if let Some(folder) = rfd::FileDialog::new()
+                            .set_title("Choose the folder for the new project")
+                            .pick_folder()
+                        {
+                            self.open_project_folder(folder);
+                        }
+                    }
+                    if ui.button("  Open an existing project…  ").clicked() {
+                        if let Some(folder) = rfd::FileDialog::new()
+                            .set_title("Choose the project folder")
+                            .pick_folder()
+                        {
+                            self.open_project_folder(folder);
+                        }
+                    }
+                });
+
+                if let Some(error) = self.project_error.clone() {
+                    ui.add_space(14.0);
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+
+                if !self.settings.recent_projects.is_empty() {
+                    ui.add_space(24.0);
+                    ui.separator();
+                    ui.label(egui::RichText::new("Recent projects").strong());
+                    ui.add_space(4.0);
+                    let recents = self.settings.recent_projects.clone();
+                    for path in recents {
+                        if ui.link(&path).clicked() {
+                            self.open_project_folder(PathBuf::from(path));
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    /// Name a new project after its folder.
+    fn project_name_from_folder(root: &Path) -> String {
+        root.file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Untitled project".to_string())
+    }
     /// Options dialog: the settings that survive a restart.
     fn draw_settings_dialog(&mut self, ui: &mut egui::Ui) {
         ui.strong("Tool palette");
@@ -1091,8 +1220,16 @@ impl RcadApp {
     }
     
     pub fn new_document(&mut self) {
-        self.undo_stack.push(self.project.clone());
+        // A new document keeps the project: the project owns the folder,
+        // the tolerances and the colours, and outlives any single part.
+        let project_root = self.project_root.take();
+        let manifest = self.manifest.clone();
+        let settings = self.settings.clone();
         *self = Self::default();
+        self.project_root = project_root;
+        self.manifest = manifest;
+        self.settings = settings;
+        self.saved_settings = self.settings.clone();
         let _ = self.create_default_datum_geometry();
     }
     
@@ -1867,7 +2004,11 @@ impl Default for RcadApp {
             placing_component: false,
             settings: settings.clone(),
             saved_settings: settings,
-            show_settings: false,            status: None,
+            show_settings: false,
+            status: None,
+            project_root: None,
+            manifest: ProjectManifest::default(),
+            project_error: None,
         }
     }
 }
@@ -1907,6 +2048,19 @@ fn save_screenshot(path: &Path, image: &egui::ColorImage) -> Result<(), String> 
 #[cfg(test)]
 mod interaction_tests {
     use super::*;
+
+    /// A fresh throwaway project folder for a test.
+    fn temp_project_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "rcad-test-project-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
     use crate::ui::ToolbarAction;
 
     /// A headless egui session driving the real application UI.
@@ -1922,7 +2076,19 @@ mod interaction_tests {
     }
 
     impl Session {
+        /// A session with a throwaway project open: the modelling UI is
+        /// unreachable without one.
         fn new(app: RcadApp) -> Self {
+            let mut app = app;
+            if app.project_root.is_none() {
+                app.open_project_folder(temp_project_dir());
+            }
+            Self::without_project(app)
+        }
+
+        /// A session with no project at all, to test the gate itself.
+        fn without_project(app: RcadApp) -> Self {
+            let _ = &app;
             let ctx = egui::Context::default();
             let screen =
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));

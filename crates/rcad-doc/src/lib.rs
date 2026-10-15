@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod manifest;
+
+pub use manifest::{MANIFEST_FILE, ProjectManifest};
+
 pub type EntityId = Uuid;
 
 #[derive(Debug, Error)]
