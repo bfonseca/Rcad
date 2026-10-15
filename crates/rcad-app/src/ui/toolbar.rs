@@ -724,7 +724,22 @@ impl VerticalToolbar {
         // Update theme based on egui context
         self.theme = self.detect_theme(ui.ctx());
         self.button_rects.clear();
-        
+
+        // Collapsed: a single expand button. Drawing the header and the tab bar
+        // in a 48px column made them wrap into an unreadable stack.
+        if self.collapsed {
+            ui.vertical_centered(|ui| {
+                if ui
+                    .small_button("▶")
+                    .on_hover_text("Expand the toolbar")
+                    .clicked()
+                {
+                    self.toggle_collapsed();
+                }
+            });
+            return;
+        }
+
         let width = self.width();
         ui.set_min_width(width);
         ui.set_max_width(width);

@@ -35,8 +35,9 @@ impl Default for OrbitCamera {
         Self {
             target: Vec3::ZERO,
             distance: 120.0,
-            // Roughly 40 degrees above the horizon, as before.
-            orientation: orientation_from_offset(Vec3::new(0.7_f32.cos(), 0.7_f32.sin(), 0.0)),
+            // New documents open looking along -X, so the screen shows Z up and
+            // Y to the right.
+            orientation: orientation_from_offset(Vec3::X),
             projection: Projection::default(),
         }
     }
@@ -49,10 +50,10 @@ fn orientation_from_offset(offset: Vec3) -> Quat {
         return Quat::IDENTITY;
     }
     // Pick an up hint that is not parallel to `back`, so the basis is stable.
-    let up_hint = if back.dot(Vec3::Y).abs() > 0.99 {
-        Vec3::Z
-    } else {
+    let up_hint = if back.dot(OrbitCamera::WORLD_UP).abs() > 0.99 {
         Vec3::Y
+    } else {
+        OrbitCamera::WORLD_UP
     };
     let right = up_hint.cross(back).normalize_or_zero();
     let up = back.cross(right);
@@ -62,6 +63,10 @@ fn orientation_from_offset(offset: Vec3) -> Quat {
 impl OrbitCamera {
     /// Vertical field of view used by view_proj and fit_to_bounds.
     pub const FOV_Y_DEG: f32 = 45.0;
+
+    /// The world up axis. rcad is a Z-up CAD application: modeling planes and
+    /// the datum planes are defined with Z pointing up the screen.
+    pub const WORLD_UP: Vec3 = Vec3::Z;
 
     pub fn eye(&self) -> Vec3 {
         self.target + self.orientation * (Vec3::Z * self.distance)
@@ -109,7 +114,7 @@ impl OrbitCamera {
     pub fn orbit(&mut self, delta: Vec2) {
         const SENSITIVITY: f32 = 0.01;
 
-        let horizontal = Quat::from_axis_angle(Vec3::Y, -delta.x * SENSITIVITY);
+        let horizontal = Quat::from_axis_angle(Self::WORLD_UP, -delta.x * SENSITIVITY);
         let vertical = Quat::from_axis_angle(Vec3::X, -delta.y * SENSITIVITY);
         self.orientation = (horizontal * self.orientation * vertical).normalize();
     }
@@ -262,7 +267,7 @@ mod tests {
     #[test]
     fn pan_works_at_the_poles() {
         let mut camera = OrbitCamera::default();
-        camera.look_from(Vec3::Y);
+        camera.look_from(Vec3::Z);
         let before = camera.target;
         camera.pan(Vec2::new(50.0, 50.0));
         assert!(camera.target.is_finite());

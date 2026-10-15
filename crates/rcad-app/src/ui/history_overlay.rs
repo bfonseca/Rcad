@@ -324,12 +324,7 @@ impl HistoryOverlay {
         let suppression_icon = if is_suppressed { "⛔" } else { "✅" };
         let suppression_color = if is_suppressed { egui::Color32::GRAY } else { egui::Color32::WHITE };
         
-        // Relations/parameters indicator
-        let has_relations = !feature.parameters.numeric.is_empty()
-            || !feature.parameters.string.is_empty()
-            || !feature.parameters.boolean.is_empty();
-        let relations_icon = "⚙";
-        
+
         // Indent based on depth
         let indent = depth as f32 * 16.0;
         
@@ -430,15 +425,6 @@ impl HistoryOverlay {
             if response.hovered() && ui.input(|i| i.pointer.any_released()) {
                 on_action(HistoryOverlayAction::DropFeature(feature.id));
             }
-            
-            // Relations/Parameters icon (right side)
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let rel_response = ui.small_button(egui::RichText::new(relations_icon).size(14.0).color(egui::Color32::WHITE))
-                    .on_hover_text("Relations & Parameters");
-                if rel_response.clicked() {
-                    on_action(HistoryOverlayAction::OpenRelationsDialog(feature.id));
-                }
-            });
             
             // External reference indicator
             if feature.parameters.string.contains_key("is_external_ref") {

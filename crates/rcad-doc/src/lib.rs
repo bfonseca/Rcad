@@ -30,6 +30,20 @@ pub struct Project {
     pub name: String,
     pub parts: Vec<Part>,
     pub assemblies: Vec<Assembly>,
+    /// Camera state, so reopening a document restores the last view.
+    /// Absent in files written before this existed.
+    #[serde(default)]
+    pub view: Option<SavedView>,
+}
+
+/// Camera state persisted with a document.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SavedView {
+    /// Camera orientation as a quaternion (x, y, z, w).
+    pub orientation: [f32; 4],
+    pub target: [f32; 3],
+    pub distance: f32,
+    pub orthographic: bool,
 }
 
 impl Default for Project {
@@ -39,6 +53,7 @@ impl Default for Project {
             name: "Untitled".into(),
             parts: vec![Part::new_solid("Part1")],
             assemblies: Vec::new(),
+            view: None,
         }
     }
 }

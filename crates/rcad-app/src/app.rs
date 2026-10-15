@@ -261,14 +261,14 @@ impl RcadApp {
             }
             
             // Create datum planes
-            // Front plane (XY)
+            // Front plane: the XZ plane, normal Y (Z is up).
             let front_plane_id = Uuid::new_v4();
             part.features.push(Feature::new(
                 "FRONT_PLANE",
                 FeatureKind::Construction {
                     kind: ConstructionKind::Plane,
                     origin: [0.0, 0.0, 0.0],
-                    direction: [0.0, 0.0, 1.0], // Normal = Z
+                    direction: [0.0, 1.0, 0.0], // Normal = Y
                 },
             ));
             if let Some(f) = part.features.last_mut() {
@@ -289,14 +289,14 @@ impl RcadApp {
                 f.id = right_plane_id;
             }
             
-            // Top plane (XZ)
+            // Top plane: the XY plane, normal Z.
             let top_plane_id = Uuid::new_v4();
             part.features.push(Feature::new(
                 "TOP_PLANE",
                 FeatureKind::Construction {
                     kind: ConstructionKind::Plane,
                     origin: [0.0, 0.0, 0.0],
-                    direction: [0.0, 1.0, 0.0], // Normal = Y
+                    direction: [0.0, 0.0, 1.0], // Normal = Z
                 },
             ));
             if let Some(f) = part.features.last_mut() {
@@ -1301,28 +1301,30 @@ impl RcadApp {
     // The camera stores an orientation, so a standard view is just the
     // direction to look from. Straight up and straight down are exact, which a
     // yaw/pitch camera could not represent.
+    // Z is up, so Front is the XZ plane (normal Y), Right is the YZ plane
+    // (normal X) and Top looks straight down the Z axis.
     pub fn set_view_front(&mut self) {
-        self.camera.look_from(glam::Vec3::X);
-    }
-
-    pub fn set_view_back(&mut self) {
-        self.camera.look_from(-glam::Vec3::X);
-    }
-
-    pub fn set_view_left(&mut self) {
-        self.camera.look_from(-glam::Vec3::Z);
-    }
-
-    pub fn set_view_right(&mut self) {
-        self.camera.look_from(glam::Vec3::Z);
-    }
-
-    pub fn set_view_top(&mut self) {
         self.camera.look_from(glam::Vec3::Y);
     }
 
-    pub fn set_view_bottom(&mut self) {
+    pub fn set_view_back(&mut self) {
         self.camera.look_from(-glam::Vec3::Y);
+    }
+
+    pub fn set_view_left(&mut self) {
+        self.camera.look_from(-glam::Vec3::X);
+    }
+
+    pub fn set_view_right(&mut self) {
+        self.camera.look_from(glam::Vec3::X);
+    }
+
+    pub fn set_view_top(&mut self) {
+        self.camera.look_from(glam::Vec3::Z);
+    }
+
+    pub fn set_view_bottom(&mut self) {
+        self.camera.look_from(-glam::Vec3::Z);
     }
 
     pub fn set_view_iso(&mut self) {
@@ -1359,6 +1361,7 @@ impl RcadApp {
                     self.project = project;
                     self.current_path = Some(path);
                     self.last_error = None;
+                    self.restore_view();
                 }
                 Err(e) => {
                     self.last_error = Some(format!("Failed to load project: {e}"));
@@ -1367,7 +1370,46 @@ impl RcadApp {
         }
     }
     
+    /// Store the current camera in the project, so saving keeps the view.
+    fn capture_view(&mut self) {
+        let orientation = self.camera.orientation;
+        self.project.view = Some(rcad_doc::SavedView {
+            orientation: [orientation.x, orientation.y, orientation.z, orientation.w],
+            target: [
+                self.camera.target.x,
+                self.camera.target.y,
+                self.camera.target.z,
+            ],
+            distance: self.camera.distance,
+            orthographic: self.camera.projection == Projection::Orthographic,
+        });
+    }
+
+    /// Restore the view saved with the document, if there is one.
+    fn restore_view(&mut self) {
+        let Some(view) = self.project.view else {
+            return;
+        };
+        self.camera.orientation = glam::Quat::from_xyzw(
+            view.orientation[0],
+            view.orientation[1],
+            view.orientation[2],
+            view.orientation[3],
+        )
+        .normalize();
+        self.camera.target = glam::Vec3::from(view.target);
+        self.camera.distance = view.distance.max(1.0);
+        self.camera.projection = if view.orthographic {
+            Projection::Orthographic
+        } else {
+            Projection::Perspective
+        };
+        // The saved framing was deliberate, so do not auto-fit over it.
+        self.needs_fit = false;
+    }
+
     pub fn save_document(&mut self) {
+        self.capture_view();
         if let Some(path) = &self.current_path {
             if let Err(e) = self.project.save(path) {
                 self.last_error = Some(format!("Failed to save project: {e}"));
@@ -1378,6 +1420,7 @@ impl RcadApp {
     }
     
     pub fn save_document_as(&mut self) {
+        self.capture_view();
         if let Some(path) = rfd::FileDialog::new().save_file() {
             if let Err(e) = self.project.save(&path) {
                 self.last_error = Some(format!("Failed to save project: {e}"));
@@ -2344,10 +2387,10 @@ mod interaction_tests {
         session.app.set_view_front();
         session.click_toolbar(ToolbarAction::ViewTop);
 
-        // The Top view looks straight down, so the eye sits above the target.
+        // Z is up, so the Top view looks straight down the Z axis.
         let eye_direction = (session.app.camera.eye() - session.app.camera.target).normalize();
         assert!(
-            (eye_direction - glam::Vec3::Y).length() < 1e-3,
+            (eye_direction - glam::Vec3::Z).length() < 1e-3,
             "the Top view button did not move the camera: eye direction = {eye_direction:?}"
         );
     }
