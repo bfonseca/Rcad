@@ -112,6 +112,9 @@ pub struct RcadApp {
     new_parameter: NewParameterDraft,
     /// Quick-action strip floating over the viewport.
     floating_bar: FloatingBar,
+    /// True while placing a component: the floating bar then shows the
+    /// assembly commands, which are otherwise hidden.
+    placing_component: bool,
     /// Informational message for the status bar (measurement results etc).
     status: Option<String>,
 }
@@ -194,6 +197,7 @@ impl RcadApp {
             feature_dialog_tab: 0,
             new_parameter: NewParameterDraft::default(),
             floating_bar: FloatingBar::default(),
+            placing_component: false,
             status: None,
         };
         
@@ -639,9 +643,15 @@ impl RcadApp {
             // Quick actions floating over the top of the viewport.
             let sketching = self.sketch.is_some();
             self.floating_bar
-                .show(ui, part_clone.as_ref(), sketching, &mut |action| {
-                    floating_action = Some(action);
-                });
+                .show(
+                    ui,
+                    part_clone.as_ref(),
+                    sketching,
+                    self.placing_component,
+                    &mut |action| {
+                        floating_action = Some(action);
+                    },
+                );
             
             // Handle viewport picking
             if let Some(part) = part_clone.as_ref() {
@@ -1738,7 +1748,15 @@ impl RcadApp {
             }
             
             ToolbarAction::AssemblyInsertComponent => {
-                // TODO: Insert component
+                // Placement mode: the floating bar shows the assembly commands
+                // only while this is on.
+                self.placing_component = !self.placing_component;
+                self.status = Some(if self.placing_component {
+                    "Placing a component: assembly commands are on the floating bar."
+                        .to_string()
+                } else {
+                    "Component placement cancelled.".to_string()
+                });
             }
             ToolbarAction::AssemblyMateCoincident => {
                 // TODO: Coincident mate
@@ -1824,6 +1842,10 @@ impl RcadApp {
         match action {
             FloatingAction::ToggleDatums(kind) => self.toggle_datums(kind),
             FloatingAction::Toolbar(action) => self.handle_toolbar_action(action),
+            FloatingAction::CancelPlacement => {
+                self.placing_component = false;
+                self.status = Some("Component placement cancelled.".to_string());
+            }
         }
     }
 
@@ -2111,6 +2133,7 @@ impl Default for RcadApp {
             feature_dialog_tab: 0,
             new_parameter: NewParameterDraft::default(),
             floating_bar: FloatingBar::default(),
+            placing_component: false,
             status: None,
         }
     }
@@ -2371,27 +2394,24 @@ mod interaction_tests {
         assert!(app.datum_kind_shown(DatumKind::Axis));
     }
 
+    /// View shortcuts now live on the floating bar, so click the real button.
     #[test]
-    fn clicking_a_view_button_moves_the_camera() {
+    fn clicking_the_floating_bar_top_button_moves_the_camera() {
         let mut session = Session::new(RcadApp::default());
-        let view_tab = session
-            .app
-            .toolbar
-            .tabs
-            .iter()
-            .position(|tab| tab.name == "View")
-            .expect("the View tab exists");
-        session.app.toolbar.set_active_tab(view_tab);
-        session.frame();
-
         session.app.set_view_front();
-        session.click_toolbar(ToolbarAction::ViewTop);
+
+        let rect = session
+            .app
+            .floating_bar
+            .button_rect("view-view-top")
+            .expect("the Top button was drawn on the floating bar");
+        session.click(rect.center());
 
         // Z is up, so the Top view looks straight down the Z axis.
         let eye_direction = (session.app.camera.eye() - session.app.camera.target).normalize();
         assert!(
             (eye_direction - glam::Vec3::Z).length() < 1e-3,
-            "the Top view button did not move the camera: eye direction = {eye_direction:?}"
+            "the floating bar Top button did not move the camera: {eye_direction:?}"
         );
     }
 }

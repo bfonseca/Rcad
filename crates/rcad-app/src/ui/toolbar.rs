@@ -657,11 +657,11 @@ impl VerticalToolbar {
                 ]),
         ];
 
-        // The sketch tools and the analysis tools now live in the floating quick
-        // bar over the viewport, so those two tabs are not built here.
-        tabs.into_iter()
-            .filter(|tab| tab.name != "Sketch" && tab.name != "Analysis")
-            .collect()
+        // The left palette is the feature commands only. Sketch and Analysis
+        // tools appear on the floating bar while they are relevant, Assembly
+        // commands appear there while placing a component, and View/Tools have
+        // their own shortcuts on the floating bar and the menu bar.
+        tabs.into_iter().filter(|tab| tab.name == "Model").collect()
     }
 
     /// Get the currently active tab
@@ -941,7 +941,8 @@ mod icon_tests {
             }
         }
 
-        assert!(checked > 20, "expected to check many icons, checked {checked}");
+        // The left palette is the Model tab only, so this is a smaller set now.
+        assert!(checked > 10, "expected to check many icons, checked {checked}");
         assert!(
             missing.is_empty(),
             "toolbar icons missing from rcad-icons: {missing:?}"

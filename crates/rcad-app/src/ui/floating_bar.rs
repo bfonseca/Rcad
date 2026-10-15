@@ -6,6 +6,7 @@
 
 use eframe::egui;
 use rcad_doc::{ConstructionKind, FeatureKind, Part};
+use std::collections::HashMap;
 
 use super::toolbar::{IconTextures, IconTheme, ToolbarAction};
 
@@ -65,6 +66,8 @@ pub enum FloatingAction {
     /// `None` means every datum kind, `Some` means just that one.
     ToggleDatums(Option<DatumKind>),
     Toolbar(ToolbarAction),
+    /// Leave component placement mode.
+    CancelPlacement,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,8 @@ pub struct FloatingBar {
     press: Option<(Group, f64)>,
     /// Which group menu is open, and where to anchor it.
     open: Option<(Group, egui::Rect)>,
+    /// Screen rect of each icon button drawn last frame, for the UI tests.
+    button_rects: HashMap<&'static str, egui::Rect>,
 }
 
 impl Default for FloatingBar {
@@ -91,6 +96,7 @@ impl Default for FloatingBar {
             icon_textures: IconTextures::default(),
             press: None,
             open: None,
+            button_rects: HashMap::new(),
         }
     }
 }
@@ -102,6 +108,7 @@ impl FloatingBar {
         ui: &mut egui::Ui,
         part: Option<&Part>,
         sketching: bool,
+        placing_component: bool,
         on_action: &mut dyn FnMut(FloatingAction),
     ) {
         if !self.visible {
@@ -166,6 +173,20 @@ impl FloatingBar {
                             self.icon_button(ui, "view-display-wireframe", "Wireframe", theme, on_action, || {
                                 FloatingAction::Toolbar(ToolbarAction::ViewWireframe)
                             });
+
+                            ui.separator();
+
+                            // Component placement. The assembly commands appear
+                            // on the second row only while placing, so the bar
+                            // stays clean the rest of the time.
+                            self.icon_button(
+                                ui,
+                                "assembly-asm-insert",
+                                "Place a component in an assembly",
+                                theme,
+                                on_action,
+                                || FloatingAction::Toolbar(ToolbarAction::AssemblyInsertComponent),
+                            );
                         });
 
                         // Second row: only while a sketch is being edited.
@@ -192,6 +213,34 @@ impl FloatingBar {
                                     });
                                 }
                             });
+                        } else if placing_component {
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.label(
+                                    egui::RichText::new("Place component:").size(11.0),
+                                );
+                                for (icon, tooltip, action) in [
+                                    ("assembly-asm-insert", "Insert component", ToolbarAction::AssemblyInsertComponent),
+                                    ("assembly-asm-mate", "Coincident mate", ToolbarAction::AssemblyMateCoincident),
+                                    ("constraints-concentric", "Concentric mate", ToolbarAction::AssemblyMateConcentric),
+                                    ("assembly-asm-distance", "Distance mate", ToolbarAction::AssemblyMateDistance),
+                                    ("assembly-asm-parallel", "Parallel mate", ToolbarAction::AssemblyMateParallel),
+                                    ("assembly-asm-tangent", "Tangent mate", ToolbarAction::AssemblyMateTangent),
+                                    ("assembly-asm-explode", "Exploded view", ToolbarAction::AssemblyExplodedView),
+                                ] {
+                                    self.icon_button(ui, icon, tooltip, theme, on_action, || {
+                                        FloatingAction::Toolbar(action.clone())
+                                    });
+                                }
+                                if ui
+                                    .add(egui::Button::new(egui::RichText::new("Cancel").size(11.0)))
+                                    .on_hover_text("Leave placement mode")
+                                    .clicked()
+                                {
+                                    on_action(FloatingAction::CancelPlacement);
+                                }
+                            });
                         }
                     });
                 });
@@ -205,7 +254,7 @@ impl FloatingBar {
         &mut self,
         ui: &mut egui::Ui,
         group: Group,
-        icon: &str,
+        icon: &'static str,
         theme: IconTheme,
         on_action: &mut dyn FnMut(FloatingAction),
     ) {
@@ -246,7 +295,7 @@ impl FloatingBar {
     fn icon_button(
         &mut self,
         ui: &mut egui::Ui,
-        icon: &str,
+        icon: &'static str,
         tooltip: &str,
         theme: IconTheme,
         on_action: &mut dyn FnMut(FloatingAction),
@@ -261,7 +310,7 @@ impl FloatingBar {
     fn icon_response(
         &mut self,
         ui: &mut egui::Ui,
-        icon: &str,
+        icon: &'static str,
         tooltip: &str,
         theme: IconTheme,
     ) -> egui::Response {
@@ -272,8 +321,16 @@ impl FloatingBar {
             ),
             None => egui::Button::new(egui::RichText::new("•").size(14.0)),
         };
-        ui.add(button.min_size(egui::vec2(26.0, 26.0)).corner_radius(4.0))
-            .on_hover_text(tooltip)
+        let response = ui
+            .add(button.min_size(egui::vec2(26.0, 26.0)).corner_radius(4.0))
+            .on_hover_text(tooltip);
+        self.button_rects.insert(icon, response.rect);
+        response
+    }
+
+    /// Screen rect of a bar button as drawn in the last frame (UI tests).
+    pub fn button_rect(&self, icon: &str) -> Option<egui::Rect> {
+        self.button_rects.get(icon).copied()
     }
 
     /// The open group menu, drawn under its button.
