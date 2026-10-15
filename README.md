@@ -252,9 +252,10 @@ MIT License - see [LICENSE](LICENSE) for details.
 - [egui](https://github.com/emilk/egui) - Immediate mode GUI
 - [glam](https://github.com/bitshifter/glam-rs) - Linear algebra
 - [calamine](https://github.com/tafia/calamine) - Excel/CSV parsing
-- [resvg/egui_extras](https://github.com/emilk/egui) - future SVG icon rasterisation
 
-The MCP server is implemented directly on `serde_json`, without an external SDK.
+The MCP server is implemented directly on `serde_json`, and the toolbar renders the
+committed rcad-icons PNGs (decoded with `image` and cached as egui textures), so no
+extra SDK or SVG rasteriser is needed.
 
 ## Roadmap
 
@@ -268,7 +269,7 @@ See [instructions.md](instructions.md) for detailed plan and milestones.
 - [x] Project manifest (rcad.toml)
 - [x] STEP/STL export through OCCT (wired to the real kernel)
 - [x] MCP server (`rcad-mcp`) with modelling tools and resources
-- [x] CI workflow (`.github/workflows/ci.yml`)
+- [x] CI workflow (`ci/ci.yml`; move it into `.github/workflows/` to enable it)
 - [x] Committed icon sprites so a fresh clone builds
 - [ ] Assembly mates (Phase D)
 - [ ] UI polish: vertical toolbar + adaptive history overlay

@@ -54,8 +54,13 @@ jobs:
         continue-on-error: true
         run: cargo fmt --all --check
 
-      - name: Icon sprites are up to date with the generator
+      # rcad-app embeds rcad-icons/png/64/<theme>/... at compile time
+      # (crates/rcad-app/build.rs), and the icon tests assert that every
+      # toolbar icon resolves. This just fails fast with a readable message.
+      - name: Icon assets are present
         run: |
+          test -d rcad-icons/png/64/light
+          test -d rcad-icons/png/64/dark
           test -f rcad-icons/sprite-light.svg
           test -f rcad-icons/sprite-dark.svg
-          grep -q "<symbol id=\"features-extrude\"" rcad-icons/sprite-light.svg
+          echo "$(find rcad-icons/png/64/light -name '*.png' | wc -l) light icons"
