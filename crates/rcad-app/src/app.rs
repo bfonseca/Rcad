@@ -1,6 +1,7 @@
 use eframe::egui;
 use crate::viewport::{draw_viewport, handle_picking, SelectionState};
 use crate::camera::{OrbitCamera, Projection};
+use crate::settings::AppSettings;
 use crate::undo::UndoStack;
 use crate::shortcuts::{Shortcuts, handle_shortcuts, shortcuts_list};
 use crate::ui::{
@@ -115,7 +116,12 @@ pub struct RcadApp {
     /// True while placing a component: the floating bar then shows the
     /// assembly commands, which are otherwise hidden.
     placing_component: bool,
-    /// Informational message for the status bar (measurement results etc).
+    /// User preferences, loaded at startup and saved when they change.
+    settings: AppSettings,
+    /// Last settings written to disk, so we only save on an actual change.
+    saved_settings: AppSettings,
+    /// Whether the Options dialog is open.
+    show_settings: bool,    /// Informational message for the status bar (measurement results etc).
     status: Option<String>,
 }
 
@@ -130,6 +136,7 @@ pub struct NewParameterDraft {
 
 impl RcadApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let settings = AppSettings::load();
         let (job_tx, job_rx) = bounded::<RebuildJob>(2);
         let (res_tx, res_rx) = bounded::<RebuildResponse>(2);
         let version_counter = Arc::new(AtomicU64::new(0));
@@ -198,7 +205,9 @@ impl RcadApp {
             new_parameter: NewParameterDraft::default(),
             floating_bar: FloatingBar::default(),
             placing_component: false,
-            status: None,
+            settings: settings.clone(),
+            saved_settings: settings,
+            show_settings: false,            status: None,
         };
         
         // Create default datum geometry (coordinate system + datum planes) for new part
@@ -592,25 +601,28 @@ impl RcadApp {
             });
         });
         
-        // 1) Vertical toolbar (left or right)
+        // 1) Vertical toolbar (left or right).
+        //
+        // Resizable rather than fixed: the width is stored in the settings so
+        // the user only has to set it once.
         let toolbar_position = self.toolbar.position;
-        let toolbar_width = self.toolbar.width();
-        
-        if toolbar_position == crate::ui::ToolbarPosition::Left {
+        let panel = if toolbar_position == crate::ui::ToolbarPosition::Left {
             egui::SidePanel::left("vertical_toolbar")
-                .exact_width(toolbar_width)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    self.toolbar.show(ui, &mut |action| toolbar_action = Some(action));
-                });
         } else {
             egui::SidePanel::right("vertical_toolbar")
-                .exact_width(toolbar_width)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    self.toolbar.show(ui, &mut |action| toolbar_action = Some(action));
-                });
+        };
+        let panel = panel
+            .resizable(true)
+            .default_width(self.settings.toolbar_width)
+            .width_range(120.0..=420.0);
+        let panel = panel.show(ctx, |ui| {
+            self.toolbar.show(ui, &mut |action| toolbar_action = Some(action));
+        });
+        let actual_width = panel.response.rect.width();
+        if (actual_width - self.settings.toolbar_width).abs() > 0.5 {
+            self.settings.toolbar_width = actual_width;
         }
+
         
         // 2) Bottom panel: status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
@@ -638,7 +650,17 @@ impl RcadApp {
             selection_state.selected_construction = self.selected_construction_feature;
             selection_state.selected_triangle = self.selected_triangle;
             
-            let response = draw_viewport(ui, &self.mesh, &mut self.camera, None, self.selected_triangle, self.selected_construction_feature, part_clone.as_ref());
+            let response = draw_viewport(
+                ui,
+                &self.mesh,
+                &mut self.camera,
+                None,
+                self.selected_triangle,
+                self.selected_construction_feature,
+                part_clone.as_ref(),
+                self.settings.show_grid,
+                self.settings.grid_spacing,
+            );
 
             // Quick actions floating over the top of the viewport.
             let sketching = self.sketch.is_some();
@@ -694,6 +716,8 @@ impl RcadApp {
                     self.history_overlay.show(ui, &part, &mut |action| history_action = Some(action));
                 }
             }
+            // A drag on the tree resize handle is remembered too.
+            self.settings.history_width = self.history_overlay.width;
             
             // Handle async kernel worker responses
             if let Some(rx) = &self.kernel_worker_rx {
@@ -768,8 +792,74 @@ impl RcadApp {
             }
         }
 
+        if self.show_settings {
+            let mut open = true;
+            egui::Window::new("Options")
+                .open(&mut open)
+                .resizable(false)
+                .default_width(320.0)
+                .show(ctx, |ui| self.draw_settings_dialog(ui));
+            if !open {
+                self.show_settings = false;
+            }
+        }
+
+        // Persist preferences as soon as they change.
+        if self.settings != self.saved_settings {
+            if let Err(err) = self.settings.save() {
+                // A read-only config directory (container, sandbox) must not
+                // break the app; keep the values for this session.
+                tracing::debug!("could not save settings: {err}");
+            }
+            self.saved_settings = self.settings.clone();
+        }
+
         // Headless screenshot support (see --screenshot).
         self.handle_capture(ctx);
+    }
+
+    /// Options dialog: the settings that survive a restart.
+    fn draw_settings_dialog(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Tool palette");
+        ui.add(
+            egui::Slider::new(&mut self.settings.toolbar_width, 120.0..=420.0)
+                .text("width"),
+        );
+        ui.separator();
+
+        ui.strong("Model tree");
+        ui.add(
+            egui::Slider::new(&mut self.settings.history_width, 180.0..=600.0)
+                .text("width"),
+        );
+        // Push the value into the overlay so the slider takes effect at once.
+        self.history_overlay.width = self.settings.history_width;
+        ui.separator();
+
+        ui.strong("Grid");
+        ui.checkbox(&mut self.settings.show_grid, "Show the ground grid");
+        ui.add_enabled(
+            self.settings.show_grid,
+            egui::Slider::new(&mut self.settings.grid_spacing, 1.0..=100.0).text("spacing"),
+        );
+        ui.separator();
+
+        match AppSettings::path() {
+            Some(path) => ui.label(
+                egui::RichText::new(format!("Saved to {}", path.display()))
+                    .size(10.0)
+                    .color(egui::Color32::GRAY),
+            ),
+            None => ui.label(
+                egui::RichText::new("No config directory found; settings last one session.")
+                    .size(10.0)
+                    .color(egui::Color32::GRAY),
+            ),
+        };
+        if ui.button("Reset to defaults").clicked() {
+            self.settings = AppSettings::default();
+            self.history_overlay.width = self.settings.history_width;
+        }
     }
 
     /// Capture mode: let a few frames render (so the async kernel rebuild can
@@ -1821,9 +1911,7 @@ impl RcadApp {
             ToolbarAction::ToolsDesignExploration => {
                 // TODO: Design exploration
             }
-            ToolbarAction::ToolsOptions => {
-                // TODO: Options dialog
-            }
+            ToolbarAction::ToolsOptions => self.show_settings = true,
             ToolbarAction::ToolsCustomize => {
                 // TODO: Customize dialog
             }
@@ -2067,6 +2155,7 @@ impl RcadApp {
 
 impl Default for RcadApp {
     fn default() -> Self {
+        let settings = AppSettings::load();
         let (job_tx, job_rx) = bounded::<RebuildJob>(2);
         let (res_tx, res_rx) = bounded::<RebuildResponse>(2);
         let version_counter = Arc::new(AtomicU64::new(0));
@@ -2134,7 +2223,9 @@ impl Default for RcadApp {
             new_parameter: NewParameterDraft::default(),
             floating_bar: FloatingBar::default(),
             placing_component: false,
-            status: None,
+            settings: settings.clone(),
+            saved_settings: settings,
+            show_settings: false,            status: None,
         }
     }
 }

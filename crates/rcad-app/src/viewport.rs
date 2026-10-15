@@ -239,6 +239,8 @@ pub fn draw_viewport(
      selected_triangle: Option<usize>,
      selected_construction: Option<usize>,
      part: Option<&Part>,
+    show_grid: bool,
+    grid_spacing: f32,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
@@ -273,8 +275,10 @@ pub fn draw_viewport(
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_rgb(28, 30, 34));
 
-    // Ground grid
-    draw_grid(&painter, rect, camera);
+    // Ground grid (optional, spacing from the application settings)
+    if show_grid {
+        draw_grid(&painter, rect, camera, grid_spacing);
+    }
 
     if let Some(tint) = underlay_tint {
         painter.rect_filled(
@@ -326,12 +330,18 @@ fn project(vp: Mat4, rect: Rect, p: Vec3) -> Option<Pos2> {
     Some(Pos2::new(x, y))
 }
 
-fn draw_grid(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
+/// Ground grid in the XY plane (Z = 0), since Z is up.
+///
+/// The spacing is a user setting; the extent stays fixed so the grid always
+/// covers the visible area.
+fn draw_grid(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera, spacing: f32) {
+    const EXTENT: f32 = 100.0;
+    let spacing = if spacing > 0.0 { spacing } else { 10.0 };
+    let steps = (EXTENT / spacing).round().max(1.0) as i32;
     let vp = view_proj(rect, camera);
     let stroke = Stroke::new(1.0_f32, Color32::from_rgb(50, 54, 60));
-    // Ground grid in XY plane (Z=0) since Z is up
-    for i in -10..=10 {
-        let t = i as f32 * 10.0;
+    for i in -steps..=steps {
+        let t = i as f32 * spacing;
         if let (Some(a), Some(b)) = (
             project(vp, rect, Vec3::new(t, -100.0, 0.0)),
             project(vp, rect, Vec3::new(t, 100.0, 0.0)),

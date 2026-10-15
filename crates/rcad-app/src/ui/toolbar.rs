@@ -867,11 +867,17 @@ impl VerticalToolbar {
             }
         };
 
+        // frame(false): the commands sit directly on the panel instead of in a
+        // grey box, matching the model tree.
         let widget = if is_compact {
-            widget.min_size(egui::vec2(40.0, 40.0)).corner_radius(4.0)
+            widget
+                .frame(false)
+                .min_size(egui::vec2(40.0, 40.0))
+                .corner_radius(4.0)
         } else {
             widget
-                .min_size(egui::vec2(ui.available_width(), 24.0))
+                .frame(false)
+                .min_size(egui::vec2(ui.available_width(), 22.0))
                 .corner_radius(4.0)
         };
 

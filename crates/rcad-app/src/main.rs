@@ -2,6 +2,7 @@
 
 mod app;
 mod camera;
+mod settings;
 mod shortcuts;
 mod undo;
 mod viewport;
