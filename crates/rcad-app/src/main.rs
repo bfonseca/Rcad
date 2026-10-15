@@ -35,6 +35,8 @@ struct Cli {
     view: Option<String>,
     /// Open the feature dialog on startup (for screenshots and docs).
     dialog: bool,
+    /// Open this project folder directly, skipping the project picker.
+    project: Option<PathBuf>,
 }
 
 const USAGE: &str = "\
@@ -76,6 +78,9 @@ fn parse_args() -> Result<Cli, String> {
             }
             "--demo" => cli.demo = true,
             "--dialog" => cli.dialog = true,
+            "--project" => {
+                cli.project = Some(PathBuf::from(args.next().ok_or("--project needs a folder")?));
+            }
             "--view" => {
                 cli.view = Some(args.next().ok_or("--view needs a name")?);
             }
@@ -151,12 +156,17 @@ fn main() -> eframe::Result<()> {
     let demo = cli.demo;
     let view = cli.view.clone();
     let dialog = cli.dialog;
+    let project = cli.project.clone();
 
     eframe::run_native(
         "rcad",
         options,
         Box::new(move |cc| {
             let mut app = RcadApp::new(cc);
+            app.restore_last_project();
+            if let Some(folder) = project.clone() {
+                app.open_project_folder(folder);
+            }
             match view.as_deref() {
                 Some("iso") => app.set_view_iso(),
                 Some("front") => app.set_view_front(),
