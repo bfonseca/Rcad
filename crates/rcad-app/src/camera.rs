@@ -13,8 +13,8 @@ impl Default for OrbitCamera {
         Self {
             target: Vec3::ZERO,
             distance: 120.0,
-            yaw: 0.7,
-            pitch: 0.5,
+            yaw: 0.0,
+            pitch: 0.7, // ~45 degrees, looking down at XY plane (Z up)
         }
     }
 }
@@ -36,7 +36,15 @@ impl OrbitCamera {
 
     pub fn orbit(&mut self, delta: Vec2) {
         self.yaw += delta.x * 0.01;
-        self.pitch = (self.pitch + delta.y * 0.01).clamp(-1.5, 1.5);
+        self.pitch += delta.y * 0.01;
+        // Allow full 360º rotation, but keep pitch reasonable for usability
+        // Allow pitch to wrap around for continuous rotation
+        // Clamp to avoid singularity at poles but allow full range
+        if self.pitch > std::f32::consts::FRAC_PI_2 - 0.01 {
+            self.pitch = std::f32::consts::FRAC_PI_2 - 0.01;
+        } else if self.pitch < -std::f32::consts::FRAC_PI_2 + 0.01 {
+            self.pitch = -std::f32::consts::FRAC_PI_2 + 0.01;
+        }
     }
 
     pub fn pan(&mut self, delta: Vec2) {

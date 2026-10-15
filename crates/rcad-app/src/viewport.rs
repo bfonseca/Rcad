@@ -296,8 +296,8 @@ pub fn draw_viewport(
         draw_construction_geometry(&painter, rect, camera, part, selected_construction);
     }
 
-    // Axes gizmo (world axes)
-    draw_axes(&painter, rect, camera);
+    // Draw corner CYS (Coordinate System) in bottom-left
+    draw_corner_cys(&painter, rect, camera);
 
     response
 }
@@ -324,23 +324,25 @@ fn project(vp: Mat4, rect: Rect, p: Vec3) -> Option<Pos2> {
 fn draw_grid(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
     let vp = view_proj(rect, camera);
     let stroke = Stroke::new(1.0_f32, Color32::from_rgb(50, 54, 60));
+    // Ground grid in XY plane (Z=0) since Z is up
     for i in -10..=10 {
         let t = i as f32 * 10.0;
         if let (Some(a), Some(b)) = (
-            project(vp, rect, Vec3::new(t, 0.0, -100.0)),
-            project(vp, rect, Vec3::new(t, 0.0, 100.0)),
+            project(vp, rect, Vec3::new(t, -100.0, 0.0)),
+            project(vp, rect, Vec3::new(t, 100.0, 0.0)),
         ) {
             painter.line_segment([a, b], stroke);
         }
         if let (Some(a), Some(b)) = (
-            project(vp, rect, Vec3::new(-100.0, 0.0, t)),
-            project(vp, rect, Vec3::new(100.0, 0.0, t)),
+            project(vp, rect, Vec3::new(-100.0, t, 0.0)),
+            project(vp, rect, Vec3::new(100.0, t, 0.0)),
         ) {
             painter.line_segment([a, b], stroke);
         }
     }
 }
 
+// Draw world axes at viewport origin (for reference)
 fn draw_axes(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
     let vp = view_proj(rect, camera);
     let o = Vec3::ZERO;
@@ -355,6 +357,61 @@ fn draw_axes(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
                 painter.line_segment([op, ep], Stroke::new(2.0_f32, color));
             }
         }
+    }
+}
+
+// Draw coordinate system triad in bottom-left corner (CYS)
+fn draw_corner_cys(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
+    // Fixed position in bottom-left corner (screen space)
+    let corner_origin = Pos2::new(60.0, rect.height() - 60.0);
+    let size = 40.0; // Small size for corner CYS
+    
+    // Get camera orientation to show world axes correctly
+    // We need to project world axes endpoints
+    let vp = view_proj(rect, camera);
+    
+    // World axes endpoints
+    let world_axes = [
+        (Vec3::X * size, Color32::RED, "X"),
+        (Vec3::Y * size, Color32::GREEN, "Y"),
+        (Vec3::Z * size, Color32::BLUE, "Z"),
+    ];
+    
+    // Project world axes from origin
+    if let Some(op) = project(vp, rect, Vec3::ZERO) {
+        // Draw the corner CYS at fixed screen position
+        // We'll draw it using screen-space coordinates directly
+        let axes_2d = [
+            (Vec2::new(size, 0.0), Color32::RED, "X"),   // X to the right
+            (Vec2::new(0.0, -size), Color32::GREEN, "Y"), // Y up
+            (Vec2::new(-size * 0.7, -size * 0.7), Color32::BLUE, "Z"), // Z diagonal (iso view)
+        ];
+        
+        for (axis_vec, color, label) in axes_2d {
+            let ep = corner_origin + axis_vec;
+            painter.line_segment([corner_origin, ep], Stroke::new(2.0_f32, color));
+            
+            // Arrowhead
+            let arrow_len = 8.0;
+            let dir_2d = axis_vec.normalized();
+            let perp = Vec2::new(-dir_2d.y, dir_2d.x);
+            let arrow1 = ep - dir_2d * arrow_len + perp * 4.0;
+            let arrow2 = ep - dir_2d * arrow_len - perp * 4.0;
+            painter.line_segment([ep, arrow1], Stroke::new(2.0_f32, color));
+            painter.line_segment([ep, arrow2], Stroke::new(2.0_f32, color));
+            
+            // Axis label
+            painter.text(
+                ep + dir_2d * 6.0,
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(10.0),
+                color,
+            );
+        }
+        
+        // Origin dot
+        painter.circle_filled(corner_origin, 3.0, Color32::WHITE);
     }
 }
 
@@ -474,10 +531,9 @@ fn draw_datum_plane(
     _idx: usize,
     is_selected: bool,
 ) {
-    // Draw a plane as a reference grid (not a solid surface)
-    let size = 80.0;
+    // Draw a plane as a transparent solid (not a grid)
+    let size = 60.0; // Reduced size
     let half = size * 0.5;
-    let grid_step = 10.0;
     
     // Create two perpendicular vectors in the plane
     let u = if normal.dot(Vec3::Z).abs() < 0.9 {
@@ -504,34 +560,18 @@ fn draw_datum_plane(
     if projected.len() == 4 {
         let center = (corners[0] + corners[1] + corners[2] + corners[3]) / 4.0;
         
-        // Use a distinctive color for planes
-        let (edge_color, grid_color) = if is_selected {
-            (Color32::YELLOW, Color32::from_rgba_premultiplied(150, 220, 255, 120))
+        // Use a distinctive color for planes - transparent solid
+        let (base_color, edge_color) = if is_selected {
+            (Color32::from_rgba_premultiplied(100, 200, 255, 180), Color32::YELLOW)
         } else {
-            (Color32::from_rgb(100, 200, 255), Color32::from_rgba_premultiplied(100, 180, 255, 60))
+            (Color32::from_rgba_premultiplied(100, 180, 255, 100), Color32::from_rgb(100, 200, 255))
         };
         
-        // Draw grid lines on the plane (reference plane style)
-        let grid_stroke = Stroke::new(0.5_f32, grid_color);
-        let num_steps = (size / grid_step) as i32;
-        for i in -num_steps..=num_steps {
-            let offset = i as f32 * grid_step;
-            // Horizontal grid lines
-            let p1 = origin + u * offset + v * half;
-            let p2 = origin + u * offset - v * half;
-            if let (Some(proj1), Some(proj2)) = (project(vp, rect, p1), project(vp, rect, p2)) {
-                painter.line_segment([proj1, proj2], grid_stroke);
-            }
-            // Vertical grid lines
-            let p1 = origin + u * half + v * offset;
-            let p2 = origin - u * half + v * offset;
-            if let (Some(proj1), Some(proj2)) = (project(vp, rect, p1), project(vp, rect, p2)) {
-                painter.line_segment([proj1, proj2], grid_stroke);
-            }
-        }
+        // Draw filled quad with transparency (transparent solid)
+        painter.add(Shape::convex_polygon(projected.clone(), base_color, Stroke::NONE));
         
         // Draw boundary edges (thicker when selected)
-        let edge_width = if is_selected { 2.5_f32 } else { 1.5_f32 };
+        let edge_width = if is_selected { 2.0_f32 } else { 1.0_f32 };
         for i in 0..4 {
             painter.line_segment([projected[i], projected[(i + 1) % 4]], Stroke::new(edge_width, edge_color));
         }
@@ -542,7 +582,7 @@ fn draw_datum_plane(
                 center_pos + Vec2::new(0.0, -20.0),
                 egui::Align2::CENTER_CENTER,
                 &feature.name,
-                egui::FontId::proportional(11.0),
+                egui::FontId::proportional(10.0),
                 edge_color,
             );
         }
@@ -561,21 +601,20 @@ fn draw_datum_axis(
     _idx: usize,
     is_selected: bool,
 ) {
-    let length = 100.0;
+    let length = 60.0; // Reduced size
     let end = origin + direction * length;
-    let radius = 2.0; // Visual radius for picking
     
     if let (Some(o), Some(e)) = (project(vp, rect, origin), project(vp, rect, end)) {
         // Draw axis as a line with arrow
         let (color, line_width) = if is_selected {
-            (Color32::YELLOW, 4.0_f32)
+            (Color32::YELLOW, 3.0_f32)
         } else {
-            (Color32::from_rgb(255, 180, 80), 3.0_f32)
+            (Color32::from_rgb(255, 180, 80), 2.0_f32)
         };
         painter.line_segment([o, e], Stroke::new(line_width, color));
         
         // Draw arrowhead
-        let arrow_len = 15.0;
+        let arrow_len = 10.0; // Smaller arrow
         let arrow_angle = 0.5; // radians
         let dir_2d = (e - o).normalized();
         let perp = Vec2::new(-dir_2d.y, dir_2d.x);
@@ -588,10 +627,10 @@ fn draw_datum_axis(
         
         // Draw label at end
         painter.text(
-            e + dir_2d * 10.0 + perp * 5.0,
+            e + dir_2d * 8.0 + perp * 5.0,
             egui::Align2::LEFT_CENTER,
             &feature.name,
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(10.0),
             color,
         );
     }
@@ -651,7 +690,7 @@ fn draw_coord_system(
     _idx: usize,
     is_selected: bool,
 ) {
-    let size = 60.0;
+    let size = 40.0; // Reduced size
     
     // For coordinate system, we use the feature's direction as Z, and compute X, Y
     // The origin is the feature origin, direction is the Z axis
@@ -670,7 +709,7 @@ fn draw_coord_system(
     ];
     
     if let Some(op) = project(vp, rect, origin) {
-        let line_width = if is_selected { 4.0_f32 } else { 3.0_f32 };
+        let line_width = if is_selected { 3.0_f32 } else { 2.0_f32 };
         
         for (axis_vec, color, label) in axes {
             let end = origin + axis_vec;
@@ -679,20 +718,20 @@ fn draw_coord_system(
                 painter.line_segment([op, ep], Stroke::new(line_width, color));
                 
                 // Arrowhead
-                let arrow_len = 10.0;
+                let arrow_len = 8.0;
                 let dir_2d = (ep - op).normalized();
                 let perp = Vec2::new(-dir_2d.y, dir_2d.x);
-                let arrow1 = ep - dir_2d * arrow_len + perp * 5.0;
-                let arrow2 = ep - dir_2d * arrow_len - perp * 5.0;
+                let arrow1 = ep - dir_2d * arrow_len + perp * 4.0;
+                let arrow2 = ep - dir_2d * arrow_len - perp * 4.0;
                 painter.line_segment([ep, arrow1], Stroke::new(line_width, color));
                 painter.line_segment([ep, arrow2], Stroke::new(line_width, color));
                 
                 // Axis label
                 painter.text(
-                    ep + dir_2d * 8.0,
+                    ep + dir_2d * 6.0,
                     egui::Align2::CENTER_CENTER,
                     label,
-                    egui::FontId::proportional(12.0),
+                    egui::FontId::proportional(10.0),
                     color,
                 );
             }

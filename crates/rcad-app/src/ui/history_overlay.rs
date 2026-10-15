@@ -173,8 +173,8 @@ impl HistoryOverlay {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
         
-        // Always solid background - no hover darkening
-        ui.painter().rect_filled(content_rect, 0.0, egui::Color32::from_gray(30));
+        // No background for history tree
+        // ui.painter().rect_filled(content_rect, 0.0, egui::Color32::from_gray(30));
         
         let mut content_ui = ui.new_child(egui::UiBuilder::new().max_rect(content_rect).layout(*ui.layout()));
         
@@ -320,45 +320,56 @@ impl HistoryOverlay {
         let indent = depth as f32 * 16.0;
         
         ui.horizontal(|ui| {
-            ui.add_space(indent);
-            
-            // Expand/collapse toggle
-            if has_children {
-                let toggle_icon = if is_expanded { "▼" } else { "▶" };
-                if ui.small_button(toggle_icon).clicked() {
-                    self.toggle_expanded(feature.id);
-                }
-            } else {
-                ui.add_space(16.0);
-            }
-            
-            // Insert Here marker
-            if self.insert_here_index == Some(feature_idx) {
-                ui.label(egui::RichText::new("▶").color(egui::Color32::GREEN).strong());
-            } else {
-                ui.add_space(16.0);
-            }
-            
-            // Rollback marker
-            if self.rollback_index == Some(feature_idx) {
-                ui.label(egui::RichText::new("⏪").color(egui::Color32::ORANGE).strong());
-            }
-            
-            // Feature icon
-            ui.label(icon);
-            
-            // Feature name
-            let mut label = egui::RichText::new(&feature.name)
-                .size(13.0)
-                .color(label_color);
-            if strikethrough {
-                label = label.strikethrough();
-            }
-            if is_selected {
-                label = label.background_color(egui::Color32::from_gray(60));
-            }
-            
-            let response = ui.selectable_label(is_selected, label);
+           ui.add_space(indent);
+           
+           // Expand/collapse toggle
+           if has_children {
+               let toggle_icon = if is_expanded { "▼" } else { "▶" };
+               if ui.small_button(toggle_icon).clicked() {
+                   self.toggle_expanded(feature.id);
+               }
+           } else {
+               ui.add_space(16.0);
+           }
+           
+           // Insert Here marker
+           if self.insert_here_index == Some(feature_idx) {
+               ui.label(egui::RichText::new("▶").color(egui::Color32::GREEN).strong());
+           } else {
+               ui.add_space(16.0);
+           }
+           
+           // Rollback marker
+           if self.rollback_index == Some(feature_idx) {
+               ui.label(egui::RichText::new("⏪").color(egui::Color32::ORANGE).strong());
+           }
+           
+           // Visibility/Show icon (left of name)
+           let vis_response = ui.small_button(egui::RichText::new(visibility_icon).size(14.0).color(visibility_color))
+               .on_hover_text(if is_visible { "Hide" } else { "Show" });
+           if vis_response.clicked() {
+               on_action(HistoryOverlayAction::ToggleVisibility(feature.id));
+           }
+           
+           // Suppress/Resume icon (left of name)
+           let sup_response = ui.small_button(egui::RichText::new(suppression_icon).size(14.0).color(suppression_color))
+               .on_hover_text(if is_suppressed { "Resume (Ctrl+H)" } else { "Suppress (Ctrl+H)" });
+           if sup_response.clicked() {
+               on_action(HistoryOverlayAction::ToggleSuppression(feature.id));
+           }
+           
+           // Feature name (no icon on left)
+           let mut label = egui::RichText::new(&feature.name)
+               .size(13.0)
+               .color(label_color);
+           if strikethrough {
+               label = label.strikethrough();
+           }
+           if is_selected {
+               label = label.background_color(egui::Color32::from_gray(60));
+           }
+           
+           let response = ui.selectable_label(is_selected, label);
             
             // Click to select
             if response.clicked() {
@@ -380,27 +391,12 @@ impl HistoryOverlay {
                 on_action(HistoryOverlayAction::DropFeature(feature.id));
             }
             
-            // Action icons (right side)
+            // Relations/Parameters icon (right side)
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Relations/Parameters icon (click to open dialog)
                 let rel_response = ui.small_button(egui::RichText::new(relations_icon).size(14.0).color(egui::Color32::WHITE))
                     .on_hover_text("Relations & Parameters");
                 if rel_response.clicked() {
                     on_action(HistoryOverlayAction::OpenRelationsDialog(feature.id));
-                }
-                
-                // Suppress/Resume icon
-                let sup_response = ui.small_button(egui::RichText::new(suppression_icon).size(14.0).color(suppression_color))
-                    .on_hover_text(if is_suppressed { "Resume (Ctrl+H)" } else { "Suppress (Ctrl+H)" });
-                if sup_response.clicked() {
-                    on_action(HistoryOverlayAction::ToggleSuppression(feature.id));
-                }
-                
-                // Show/Hide icon
-                let vis_response = ui.small_button(egui::RichText::new(visibility_icon).size(14.0).color(visibility_color))
-                    .on_hover_text(if is_visible { "Hide" } else { "Show" });
-                if vis_response.clicked() {
-                    on_action(HistoryOverlayAction::ToggleVisibility(feature.id));
                 }
             });
             

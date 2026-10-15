@@ -1,4 +1,7 @@
-//! Rebuild a [`rcad_doc::Part`] feature tree against a [`GeometryBackend`].
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+/// Rebuild a [`rcad_doc::Part`] feature tree against a [`GeometryBackend`].
 
 use glam::{dvec3, DVec3};
 use rcad_doc::{dvec3_from, ConstructionKind, FeatureKind, Part, RebuildResult};
@@ -15,72 +18,165 @@ pub enum RebuildError {
 
 pub type RebuildOutcome = Result<RebuildResult, RebuildError>;
 
+/// Compute a hash for a feature based on its parameters
+fn compute_feature_hash(feature: &rcad_doc::Feature) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    feature.id.hash(&mut hasher);
+    feature.name.hash(&mut hasher);
+    feature.suppressed.hash(&mut hasher);
+    feature.visible.hash(&mut hasher);
+    match &feature.kind {
+        FeatureKind::Box { size } => {
+            size[0].to_bits().hash(&mut hasher);
+            size[1].to_bits().hash(&mut hasher);
+            size[2].to_bits().hash(&mut hasher);
+        }
+        FeatureKind::Cylinder { radius, height } => {
+            radius.to_bits().hash(&mut hasher);
+            height.to_bits().hash(&mut hasher);
+        }
+        FeatureKind::Extrude { profile, height } => {
+            height.to_bits().hash(&mut hasher);
+            // Hash profile points
+            for p in &profile.outer {
+                p[0].to_bits().hash(&mut hasher);
+                p[1].to_bits().hash(&mut hasher);
+            }
+        }
+        FeatureKind::Revolve { profile, angle_deg } => {
+            angle_deg.to_bits().hash(&mut hasher);
+            for p in &profile.outer {
+                p[0].to_bits().hash(&mut hasher);
+                p[1].to_bits().hash(&mut hasher);
+            }
+        }
+        FeatureKind::Construction { kind, origin, direction } => {
+            (*kind as u8).hash(&mut hasher);
+            origin[0].to_bits().hash(&mut hasher);
+            origin[1].to_bits().hash(&mut hasher);
+            origin[2].to_bits().hash(&mut hasher);
+            direction[0].to_bits().hash(&mut hasher);
+            direction[1].to_bits().hash(&mut hasher);
+            direction[2].to_bits().hash(&mut hasher);
+        }
+        _ => {
+            // For other feature types, hash the entire kind discriminant
+            std::mem::discriminant(&feature.kind).hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Shape cache for incremental rebuilds
+pub struct ShapeCache {
+    /// Cached shape IDs per feature UUID + parameter hash
+    entries: std::collections::HashMap<Uuid, (u64, ShapeId)>,
+}
+
+impl ShapeCache {
+    pub fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn rebuild_part_incremental(
+        &mut self,
+        part: &Part,
+        backend: &mut dyn GeometryBackend,
+    ) -> RebuildResult {
+        let mut result = RebuildResult::default();
+        let mut named: HashMap<Uuid, ShapeId> = HashMap::new();
+        let mut history: Vec<(Uuid, ShapeId)> = Vec::new();
+        let mut current: Option<ShapeId> = None;
+        let mut first_dirty_idx = None;
+        let mut visible_shapes: Vec<ShapeId> = Vec::new();
+
+        for (idx, feature) in part.features.iter().enumerate() {
+            if feature.suppressed || part.suppressed.contains(&feature.id) {
+                continue;
+            }
+            if !feature.visible && !matches!(feature.kind, FeatureKind::Construction { .. }) {
+                continue;
+            }
+
+            let hash = compute_feature_hash(feature);
+            // let mut feature_changed = false;
+
+            if let Some(&(cached_hash, shape_id)) = self.entries.get(&feature.id) {
+                if cached_hash == hash && first_dirty_idx.is_none() {
+                    // Feature unchanged: reuse cached shape
+                    named.insert(feature.id, shape_id);
+                    history.push((feature.id, shape_id));
+                    current = Some(shape_id);
+                    if feature.visible {
+                        visible_shapes.push(shape_id);
+                    }
+                    continue;
+                }
+            }
+
+            if first_dirty_idx.is_none() {
+                first_dirty_idx = Some(idx);
+            }
+            // feature_changed = true;
+
+            // Invalidate this feature and all subsequent
+            self.entries.remove(&feature.id);
+            if let Ok(Some(new_shape)) = eval_feature(&feature.kind, current, &named, &history, backend) {
+                self.entries.insert(feature.id, (hash, new_shape));
+                named.insert(feature.id, new_shape);
+                history.push((feature.id, new_shape));
+                if feature.visible {
+                    visible_shapes.push(new_shape);
+                }
+                // Boolean / fillet / transform update the active body
+                let updates_body = !matches!(feature.kind, FeatureKind::Construction { .. });
+                if updates_body {
+                    current = Some(new_shape);
+                }
+            } else if let Err(e) = eval_feature(&feature.kind, current, &named, &history, backend) {
+                result.errors.push(format!("{}: {e}", feature.name));
+            }
+        }
+
+        // Tessellate the current body (last solid/surface)
+        if let Some(shape) = current {
+            match backend.tessellate(shape) {
+                Ok(mesh) => result.display_mesh = mesh,
+                Err(e) => result.errors.push(e.to_string()),
+            }
+        }
+        
+        // Also tessellate all visible construction geometry and add to display mesh
+        if !visible_shapes.is_empty() {
+            match backend.tessellate_many(&visible_shapes) {
+                Ok(construction_mesh) => {
+                    let offset = result.display_mesh.positions.len() as u32;
+                    result.display_mesh.positions.extend(construction_mesh.positions);
+                    result.display_mesh.normals.extend(construction_mesh.normals);
+                    for idx in construction_mesh.indices {
+                        result.display_mesh.indices.push(idx + offset);
+                    }
+                }
+                Err(e) => result.errors.push(e.to_string()),
+            }
+        }
+
+        result
+    }
+}
+
+impl Default for ShapeCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Evaluate features in order; each feature consumes the previous body unless noted.
 pub fn rebuild_part(part: &Part, backend: &mut dyn GeometryBackend) -> RebuildResult {
-    let mut result = RebuildResult::default();
-    let mut current: Option<ShapeId> = None;
-    let mut named: HashMap<Uuid, ShapeId> = HashMap::new();
-
-    // Collect all visible shapes for tessellation (including construction geometry)
-    let mut visible_shapes: Vec<ShapeId> = Vec::new();
-    
-    for feature in &part.features {
-        if feature.suppressed || part.suppressed.contains(&feature.id) {
-            continue;
-        }
-        // Skip invisible features (but still process them if they're reference features)
-        if !feature.visible && !matches!(feature.kind, FeatureKind::Construction { .. }) {
-            continue;
-        }
-        match eval_feature(&feature.kind, current, &named, &result.shapes, backend) {
-            Ok(Some(shape)) => {
-                named.insert(feature.id, shape);
-                result.shapes.push((feature.id, shape));
-                // Collect all visible shapes for tessellation
-                if feature.visible {
-                    visible_shapes.push(shape);
-                }
-                // Boolean / fillet / transform update the active body; raw tools
-                // that only exist to be referenced keep `current` unchanged when
-                // they are not the latest body-producing op after a boolean.
-                let updates_body = !matches!(
-                    feature.kind,
-                    FeatureKind::Construction { .. }
-                );
-                if updates_body {
-                    current = Some(shape);
-                }
-            }
-            Ok(None) => {}
-            Err(e) => result.errors.push(format!("{}: {e}", feature.name)),
-        }
-    }
-
-    // Tessellate the current body (last solid/surface)
-    if let Some(shape) = current {
-        match backend.tessellate(shape) {
-            Ok(mesh) => result.display_mesh = mesh,
-            Err(e) => result.errors.push(e.to_string()),
-        }
-    }
-    
-    // Also tessellate all visible construction geometry and add to display mesh
-    if !visible_shapes.is_empty() {
-        match backend.tessellate_many(&visible_shapes) {
-            Ok(construction_mesh) => {
-                // Merge construction mesh with display mesh
-                let offset = result.display_mesh.positions.len() as u32;
-                result.display_mesh.positions.extend(construction_mesh.positions);
-                result.display_mesh.normals.extend(construction_mesh.normals);
-                for idx in construction_mesh.indices {
-                    result.display_mesh.indices.push(idx + offset);
-                }
-            }
-            Err(e) => result.errors.push(e.to_string()),
-        }
-    }
-
-    result
+    let mut cache = ShapeCache::new();
+    cache.rebuild_part_incremental(part, backend)
 }
 
 fn eval_feature(

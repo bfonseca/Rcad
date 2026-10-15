@@ -5,13 +5,30 @@ use crate::undo::UndoStack;
 use crate::shortcuts::{Shortcuts, handle_shortcuts, shortcuts_list};
 use crate::ui::{VerticalToolbar, ToolbarAction, HistoryOverlay, HistoryOverlayAction};
 use rcad_geom::TriangleMesh;
-use rcad_doc::{self, Project, Feature, FeatureKind, ConstructionKind};
+use rcad_doc::{self, Project, Feature, FeatureKind, ConstructionKind, Part, RebuildResult};
 use rcad_features;
 use rcad_occt::OcctBackend;
+use rcad_param::{ShapeCache};
 use rcad_sketch::Sketch;
 use std::path::{Path, PathBuf};
 use rfd::FileDialog;
 use uuid::Uuid;
+use crossbeam_channel::{bounded, Sender, Receiver};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
+
+// Async kernel worker types
+pub struct RebuildJob {
+    pub version: u64,
+    pub part: Part,
+}
+
+pub struct RebuildResponse {
+    pub version: u64,
+    pub mesh: TriangleMesh,
+    pub errors: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionMode {
@@ -49,10 +66,41 @@ pub struct RcadApp {
     selected_feature: Option<uuid::Uuid>,
     selected_construction_feature: Option<usize>, // Feature index for construction geometry
     selection_mode: SelectionMode,
+    
+    // Async kernel worker
+    kernel_worker_tx: Option<Sender<RebuildJob>>,
+    kernel_worker_rx: Option<Receiver<RebuildResponse>>,
+    kernel_version: Arc<AtomicU64>,
+    kernel_worker_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl RcadApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let (job_tx, job_rx) = bounded::<RebuildJob>(2);
+        let (res_tx, res_rx) = bounded::<RebuildResponse>(2);
+        let version_counter = Arc::new(AtomicU64::new(0));
+        let version_worker = version_counter.clone();
+        
+        let kernel_worker_handle = thread::Builder::new()
+            .name("rcad-kernel-worker".into())
+            .spawn(move || {
+                let mut backend = rcad_occt::OcctBackend::default();
+                let mut cache = ShapeCache::new();
+                while let Ok(job) = job_rx.recv() {
+                    // Check if a newer job was already queued; skip stale frames
+                    if job.version < version_worker.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let res = cache.rebuild_part_incremental(&job.part, &mut backend);
+                    let _ = res_tx.send(RebuildResponse {
+                        version: job.version,
+                        mesh: res.display_mesh,
+                        errors: res.errors,
+                    });
+                }
+            })
+            .expect("Failed to spawn kernel worker thread");
+        
         let mut this = Self {
             camera: OrbitCamera::default(),
             mesh: TriangleMesh::default(),
@@ -80,7 +128,14 @@ impl RcadApp {
             selected_feature: None,
             selected_construction_feature: None,
             selection_mode: SelectionMode::Object,
+            
+            // Async kernel worker
+            kernel_worker_tx: Some(job_tx),
+            kernel_worker_rx: Some(res_rx),
+            kernel_version: version_counter,
+            kernel_worker_handle: Some(kernel_worker_handle),
         };
+        
         // Create default datum geometry (coordinate system + datum planes) for new part
         let _ = this.create_default_datum_geometry();
         this
@@ -499,6 +554,33 @@ impl RcadApp {
                     self.history_overlay.show(ui, &part, &mut |action| history_action = Some(action));
                 }
             }
+            
+            // Handle async kernel worker responses
+            if let Some(rx) = &self.kernel_worker_rx {
+                while let Ok(response) = rx.try_recv() {
+                    // Only apply if this is the latest version
+                    if response.version >= self.kernel_version.load(Ordering::Relaxed) {
+                        self.mesh = response.mesh;
+                        if !response.errors.is_empty() {
+                            self.last_error = Some(response.errors.join("\n"));
+                        }
+                    }
+                }
+            }
+            
+            // Trigger async rebuild if needed (e.g., when project changes)
+            // For now, we'll trigger on every frame if there's a pending rebuild
+            // In a real app, you'd track dirty state
+            if let Some(tx) = &self.kernel_worker_tx {
+                let version = self.kernel_version.fetch_add(1, Ordering::Relaxed);
+                let part_clone_for_rebuild = self.get_active_part().cloned();
+                if let Some(part) = part_clone_for_rebuild {
+                    let _ = tx.try_send(RebuildJob {
+                        version,
+                        part,
+                    });
+                }
+            }
         });
         
         // Process toolbar actions
@@ -722,20 +804,20 @@ impl RcadApp {
                 self.show_relations_dialog = None;
             }
         } else {
-                ui.label("Feature not found");
-                if ui.button("Close").clicked() {
-                    self.show_relations_dialog = None;
-                }
+            ui.label("Feature not found");
+            if ui.button("Close").clicked() {
+                self.show_relations_dialog = None;
             }
         }
+    }
     
     fn sketch_panel(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Sketch");
-            if ui.button("New Sketch").clicked() {
-                self.undo_stack.push(self.project.clone());
-                self.sketch = Some(Sketch::new("Sketch1"));
-                self.last_error = None;
-            }
+        ui.heading("Sketch");
+        if ui.button("New Sketch").clicked() {
+            self.undo_stack.push(self.project.clone());
+            self.sketch = Some(Sketch::new("Sketch1"));
+            self.last_error = None;
+        }
 
         // Handle adding points, lines, rectangle (these mutate sketch)
         if let Some(sketch) = &mut self.sketch {
@@ -828,7 +910,7 @@ impl RcadApp {
             ui.label("No active part");
             return;
         };
-
+        
         // Now we can safely clone and modify
         if !suppress_these.is_empty() || !unsuppress_these.is_empty() {
             self.undo_stack.push(self.project.clone());
@@ -931,8 +1013,8 @@ impl RcadApp {
                         }
                     }
                 });
+                ui.separator();
             });
-            ui.separator();
         } else {
             // No active sketch - show "New Sketch" button
             if ui.button("📝 New Sketch").clicked() {
@@ -1740,6 +1822,30 @@ impl RcadApp {
 
 impl Default for RcadApp {
     fn default() -> Self {
+        let (job_tx, job_rx) = bounded::<RebuildJob>(2);
+        let (res_tx, res_rx) = bounded::<RebuildResponse>(2);
+        let version_counter = Arc::new(AtomicU64::new(0));
+        let version_worker = version_counter.clone();
+        
+        let kernel_worker_handle = thread::Builder::new()
+            .name("rcad-kernel-worker".into())
+            .spawn(move || {
+                let mut backend = rcad_occt::OcctBackend::default();
+                let mut cache = ShapeCache::new();
+                while let Ok(job) = job_rx.recv() {
+                    if job.version < version_worker.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let res = cache.rebuild_part_incremental(&job.part, &mut backend);
+                    let _ = res_tx.send(RebuildResponse {
+                        version: job.version,
+                        mesh: res.display_mesh,
+                        errors: res.errors,
+                    });
+                }
+            })
+            .expect("Failed to spawn kernel worker thread");
+        
         Self {
             camera: OrbitCamera::default(),
             mesh: TriangleMesh::default(),
@@ -1767,6 +1873,12 @@ impl Default for RcadApp {
             selected_feature: None,
             selected_construction_feature: None,
             selection_mode: SelectionMode::Object,
+            
+            // Async kernel worker
+            kernel_worker_tx: Some(job_tx),
+            kernel_worker_rx: Some(res_rx),
+            kernel_version: version_counter,
+            kernel_worker_handle: Some(kernel_worker_handle),
         }
     }
 }

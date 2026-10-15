@@ -92,4 +92,21 @@ impl GeometryBackend for TruckBackend {
         Err(unsupported())
     }
     fn drop_shape(&mut self, _shape: ShapeId) {}
+    
+    // Construction geometry - stub implementations for datum features
+    fn plane(&mut self, _origin: DVec3, _normal: DVec3, _size: f64) -> GeomResult<ShapeId> {
+        Err(unsupported())
+    }
+    
+    fn axis(&mut self, _origin: DVec3, _direction: DVec3, _length: f64) -> GeomResult<ShapeId> {
+        Err(unsupported())
+    }
+    
+    fn point(&mut self, _position: DVec3, _size: f64) -> GeomResult<ShapeId> {
+        Err(unsupported())
+    }
+    
+    fn coordinate_system(&mut self, _origin: DVec3, _x_dir: DVec3, _y_dir: DVec3, _z_dir: DVec3, _size: f64) -> GeomResult<ShapeId> {
+        Err(unsupported())
+    }
 }

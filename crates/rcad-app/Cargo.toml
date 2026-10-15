@@ -35,3 +35,5 @@ rfd = "0.15"
 uuid.workspace = true
 image.workspace = true
 rcad-table.workspace = true
+crossbeam-channel = "0.5"  # For async kernel worker
+rcad-truck.workspace = true  # Truck pure-Rust backend

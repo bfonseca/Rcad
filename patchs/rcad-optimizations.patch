@@ -1,0 +1,175 @@
+# Rcad Architecture & Concurrency Optimizations Patch
+# Target: https://github.com/bfonseca/Rcad
+#
+
+# --- Patch: Destruction & Re-allocation of GeometryBackend on Every Rebuild ---
+# File: crates/rcad-app/src/app.rs & crates/rcad-param/src/lib.rs
+
+// Optimized rcad-param/src/lib.rs with DAG Incremental ShapeCache
+pub struct ShapeCache {
+    /// Cached shape IDs per feature UUID + parameter hash
+    entries: std::collections::HashMap<Uuid, (u64, ShapeId)>,
+}
+
+impl ShapeCache {
+    pub fn rebuild_part_incremental(
+        &mut self,
+        part: &Part,
+        backend: &mut dyn GeometryBackend,
+    ) -> RebuildResult {
+        let mut named: HashMap<Uuid, ShapeId> = HashMap::new();
+        let mut history: Vec<(Uuid, ShapeId)> = Vec::new();
+        let mut current: Option<ShapeId> = None;
+        let mut first_dirty_idx = None;
+
+        // 1. Identify first dirty feature via parameter hash
+        for (idx, feature) in part.features.iter().enumerate() {
+            let hash = compute_feature_hash(feature);
+            if let Some(&(cached_hash, shape_id)) = self.entries.get(&feature.id) {
+                if cached_hash == hash && first_dirty_idx.is_none() {
+                    // Feature unchanged: reuse cached shape
+                    named.insert(feature.id, shape_id);
+                    history.push((feature.id, shape_id));
+                    current = Some(shape_id);
+                    continue;
+                }
+            }
+            if first_dirty_idx.is_none() {
+                first_dirty_idx = Some(idx);
+            }
+            // Invalidate subsequent features
+            self.entries.remove(&feature.id);
+            if let Ok(Some(new_shape)) = eval_feature(&feature.kind, current, &named, &history, backend) {
+                self.entries.insert(feature.id, (hash, new_shape));
+                named.insert(feature.id, new_shape);
+                history.push((feature.id, new_shape));
+                current = Some(new_shape);
+            }
+        }
+        // Tessellate only the final dirty shape
+        // ...
+    }
+}
+
+
+# --- Patch: Synchronous B-Rep Kernel Math Freezing the egui Main UI Thread ---
+# File: crates/rcad-app/src/app.rs
+
+// Asynchronous Kernel Worker in crates/rcad-app/src/app.rs
+use crossbeam_channel::{bounded, Sender, Receiver};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+pub struct KernelWorker {
+    pub tx: Sender<RebuildJob>,
+    pub rx: Receiver<RebuildResponse>,
+    pub current_version: Arc<AtomicU64>,
+}
+
+pub struct RebuildJob {
+    pub version: u64,
+    pub part: rcad_doc::Part,
+}
+
+pub struct RebuildResponse {
+    pub version: u64,
+    pub mesh: rcad_geom::TriangleMesh,
+    pub errors: Vec<String>,
+}
+
+impl KernelWorker {
+    pub fn spawn() -> Self {
+        let (job_tx, job_rx) = bounded::<RebuildJob>(2); // Backpressure bounded queue
+        let (res_tx, res_rx) = bounded::<RebuildResponse>(2);
+        let version_counter = Arc::new(AtomicU64::new(0));
+        let version_worker = version_counter.clone();
+
+        std::thread::Builder::new()
+            .name("rcad-kernel-worker".into())
+            .spawn(move || {
+                let mut backend = rcad_occt::OcctBackend::default();
+                let mut cache = rcad_param::ShapeCache::new();
+                while let Ok(job) = job_rx.recv() {
+                    // Check if a newer job was already queued; skip stale frames
+                    if job.version < version_worker.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let res = cache.rebuild_part_incremental(&job.part, &mut backend);
+                    let _ = res_tx.send(RebuildResponse {
+                        version: job.version,
+                        mesh: res.display_mesh,
+                        errors: res.errors,
+                    });
+                }
+            })
+            .expect("Failed to spawn kernel worker thread");
+
+        Self { tx: job_tx, rx: res_rx, current_version: version_counter }
+    }
+}
+
+// In RcadApp:
+// Non-blocking poll: if let Ok(resp) = self.kernel_worker.rx.try_recv() { self.mesh = resp.mesh; }
+
+
+# --- Patch: Expensive B-Rep Boolean Unions for Reference Planes and Coordinate Triads ---
+# File: crates/rcad-occt/src/lib.rs
+
+// Decoupled Lightweight Datum in rcad-geom and rcad-app
+// Datums do not need OpenCASCADE solids!
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatumTriad {
+    pub origin: [f32; 3],
+    pub axes: [[f32; 3]; 3], // X, Y, Z directions
+    pub length: f32,
+}
+
+impl DatumTriad {
+    /// Generates lightweight colored line vertex buffers directly for WGPU / egui viewport
+    pub fn to_vertex_lines(&self) -> Vec<([f32; 3], [u8; 4])> {
+        let o = self.origin;
+        vec![
+            (o, [255, 60, 60, 255]), (add(o, scale(self.axes[0], self.length)), [255, 60, 60, 255]), // Red X
+            (o, [60, 255, 60, 255]), (add(o, scale(self.axes[1], self.length)), [60, 255, 60, 255]), // Green Y
+            (o, [60, 120, 255, 255]), (add(o, scale(self.axes[2], self.length)), [60, 120, 255, 255]), // Blue Z
+        ]
+    }
+}
+
+
+# --- Patch: Activating rcad-truck as a Zero-FFI Pure-Rust B-Rep Kernel ---
+# File: crates/rcad-truck/src/lib.rs
+
+// Working Pure-Rust Truck Kernel in crates/rcad-truck/src/lib.rs
+use truck_modeling::builder;
+use truck_modeling::{Point3, Vector3, Solid as TruckSolid};
+use truck_meshing::tessellation::faces_tessellation;
+
+pub struct TruckBackend {
+    next_id: u64,
+    solids: std::collections::HashMap<u64, TruckSolid>,
+}
+
+impl GeometryBackend for TruckBackend {
+    fn box_solid(&mut self, size: glam::DVec3) -> GeomResult<ShapeId> {
+        let p = Point3::new(0.0, 0.0, 0.0);
+        let solid = builder::tsweep(
+            &builder::tsweep(
+                &builder::vertex(p),
+                Vector3::new(size.x, 0.0, 0.0)
+            ),
+            Vector3::new(0.0, size.y, size.z)
+        );
+        let id = self.next_id;
+        self.next_id += 1;
+        self.solids.insert(id, solid);
+        Ok(ShapeId(id))
+    }
+
+    fn tessellate(&mut self, shape: ShapeId) -> GeomResult<TriangleMesh> {
+        let solid = self.solids.get(&shape.0).ok_or(GeomError::UnknownShape(shape))?;
+        let polygon_mesh = faces_tessellation(solid, 0.01);
+        Ok(convert_truck_mesh(&polygon_mesh))
+    }
+}
+

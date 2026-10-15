@@ -1,7 +1,8 @@
 //! Vertical toolbar implementation for rcad - Creo-style ribbon replacement
 
 use eframe::egui;
-// use std::collections::HashMap; // Currently unused
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// Toolbar action types that map to app methods
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -110,11 +111,199 @@ pub enum ToolbarAction {
     HelpShortcuts,
 }
 
+/// Toolbar action to rcad-icon ID mapping
+fn action_to_icon_id(action: &ToolbarAction) -> Option<&'static str> {
+    match action {
+        // Model actions
+        ToolbarAction::ModelExtrude => Some("features-extrude"),
+        ToolbarAction::ModelRevolve => Some("features-revolve"),
+        ToolbarAction::ModelSweep => Some("features-sweep"),
+        ToolbarAction::ModelLoft => Some("features-loft"),
+        ToolbarAction::ModelBoundary => Some("features-boundary"),
+        ToolbarAction::ModelFillet => Some("features-round"),
+        ToolbarAction::ModelChamfer => Some("features-chamfer"),
+        ToolbarAction::ModelShell => Some("features-shell"),
+        ToolbarAction::ModelDraft => Some("features-draft"),
+        ToolbarAction::ModelHole => Some("features-hole"),
+        ToolbarAction::ModelPattern => Some("edit-pattern-direction"),
+        ToolbarAction::ModelMirror => Some("edit-mirror"),
+        ToolbarAction::ModelBoolean => Some("edit-boolean-union"),
+        ToolbarAction::ModelCosmeticThread => Some("features-hole-threaded"),
+        ToolbarAction::ModelBox => Some("features-extrude"),
+        
+        // Sketch actions
+        ToolbarAction::SketchNew => Some("sketch-sketch"),
+        ToolbarAction::SketchLine => Some("sketch-line"),
+        ToolbarAction::SketchRectangle => Some("sketch-rectangle"),
+        ToolbarAction::SketchCircle => Some("sketch-circle-center"),
+        ToolbarAction::SketchArc => Some("sketch-arc-3point"),
+        ToolbarAction::SketchSpline => Some("sketch-spline"),
+        ToolbarAction::SketchPoint => Some("sketch-point"),
+        ToolbarAction::SketchConstraintHorizontal => Some("constraints-horizontal"),
+        ToolbarAction::SketchConstraintVertical => Some("constraints-vertical"),
+        ToolbarAction::SketchConstraintParallel => Some("constraints-parallel"),
+        ToolbarAction::SketchConstraintPerpendicular => Some("constraints-perpendicular"),
+        ToolbarAction::SketchConstraintTangent => Some("constraints-tangent"),
+        ToolbarAction::SketchConstraintEqual => Some("constraints-equal"),
+        ToolbarAction::SketchConstraintSymmetric => Some("constraints-symmetric"),
+        ToolbarAction::SketchConstraintConcentric => Some("constraints-concentric"),
+        ToolbarAction::SketchConstraintMidpoint => Some("constraints-midpoint"),
+        ToolbarAction::SketchConstraintCoincident => Some("constraints-coincident"),
+        ToolbarAction::SketchDimension => Some("sketch-dimension"),
+        ToolbarAction::SketchTrim => Some("sketch-trim"),
+        ToolbarAction::SketchExtend => Some("sketch-extend-line"),
+        ToolbarAction::SketchOffset => Some("sketch-offset-edge"),
+        ToolbarAction::SketchMirror => Some("sketch-mirror-sketch"),
+        ToolbarAction::SketchPattern => Some("edit-pattern-direction"),
+        ToolbarAction::SketchProjectReferences => Some("sketch-project-edge"),
+        
+        // Assembly actions
+        ToolbarAction::AssemblyInsertComponent => Some("assembly-asm-insert"),
+        ToolbarAction::AssemblyMateCoincident => Some("assembly-asm-mate"),
+        ToolbarAction::AssemblyMateConcentric => Some("assembly-asm-concentric"),
+        ToolbarAction::AssemblyMateDistance => Some("assembly-asm-distance"),
+        ToolbarAction::AssemblyMateAngle => Some("assembly-asm-angle"),
+        ToolbarAction::AssemblyMateParallel => Some("assembly-asm-parallel"),
+        ToolbarAction::AssemblyMatePerpendicular => Some("assembly-asm-normal"),
+        ToolbarAction::AssemblyMateTangent => Some("assembly-asm-tangent"),
+        ToolbarAction::AssemblyMateSymmetric => Some("assembly-asm-symmetric"),
+        ToolbarAction::AssemblyExplodedView => Some("assembly-asm-explode"),
+        ToolbarAction::AssemblySubAssembly => Some("assembly-asm-sub-assembly"),
+        
+        // Analysis actions
+        ToolbarAction::AnalysisMeasure => Some("general-measure"),
+        ToolbarAction::AnalysisMassProperties => Some("general-info"),
+        ToolbarAction::AnalysisCurvature => Some("analysis-curvature"),
+        ToolbarAction::AnalysisDraft => Some("analysis-draft"),
+        ToolbarAction::AnalysisThickness => Some("analysis-thickness"),
+        ToolbarAction::AnalysisInterference => Some("assembly-asm-interference"),
+        ToolbarAction::AnalysisClearance => Some("analysis-clearance"),
+        
+        // View actions
+        ToolbarAction::ViewFront => Some("view-view-front"),
+        ToolbarAction::ViewBack => Some("view-view-back"),
+        ToolbarAction::ViewLeft => Some("view-view-left"),
+        ToolbarAction::ViewRight => Some("view-view-right"),
+        ToolbarAction::ViewTop => Some("view-view-top"),
+        ToolbarAction::ViewBottom => Some("view-view-bottom"),
+        ToolbarAction::ViewIso => Some("view-view-isometric"),
+        ToolbarAction::ViewReset => Some("view-view-saved"),
+        ToolbarAction::ViewPerspective => Some("view-view-perspective"),
+        ToolbarAction::ViewOrthographic => Some("view-view-perspective"),
+        ToolbarAction::ViewShaded => Some("view-display-shaded"),
+        ToolbarAction::ViewWireframe => Some("view-display-wireframe"),
+        ToolbarAction::ViewZoomFit => Some("view-zoom-fit"),
+        ToolbarAction::ViewPrevious => Some("general-undo"),
+        
+        // Tools actions
+        ToolbarAction::ToolsParameters => Some("general-settings"),
+        ToolbarAction::ToolsRelations => Some("general-link"),
+        ToolbarAction::ToolsFamilyTable => Some("general-model-tree"),
+        ToolbarAction::ToolsDesignExploration => Some("general-search"),
+        ToolbarAction::ToolsOptions => Some("general-settings"),
+        ToolbarAction::ToolsCustomize => Some("tools-customize"),
+        
+        // File actions
+        ToolbarAction::NewDocument => Some("general-new"),
+        ToolbarAction::OpenDocument => Some("general-open"),
+        ToolbarAction::SaveDocument => Some("general-save"),
+        ToolbarAction::SaveDocumentAs => Some("general-save-as"),
+        ToolbarAction::ExportStl => Some("general-export"),
+        ToolbarAction::ExportStep => Some("general-export"),
+        ToolbarAction::Undo => Some("general-undo"),
+        ToolbarAction::Redo => Some("general-redo"),
+        
+        // Help
+        ToolbarAction::HelpAbout => Some("general-info"),
+        ToolbarAction::HelpShortcuts => Some("general-help"),
+        
+        // Box/ModelBox
+        ToolbarAction::ModelBox => Some("features-extrude"),
+        ToolbarAction::ModelSweep => Some("features-sweep"),
+        ToolbarAction::ModelLoft => Some("features-loft"),
+        ToolbarAction::ModelBoundary => Some("features-boundary"),
+        
+        _ => None,
+    }
+}
+
+/// Theme mode for icons
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconTheme {
+    Light,
+    Dark,
+}
+
+/// Icon cache for rcad-icons with theme support
+struct IconCache {
+    light_sprites: HashMap<String, String>,
+    dark_sprites: HashMap<String, String>,
+}
+
+impl IconCache {
+    fn new() -> Self {
+        let mut light_sprites = HashMap::new();
+        let mut dark_sprites = HashMap::new();
+        
+        // Load light theme sprites
+        include_str!("../../../../rcad-icons/sprite-light.svg")
+            .lines()
+            .for_each(|line| {
+                if let Some(start) = line.find("id=\"") {
+                    let start = start + 4;
+                    if let Some(end) = line[start..].find("\"") {
+                        let id = &line[start..start+end];
+                        let content_start = line.find(">").unwrap_or(0) + 1;
+                        let content_end = line.rfind("</symbol>").unwrap_or(line.len());
+                        let symbol = line[content_start..content_end].to_string();
+                        light_sprites.insert(id.to_string(), symbol);
+                    }
+                }
+            });
+        
+        // Load dark theme sprites
+        include_str!("../../../../rcad-icons/sprite-dark.svg")
+            .lines()
+            .for_each(|line| {
+                if let Some(start) = line.find("id=\"") {
+                    let start = start + 4;
+                    if let Some(end) = line[start..].find("\"") {
+                        let id = &line[start..start+end];
+                        let content_start = line.find(">").unwrap_or(0) + 1;
+                        let content_end = line.rfind("</symbol>").unwrap_or(line.len());
+                        let symbol = line[content_start..content_end].to_string();
+                        dark_sprites.insert(id.to_string(), symbol);
+                    }
+                }
+            });
+        
+        Self { light_sprites, dark_sprites }
+    }
+    
+    fn get(&self, id: &str, theme: IconTheme) -> Option<&str> {
+        match theme {
+            IconTheme::Light => self.light_sprites.get(id).map(|s| s.as_str()),
+            IconTheme::Dark => self.dark_sprites.get(id).map(|s| s.as_str()),
+        }
+    }
+}
+
+fn icon_cache() -> &'static IconCache {
+    static CACHE: OnceLock<IconCache> = OnceLock::new();
+    CACHE.get_or_init(IconCache::new)
+}
+
+/// Get icon SVG from rcad-icons sprite for current theme
+fn get_icon(icon_id: &str, theme: IconTheme) -> Option<String> {
+    icon_cache().get(icon_id, theme).map(|s| s.to_string())
+}
+
 /// Toolbar button definition
 #[derive(Debug, Clone)]
 pub struct ToolbarButton {
     pub id: String,
-    pub icon: &'static str,
+    pub icon: &'static str,           // Fallback emoji/text icon
+    pub icon_id: Option<String>,      // rcad-icons sprite ID
     pub label: String,
     pub action: ToolbarAction,
     pub shortcut: Option<String>,
@@ -123,9 +312,11 @@ pub struct ToolbarButton {
 
 impl ToolbarButton {
     pub fn new(id: impl Into<String>, icon: &'static str, label: impl Into<String>, action: ToolbarAction) -> Self {
+        let icon_id = action_to_icon_id(&action).map(|s| s.to_string());
         Self {
             id: id.into(),
             icon,
+            icon_id,
             label: label.into(),
             action,
             shortcut: None,
@@ -144,21 +335,28 @@ impl ToolbarButton {
     }
 }
 
-/// Toolbar tab definition
+/// Simple toolbar tab definition (without rcad-icons complexity)
 #[derive(Debug, Clone)]
-pub struct ToolbarTab {
+pub struct SimpleToolbarTab {
     pub name: String,
     pub icon: &'static str,
+    pub icon_id: Option<String>,
     pub buttons: Vec<ToolbarButton>,
 }
 
-impl ToolbarTab {
+impl SimpleToolbarTab {
     pub fn new(name: impl Into<String>, icon: &'static str) -> Self {
         Self {
             name: name.into(),
             icon,
+            icon_id: None,
             buttons: Vec::new(),
         }
+    }
+    
+    pub fn with_icon_id(mut self, icon_id: impl Into<String>) -> Self {
+        self.icon_id = Some(icon_id.into());
+        self
     }
     
     pub fn add_button(mut self, button: ToolbarButton) -> Self {
@@ -178,9 +376,10 @@ pub struct VerticalToolbar {
     pub collapsed: bool,
     pub icon_only_mode: bool,
     pub position: ToolbarPosition,
-    pub tabs: Vec<ToolbarTab>,
+    pub tabs: Vec<SimpleToolbarTab>,
     pub active_tab: usize,
     pub hover_tab: Option<usize>,
+    pub theme: IconTheme,  // Current theme for icons
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,16 +397,17 @@ impl Default for VerticalToolbar {
             tabs: Self::create_default_tabs(),
             active_tab: 0,
             hover_tab: None,
+            theme: IconTheme::Dark, // Default to dark theme
         }
     }
 }
 
 impl VerticalToolbar {
     /// Create the default Creo-style tabs with buttons
-    fn create_default_tabs() -> Vec<ToolbarTab> {
+    fn create_default_tabs() -> Vec<SimpleToolbarTab> {
         vec![
             // Model Tab
-            ToolbarTab::new("Model", "📦")
+            SimpleToolbarTab::new("Model", "📦")
                 .add_buttons(vec![
                     ToolbarButton::new("model_box", "📦", "Box", ToolbarAction::ModelBox)
                         .with_shortcut("B")
@@ -245,7 +445,7 @@ impl VerticalToolbar {
                 ]),
             
             // Sketch Tab
-            ToolbarTab::new("Sketch", "✏️")
+            SimpleToolbarTab::new("Sketch", "✏️")
                 .add_buttons(vec![
                     ToolbarButton::new("sketch_new", "📝", "New Sketch", ToolbarAction::SketchNew)
                         .with_shortcut("K")
@@ -303,7 +503,7 @@ impl VerticalToolbar {
                 ]),
             
             // Assembly Tab
-            ToolbarTab::new("Assembly", "🔧")
+            SimpleToolbarTab::new("Assembly", "🔧")
                 .add_buttons(vec![
                     ToolbarButton::new("asm_insert", "➕", "Insert Component", ToolbarAction::AssemblyInsertComponent)
                         .with_tooltip("Insert component into assembly"),
@@ -330,7 +530,7 @@ impl VerticalToolbar {
                 ]),
             
             // Analysis Tab
-            ToolbarTab::new("Analysis", "📊")
+            SimpleToolbarTab::new("Analysis", "📊")
                 .add_buttons(vec![
                     ToolbarButton::new("analysis_measure", "📏", "Measure", ToolbarAction::AnalysisMeasure)
                         .with_tooltip("Measure distance, angle, area"),
@@ -349,7 +549,7 @@ impl VerticalToolbar {
                 ]),
             
             // View Tab
-            ToolbarTab::new("View", "👁")
+            SimpleToolbarTab::new("View", "👁")
                 .add_buttons(vec![
                     ToolbarButton::new("view_front", "👁", "Front", ToolbarAction::ViewFront)
                         .with_shortcut("1")
@@ -390,7 +590,7 @@ impl VerticalToolbar {
                 ]),
             
             // Tools Tab
-            ToolbarTab::new("Tools", "🔧")
+            SimpleToolbarTab::new("Tools", "🔧")
                 .add_buttons(vec![
                     ToolbarButton::new("tools_params", "📋", "Parameters", ToolbarAction::ToolsParameters)
                         .with_tooltip("Manage parameters"),
@@ -409,12 +609,12 @@ impl VerticalToolbar {
     }
     
     /// Get the currently active tab
-    pub fn active_tab(&self) -> &ToolbarTab {
+    pub fn active_tab(&self) -> &SimpleToolbarTab {
         &self.tabs[self.active_tab]
     }
     
     /// Get mutable reference to active tab
-    pub fn active_tab_mut(&mut self) -> &mut ToolbarTab {
+    pub fn active_tab_mut(&mut self) -> &mut SimpleToolbarTab {
         &mut self.tabs[self.active_tab]
     }
     
@@ -454,8 +654,20 @@ impl VerticalToolbar {
         }
     }
     
+    /// Detect theme from egui context
+    fn detect_theme(&self, ctx: &egui::Context) -> IconTheme {
+        if ctx.style().visuals.dark_mode {
+            IconTheme::Dark
+        } else {
+            IconTheme::Light
+        }
+    }
+    
     /// Render the toolbar in egui
     pub fn show(&mut self, ui: &mut egui::Ui, on_action: &mut dyn FnMut(ToolbarAction)) {
+        // Update theme based on egui context
+        self.theme = self.detect_theme(ui.ctx());
+        
         let width = self.width();
         ui.set_min_width(width);
         ui.set_max_width(width);
@@ -594,7 +806,7 @@ impl VerticalToolbar {
         });
     }
     
-    /// Render a single toolbar button
+    /// Render a single toolbar button with rcad-icons SVG support
     fn render_button(&self, ui: &mut egui::Ui, button: &ToolbarButton, on_action: &mut dyn FnMut(ToolbarAction)) {
         let is_compact = self.icon_only_mode || self.collapsed;
         
@@ -621,15 +833,35 @@ impl VerticalToolbar {
         } else {
             // Full mode: icon + label + shortcut
             ui.horizontal(|ui| {
-                let btn = egui::Button::new(
-                    egui::RichText::new(button.icon).size(18.0)
-                )
-                .min_size(egui::vec2(36.0, 36.0))
-                .corner_radius(4.0);
+                // Try to render SVG icon from rcad-icons
+                let icon_svg = button.icon_id.as_ref()
+                    .and_then(|id| get_icon(id, self.theme));
                 
-                let response = ui.add(btn);
-                if response.clicked() {
-                    on_action(button.action.clone());
+                if let Some(_svg) = icon_svg {
+                    // For now, use fallback icon - SVG rendering would need egui_extras or custom implementation
+                    // For now, use fallback to emoji/icon
+                    let btn = egui::Button::new(
+                        egui::RichText::new(button.icon).size(18.0)
+                    )
+                    .min_size(egui::vec2(36.0, 36.0))
+                    .corner_radius(4.0);
+                    
+                    let response = ui.add(btn);
+                    if response.clicked() {
+                        on_action(button.action.clone());
+                    }
+                } else {
+                    // Fallback to emoji/text icon
+                    let btn = egui::Button::new(
+                        egui::RichText::new(button.icon).size(18.0)
+                    )
+                    .min_size(egui::vec2(36.0, 36.0))
+                    .corner_radius(4.0);
+                    
+                    let response = ui.add(btn);
+                    if response.clicked() {
+                        on_action(button.action.clone());
+                    }
                 }
                 
                 // Label and shortcut

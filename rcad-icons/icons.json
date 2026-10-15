@@ -1,0 +1,1184 @@
+[
+ {
+  "id": "features/extrude",
+  "category": "features",
+  "name": "extrude",
+  "label": "Extrude"
+ },
+ {
+  "id": "features/extrude-cut",
+  "category": "features",
+  "name": "extrude-cut",
+  "label": "Extrude Cut"
+ },
+ {
+  "id": "features/extrude-thin",
+  "category": "features",
+  "name": "extrude-thin",
+  "label": "Extrude (Thin)"
+ },
+ {
+  "id": "features/extrude-surface",
+  "category": "features",
+  "name": "extrude-surface",
+  "label": "Extrude Surface"
+ },
+ {
+  "id": "features/revolve",
+  "category": "features",
+  "name": "revolve",
+  "label": "Revolve"
+ },
+ {
+  "id": "features/revolve-surface",
+  "category": "features",
+  "name": "revolve-surface",
+  "label": "Revolve Surface"
+ },
+ {
+  "id": "features/revolve-cut",
+  "category": "features",
+  "name": "revolve-cut",
+  "label": "Revolve Cut"
+ },
+ {
+  "id": "features/sweep",
+  "category": "features",
+  "name": "sweep",
+  "label": "Sweep"
+ },
+ {
+  "id": "features/sweep-cut",
+  "category": "features",
+  "name": "sweep-cut",
+  "label": "Sweep Cut"
+ },
+ {
+  "id": "features/sweep-surface",
+  "category": "features",
+  "name": "sweep-surface",
+  "label": "Sweep Surface"
+ },
+ {
+  "id": "features/swept-blend",
+  "category": "features",
+  "name": "swept-blend",
+  "label": "Swept Blend"
+ },
+ {
+  "id": "features/blend",
+  "category": "features",
+  "name": "blend",
+  "label": "Blend"
+ },
+ {
+  "id": "features/blend-cut",
+  "category": "features",
+  "name": "blend-cut",
+  "label": "Blend Cut"
+ },
+ {
+  "id": "features/helical-sweep",
+  "category": "features",
+  "name": "helical-sweep",
+  "label": "Helical Sweep"
+ },
+ {
+  "id": "features/hole",
+  "category": "features",
+  "name": "hole",
+  "label": "Hole"
+ },
+ {
+  "id": "features/hole-counterbore",
+  "category": "features",
+  "name": "hole-counterbore",
+  "label": "Counterbore Hole"
+ },
+ {
+  "id": "features/hole-countersink",
+  "category": "features",
+  "name": "hole-countersink",
+  "label": "Countersink Hole"
+ },
+ {
+  "id": "features/hole-threaded",
+  "category": "features",
+  "name": "hole-threaded",
+  "label": "Standard (Threaded) Hole"
+ },
+ {
+  "id": "features/round",
+  "category": "features",
+  "name": "round",
+  "label": "Round (Fillet)"
+ },
+ {
+  "id": "features/round-auto",
+  "category": "features",
+  "name": "round-auto",
+  "label": "Auto Round"
+ },
+ {
+  "id": "features/round-full",
+  "category": "features",
+  "name": "round-full",
+  "label": "Full Round"
+ },
+ {
+  "id": "features/chamfer",
+  "category": "features",
+  "name": "chamfer",
+  "label": "Chamfer (Edge)"
+ },
+ {
+  "id": "features/chamfer-corner",
+  "category": "features",
+  "name": "chamfer-corner",
+  "label": "Corner Chamfer"
+ },
+ {
+  "id": "features/draft",
+  "category": "features",
+  "name": "draft",
+  "label": "Draft"
+ },
+ {
+  "id": "features/shell",
+  "category": "features",
+  "name": "shell",
+  "label": "Shell"
+ },
+ {
+  "id": "features/rib",
+  "category": "features",
+  "name": "rib",
+  "label": "Rib"
+ },
+ {
+  "id": "features/rib-trajectory",
+  "category": "features",
+  "name": "rib-trajectory",
+  "label": "Trajectory Rib"
+ },
+ {
+  "id": "sketch/sketch",
+  "category": "sketch",
+  "name": "sketch",
+  "label": "Sketch"
+ },
+ {
+  "id": "sketch/line",
+  "category": "sketch",
+  "name": "line",
+  "label": "Line"
+ },
+ {
+  "id": "sketch/centerline",
+  "category": "sketch",
+  "name": "centerline",
+  "label": "Centerline"
+ },
+ {
+  "id": "sketch/rectangle",
+  "category": "sketch",
+  "name": "rectangle",
+  "label": "Rectangle"
+ },
+ {
+  "id": "sketch/slot",
+  "category": "sketch",
+  "name": "slot",
+  "label": "Slot"
+ },
+ {
+  "id": "sketch/circle-center",
+  "category": "sketch",
+  "name": "circle-center",
+  "label": "Circle (Center + Point)"
+ },
+ {
+  "id": "sketch/circle-3point",
+  "category": "sketch",
+  "name": "circle-3point",
+  "label": "Circle (3 Points)"
+ },
+ {
+  "id": "sketch/ellipse",
+  "category": "sketch",
+  "name": "ellipse",
+  "label": "Ellipse"
+ },
+ {
+  "id": "sketch/arc-3point",
+  "category": "sketch",
+  "name": "arc-3point",
+  "label": "Arc (3 Points)"
+ },
+ {
+  "id": "sketch/arc-center",
+  "category": "sketch",
+  "name": "arc-center",
+  "label": "Arc (Center + Ends)"
+ },
+ {
+  "id": "sketch/arc-tangent",
+  "category": "sketch",
+  "name": "arc-tangent",
+  "label": "Arc (Tangent End)"
+ },
+ {
+  "id": "sketch/spline",
+  "category": "sketch",
+  "name": "spline",
+  "label": "Spline"
+ },
+ {
+  "id": "sketch/polygon",
+  "category": "sketch",
+  "name": "polygon",
+  "label": "Polygon"
+ },
+ {
+  "id": "sketch/point",
+  "category": "sketch",
+  "name": "point",
+  "label": "Point"
+ },
+ {
+  "id": "sketch/sketch-csys",
+  "category": "sketch",
+  "name": "sketch-csys",
+  "label": "Sketch Coordinate System"
+ },
+ {
+  "id": "sketch/sketch-fillet",
+  "category": "sketch",
+  "name": "sketch-fillet",
+  "label": "Sketch Fillet"
+ },
+ {
+  "id": "sketch/sketch-chamfer",
+  "category": "sketch",
+  "name": "sketch-chamfer",
+  "label": "Sketch Chamfer"
+ },
+ {
+  "id": "sketch/trim",
+  "category": "sketch",
+  "name": "trim",
+  "label": "Trim"
+ },
+ {
+  "id": "sketch/corner-trim",
+  "category": "sketch",
+  "name": "corner-trim",
+  "label": "Corner Trim"
+ },
+ {
+  "id": "sketch/divide",
+  "category": "sketch",
+  "name": "divide",
+  "label": "Divide"
+ },
+ {
+  "id": "sketch/extend-line",
+  "category": "sketch",
+  "name": "extend-line",
+  "label": "Extend Line"
+ },
+ {
+  "id": "sketch/offset-edge",
+  "category": "sketch",
+  "name": "offset-edge",
+  "label": "Offset Edge"
+ },
+ {
+  "id": "sketch/thicken-edge",
+  "category": "sketch",
+  "name": "thicken-edge",
+  "label": "Thicken Edge"
+ },
+ {
+  "id": "sketch/mirror-sketch",
+  "category": "sketch",
+  "name": "mirror-sketch",
+  "label": "Mirror (Sketch)"
+ },
+ {
+  "id": "sketch/project-edge",
+  "category": "sketch",
+  "name": "project-edge",
+  "label": "Project / Use Edge"
+ },
+ {
+  "id": "sketch/text",
+  "category": "sketch",
+  "name": "text",
+  "label": "Text"
+ },
+ {
+  "id": "sketch/dimension",
+  "category": "sketch",
+  "name": "dimension",
+  "label": "Dimension"
+ },
+ {
+  "id": "sketch/construction",
+  "category": "sketch",
+  "name": "construction",
+  "label": "Construction Mode"
+ },
+ {
+  "id": "datum/datum-plane",
+  "category": "datum",
+  "name": "datum-plane",
+  "label": "Datum Plane"
+ },
+ {
+  "id": "datum/datum-plane-top",
+  "category": "datum",
+  "name": "datum-plane-top",
+  "label": "Datum Plane TOP"
+ },
+ {
+  "id": "datum/datum-plane-front",
+  "category": "datum",
+  "name": "datum-plane-front",
+  "label": "Datum Plane FRONT"
+ },
+ {
+  "id": "datum/datum-plane-right",
+  "category": "datum",
+  "name": "datum-plane-right",
+  "label": "Datum Plane RIGHT"
+ },
+ {
+  "id": "datum/datum-plane-offset",
+  "category": "datum",
+  "name": "datum-plane-offset",
+  "label": "Offset Datum Plane"
+ },
+ {
+  "id": "datum/datum-axis",
+  "category": "datum",
+  "name": "datum-axis",
+  "label": "Datum Axis"
+ },
+ {
+  "id": "datum/datum-point",
+  "category": "datum",
+  "name": "datum-point",
+  "label": "Datum Point"
+ },
+ {
+  "id": "datum/datum-point-array",
+  "category": "datum",
+  "name": "datum-point-array",
+  "label": "Datum Points (Multiple)"
+ },
+ {
+  "id": "datum/datum-csys",
+  "category": "datum",
+  "name": "datum-csys",
+  "label": "Coordinate System"
+ },
+ {
+  "id": "datum/datum-csys-offset",
+  "category": "datum",
+  "name": "datum-csys-offset",
+  "label": "Offset Coordinate System"
+ },
+ {
+  "id": "assembly/asm-assemble",
+  "category": "assembly",
+  "name": "asm-assemble",
+  "label": "Assemble Component"
+ },
+ {
+  "id": "assembly/asm-insert",
+  "category": "assembly",
+  "name": "asm-insert",
+  "label": "Insert"
+ },
+ {
+  "id": "assembly/asm-new-component",
+  "category": "assembly",
+  "name": "asm-new-component",
+  "label": "Create Component"
+ },
+ {
+  "id": "assembly/asm-mate",
+  "category": "assembly",
+  "name": "asm-mate",
+  "label": "Coincident (Mate)"
+ },
+ {
+  "id": "assembly/asm-distance",
+  "category": "assembly",
+  "name": "asm-distance",
+  "label": "Offset (Distance)"
+ },
+ {
+  "id": "assembly/asm-angle",
+  "category": "assembly",
+  "name": "asm-angle",
+  "label": "Angle Offset"
+ },
+ {
+  "id": "assembly/asm-parallel",
+  "category": "assembly",
+  "name": "asm-parallel",
+  "label": "Parallel"
+ },
+ {
+  "id": "assembly/asm-normal",
+  "category": "assembly",
+  "name": "asm-normal",
+  "label": "Normal (Perpendicular)"
+ },
+ {
+  "id": "assembly/asm-fix",
+  "category": "assembly",
+  "name": "asm-fix",
+  "label": "Fix Component"
+ },
+ {
+  "id": "assembly/asm-default",
+  "category": "assembly",
+  "name": "asm-default",
+  "label": "Default (Align to Default CSYS)"
+ },
+ {
+  "id": "assembly/asm-tangent",
+  "category": "assembly",
+  "name": "asm-tangent",
+  "label": "Tangent"
+ },
+ {
+  "id": "assembly/asm-explode",
+  "category": "assembly",
+  "name": "asm-explode",
+  "label": "Explode View"
+ },
+ {
+  "id": "assembly/asm-interference",
+  "category": "assembly",
+  "name": "asm-interference",
+  "label": "Interference Check"
+ },
+ {
+  "id": "assembly/asm-bom",
+  "category": "assembly",
+  "name": "asm-bom",
+  "label": "Bill of Materials"
+ },
+ {
+  "id": "assembly/asm-replace",
+  "category": "assembly",
+  "name": "asm-replace",
+  "label": "Replace Component"
+ },
+ {
+  "id": "constraints/horizontal",
+  "category": "constraints",
+  "name": "horizontal",
+  "label": "Horizontal"
+ },
+ {
+  "id": "constraints/vertical",
+  "category": "constraints",
+  "name": "vertical",
+  "label": "Vertical"
+ },
+ {
+  "id": "constraints/perpendicular",
+  "category": "constraints",
+  "name": "perpendicular",
+  "label": "Perpendicular"
+ },
+ {
+  "id": "constraints/parallel",
+  "category": "constraints",
+  "name": "parallel",
+  "label": "Parallel"
+ },
+ {
+  "id": "constraints/tangent",
+  "category": "constraints",
+  "name": "tangent",
+  "label": "Tangent"
+ },
+ {
+  "id": "constraints/midpoint",
+  "category": "constraints",
+  "name": "midpoint",
+  "label": "Midpoint"
+ },
+ {
+  "id": "constraints/coincident",
+  "category": "constraints",
+  "name": "coincident",
+  "label": "Coincident"
+ },
+ {
+  "id": "constraints/equal",
+  "category": "constraints",
+  "name": "equal",
+  "label": "Equal"
+ },
+ {
+  "id": "constraints/symmetric",
+  "category": "constraints",
+  "name": "symmetric",
+  "label": "Symmetric"
+ },
+ {
+  "id": "constraints/concentric",
+  "category": "constraints",
+  "name": "concentric",
+  "label": "Concentric"
+ },
+ {
+  "id": "constraints/fix",
+  "category": "constraints",
+  "name": "fix",
+  "label": "Fix / Lock"
+ },
+ {
+  "id": "constraints/collinear",
+  "category": "constraints",
+  "name": "collinear",
+  "label": "Collinear"
+ },
+ {
+  "id": "edit/mirror",
+  "category": "edit",
+  "name": "mirror",
+  "label": "Mirror"
+ },
+ {
+  "id": "edit/pattern-direction",
+  "category": "edit",
+  "name": "pattern-direction",
+  "label": "Pattern (Direction)"
+ },
+ {
+  "id": "edit/pattern-axis",
+  "category": "edit",
+  "name": "pattern-axis",
+  "label": "Pattern (Axis)"
+ },
+ {
+  "id": "edit/pattern-fill",
+  "category": "edit",
+  "name": "pattern-fill",
+  "label": "Pattern (Fill)"
+ },
+ {
+  "id": "edit/pattern-curve",
+  "category": "edit",
+  "name": "pattern-curve",
+  "label": "Pattern (Along Curve)"
+ },
+ {
+  "id": "edit/move",
+  "category": "edit",
+  "name": "move",
+  "label": "Move / Transform"
+ },
+ {
+  "id": "edit/rotate-part",
+  "category": "edit",
+  "name": "rotate-part",
+  "label": "Rotate"
+ },
+ {
+  "id": "edit/boolean-union",
+  "category": "edit",
+  "name": "boolean-union",
+  "label": "Merge (Union)"
+ },
+ {
+  "id": "edit/boolean-subtract",
+  "category": "edit",
+  "name": "boolean-subtract",
+  "label": "Cut (Subtract)"
+ },
+ {
+  "id": "edit/boolean-intersect",
+  "category": "edit",
+  "name": "boolean-intersect",
+  "label": "Intersect (Common)"
+ },
+ {
+  "id": "edit/split",
+  "category": "edit",
+  "name": "split",
+  "label": "Split Body"
+ },
+ {
+  "id": "edit/scale-model",
+  "category": "edit",
+  "name": "scale-model",
+  "label": "Scale"
+ },
+ {
+  "id": "edit/flip-direction",
+  "category": "edit",
+  "name": "flip-direction",
+  "label": "Flip Direction"
+ },
+ {
+  "id": "edit/offset-solid",
+  "category": "edit",
+  "name": "offset-solid",
+  "label": "Offset Faces"
+ },
+ {
+  "id": "edit/edit-definition",
+  "category": "edit",
+  "name": "edit-definition",
+  "label": "Edit Definition"
+ },
+ {
+  "id": "edit/suppress",
+  "category": "edit",
+  "name": "suppress",
+  "label": "Suppress"
+ },
+ {
+  "id": "edit/resume",
+  "category": "edit",
+  "name": "resume",
+  "label": "Resume"
+ },
+ {
+  "id": "view/view-top",
+  "category": "view",
+  "name": "view-top",
+  "label": "Top View"
+ },
+ {
+  "id": "view/view-front",
+  "category": "view",
+  "name": "view-front",
+  "label": "Front View"
+ },
+ {
+  "id": "view/view-right",
+  "category": "view",
+  "name": "view-right",
+  "label": "Right View"
+ },
+ {
+  "id": "view/view-back",
+  "category": "view",
+  "name": "view-back",
+  "label": "Back View"
+ },
+ {
+  "id": "view/view-left",
+  "category": "view",
+  "name": "view-left",
+  "label": "Left View"
+ },
+ {
+  "id": "view/view-bottom",
+  "category": "view",
+  "name": "view-bottom",
+  "label": "Bottom View"
+ },
+ {
+  "id": "view/view-isometric",
+  "category": "view",
+  "name": "view-isometric",
+  "label": "Isometric View"
+ },
+ {
+  "id": "view/view-perspective",
+  "category": "view",
+  "name": "view-perspective",
+  "label": "Perspective View"
+ },
+ {
+  "id": "view/view-normal-to",
+  "category": "view",
+  "name": "view-normal-to",
+  "label": "Normal To (Sketch View)"
+ },
+ {
+  "id": "view/view-saved",
+  "category": "view",
+  "name": "view-saved",
+  "label": "Saved Views"
+ },
+ {
+  "id": "view/view-orbit",
+  "category": "view",
+  "name": "view-orbit",
+  "label": "Orbit (Spin)"
+ },
+ {
+  "id": "view/view-pan",
+  "category": "view",
+  "name": "view-pan",
+  "label": "Pan"
+ },
+ {
+  "id": "view/view-spin-center",
+  "category": "view",
+  "name": "view-spin-center",
+  "label": "Spin Center"
+ },
+ {
+  "id": "view/zoom-in",
+  "category": "view",
+  "name": "zoom-in",
+  "label": "Zoom In"
+ },
+ {
+  "id": "view/zoom-out",
+  "category": "view",
+  "name": "zoom-out",
+  "label": "Zoom Out"
+ },
+ {
+  "id": "view/zoom-fit",
+  "category": "view",
+  "name": "zoom-fit",
+  "label": "Refit (Zoom to Fit)"
+ },
+ {
+  "id": "view/zoom-window",
+  "category": "view",
+  "name": "zoom-window",
+  "label": "Zoom to Window"
+ },
+ {
+  "id": "view/display-wireframe",
+  "category": "view",
+  "name": "display-wireframe",
+  "label": "Wireframe"
+ },
+ {
+  "id": "view/display-hidden",
+  "category": "view",
+  "name": "display-hidden",
+  "label": "Hidden Line"
+ },
+ {
+  "id": "view/display-nohidden",
+  "category": "view",
+  "name": "display-nohidden",
+  "label": "No Hidden"
+ },
+ {
+  "id": "view/display-shaded",
+  "category": "view",
+  "name": "display-shaded",
+  "label": "Shaded"
+ },
+ {
+  "id": "view/display-shaded-edges",
+  "category": "view",
+  "name": "display-shaded-edges",
+  "label": "Shaded With Edges"
+ },
+ {
+  "id": "view/display-section",
+  "category": "view",
+  "name": "display-section",
+  "label": "Section View"
+ },
+ {
+  "id": "view/display-appearance",
+  "category": "view",
+  "name": "display-appearance",
+  "label": "Appearance"
+ },
+ {
+  "id": "view/show-datum-planes",
+  "category": "view",
+  "name": "show-datum-planes",
+  "label": "Show Datum Planes"
+ },
+ {
+  "id": "view/show-datum-axes",
+  "category": "view",
+  "name": "show-datum-axes",
+  "label": "Show Datum Axes"
+ },
+ {
+  "id": "view/show-datum-points",
+  "category": "view",
+  "name": "show-datum-points",
+  "label": "Show Datum Points"
+ },
+ {
+  "id": "view/show-csys",
+  "category": "view",
+  "name": "show-csys",
+  "label": "Show Coordinate Systems"
+ },
+ {
+  "id": "view/show-annotations",
+  "category": "view",
+  "name": "show-annotations",
+  "label": "Show Annotations"
+ },
+ {
+  "id": "view/hide-selected",
+  "category": "view",
+  "name": "hide-selected",
+  "label": "Hide"
+ },
+ {
+  "id": "view/show-selected",
+  "category": "view",
+  "name": "show-selected",
+  "label": "Unhide"
+ },
+ {
+  "id": "general/new",
+  "category": "general",
+  "name": "new",
+  "label": "New"
+ },
+ {
+  "id": "general/open",
+  "category": "general",
+  "name": "open",
+  "label": "Open"
+ },
+ {
+  "id": "general/save",
+  "category": "general",
+  "name": "save",
+  "label": "Save"
+ },
+ {
+  "id": "general/save-as",
+  "category": "general",
+  "name": "save-as",
+  "label": "Save As"
+ },
+ {
+  "id": "general/print",
+  "category": "general",
+  "name": "print",
+  "label": "Print"
+ },
+ {
+  "id": "general/undo",
+  "category": "general",
+  "name": "undo",
+  "label": "Undo"
+ },
+ {
+  "id": "general/redo",
+  "category": "general",
+  "name": "redo",
+  "label": "Redo"
+ },
+ {
+  "id": "general/regenerate",
+  "category": "general",
+  "name": "regenerate",
+  "label": "Regenerate"
+ },
+ {
+  "id": "general/delete",
+  "category": "general",
+  "name": "delete",
+  "label": "Delete"
+ },
+ {
+  "id": "general/copy",
+  "category": "general",
+  "name": "copy",
+  "label": "Copy"
+ },
+ {
+  "id": "general/paste",
+  "category": "general",
+  "name": "paste",
+  "label": "Paste"
+ },
+ {
+  "id": "general/cut",
+  "category": "general",
+  "name": "cut",
+  "label": "Cut"
+ },
+ {
+  "id": "general/select",
+  "category": "general",
+  "name": "select",
+  "label": "Select"
+ },
+ {
+  "id": "general/select-rect",
+  "category": "general",
+  "name": "select-rect",
+  "label": "Select Box"
+ },
+ {
+  "id": "general/measure",
+  "category": "general",
+  "name": "measure",
+  "label": "Measure"
+ },
+ {
+  "id": "general/measure-angle",
+  "category": "general",
+  "name": "measure-angle",
+  "label": "Measure Angle"
+ },
+ {
+  "id": "general/settings",
+  "category": "general",
+  "name": "settings",
+  "label": "Settings"
+ },
+ {
+  "id": "general/help",
+  "category": "general",
+  "name": "help",
+  "label": "Help"
+ },
+ {
+  "id": "general/search",
+  "category": "general",
+  "name": "search",
+  "label": "Search"
+ },
+ {
+  "id": "general/layers",
+  "category": "general",
+  "name": "layers",
+  "label": "Layers"
+ },
+ {
+  "id": "general/model-tree",
+  "category": "general",
+  "name": "model-tree",
+  "label": "Model Tree"
+ },
+ {
+  "id": "general/ok",
+  "category": "general",
+  "name": "ok",
+  "label": "OK / Accept"
+ },
+ {
+  "id": "general/cancel",
+  "category": "general",
+  "name": "cancel",
+  "label": "Cancel"
+ },
+ {
+  "id": "general/info",
+  "category": "general",
+  "name": "info",
+  "label": "Information"
+ },
+ {
+  "id": "general/warning",
+  "category": "general",
+  "name": "warning",
+  "label": "Warning"
+ },
+ {
+  "id": "general/add",
+  "category": "general",
+  "name": "add",
+  "label": "Add"
+ },
+ {
+  "id": "general/remove",
+  "category": "general",
+  "name": "remove",
+  "label": "Remove"
+ },
+ {
+  "id": "general/import",
+  "category": "general",
+  "name": "import",
+  "label": "Import"
+ },
+ {
+  "id": "general/export",
+  "category": "general",
+  "name": "export",
+  "label": "Export"
+ },
+ {
+  "id": "general/folder",
+  "category": "general",
+  "name": "folder",
+  "label": "Folder"
+ },
+ {
+  "id": "general/home",
+  "category": "general",
+  "name": "home",
+  "label": "Home"
+ },
+ {
+  "id": "general/filter",
+  "category": "general",
+  "name": "filter",
+  "label": "Filter"
+ },
+ {
+  "id": "general/link",
+  "category": "general",
+  "name": "link",
+  "label": "Reference / Link"
+ },
+ {
+  "id": "general/chevron-down",
+  "category": "general",
+  "name": "chevron-down",
+  "label": "Expand"
+ },
+ {
+  "id": "general/chevron-right",
+  "category": "general",
+  "name": "chevron-right",
+  "label": "Collapse"
+ },
+ {
+  "id": "general/lock",
+  "category": "general",
+  "name": "lock",
+  "label": "Lock"
+ },
+ {
+  "id": "general/play",
+  "category": "general",
+  "name": "play",
+  "label": "Resume / Play"
+ },
+ {
+  "id": "general/pause",
+  "category": "general",
+  "name": "pause",
+  "label": "Pause"
+ },
+ {
+  "id": "surfaces/surface-extend",
+  "category": "surfaces",
+  "name": "surface-extend",
+  "label": "Extend Surface"
+ },
+ {
+  "id": "surfaces/surface-trim",
+  "category": "surfaces",
+  "name": "surface-trim",
+  "label": "Trim Surface"
+ },
+ {
+  "id": "surfaces/surface-merge",
+  "category": "surfaces",
+  "name": "surface-merge",
+  "label": "Merge Surfaces"
+ },
+ {
+  "id": "surfaces/surface-offset",
+  "category": "surfaces",
+  "name": "surface-offset",
+  "label": "Offset Surface"
+ },
+ {
+  "id": "surfaces/surface-fill",
+  "category": "surfaces",
+  "name": "surface-fill",
+  "label": "Fill Surface"
+ },
+ {
+  "id": "surfaces/surface-boundary",
+  "category": "surfaces",
+  "name": "surface-boundary",
+  "label": "Boundary Blend"
+ },
+ {
+  "id": "surfaces/surface-copy",
+  "category": "surfaces",
+  "name": "surface-copy",
+  "label": "Copy Surface"
+ },
+ {
+  "id": "surfaces/surface-intersect",
+  "category": "surfaces",
+  "name": "surface-intersect",
+  "label": "Intersect Surfaces"
+ },
+ {
+  "id": "surfaces/surface-solidify",
+  "category": "surfaces",
+  "name": "surface-solidify",
+  "label": "Solidify"
+ },
+ {
+  "id": "surfaces/surface-thicken",
+  "category": "surfaces",
+  "name": "surface-thicken",
+  "label": "Thicken"
+ },
+ {
+  "id": "surfaces/surface-style",
+  "category": "surfaces",
+  "name": "surface-style",
+  "label": "Style (Freeform) Surface"
+ },
+ {
+  "id": "surfaces/surface-remove",
+  "category": "surfaces",
+  "name": "surface-remove",
+  "label": "Delete Surface"
+ },
+ {
+  "id": "curves/curve-points",
+  "category": "curves",
+  "name": "curve-points",
+  "label": "Curve Through Points"
+ },
+ {
+  "id": "curves/curve-equation",
+  "category": "curves",
+  "name": "curve-equation",
+  "label": "Curve From Equation"
+ },
+ {
+  "id": "curves/curve-project",
+  "category": "curves",
+  "name": "curve-project",
+  "label": "Project Curve"
+ },
+ {
+  "id": "curves/curve-intersect",
+  "category": "curves",
+  "name": "curve-intersect",
+  "label": "Intersection Curve"
+ },
+ {
+  "id": "curves/curve-offset",
+  "category": "curves",
+  "name": "curve-offset",
+  "label": "Offset Curve"
+ },
+ {
+  "id": "curves/curve-composite",
+  "category": "curves",
+  "name": "curve-composite",
+  "label": "Composite Curve"
+ },
+ {
+  "id": "curves/curve-extend",
+  "category": "curves",
+  "name": "curve-extend",
+  "label": "Extend Curve"
+ }
+]

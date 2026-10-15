@@ -10,6 +10,11 @@ repository.workspace = true
 rcad-geom.workspace = true
 glam.workspace = true
 thiserror.workspace = true
+# Truck backend dependencies - commented out for now as they're not available on crates.io
+# truck-modeling = "0.4"
+# truck-meshing = "0.4"
+# truck-meshalgo = "0.4"
+# truck-platform = "0.4"
 
 [features]
 default = []

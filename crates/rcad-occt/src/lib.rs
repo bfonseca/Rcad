@@ -288,62 +288,32 @@ impl GeometryBackend for OcctBackend {
         self.solids.remove(&shape.0);
     }
 
-    fn plane(&mut self, origin: DVec3, normal: DVec3, size: f64) -> GeomResult<ShapeId> {
-        // Create a rectangular plane as a solid surface (thin box)
-        let half_size = size * 0.5;
-        let local_z = normal.normalize_or_zero();
-        let local_x = if local_z.dot(DVec3::Z).abs() < 0.9 {
-            DVec3::Z.cross(local_z).normalize_or_zero()
-        } else {
-            DVec3::X.cross(local_z).normalize_or_zero()
-        };
-        let local_y = local_z.cross(local_x);
-        
-        // Create a rectangular plane as a thin solid box
-        let solid = Solid::cube(CVec3::ZERO, cvec(DVec3::new(half_size * 2.0, half_size * 2.0, 0.001)));
-        let solid = solid.translate(cvec(origin - local_z * 0.0005));
-        
-        // TODO: Proper rotation to align with plane normal
+    fn plane(&mut self, _origin: DVec3, _normal: DVec3, _size: f64) -> GeomResult<ShapeId> {
+        // Lightweight datum: don't create B-Rep solid for reference planes
+        // The viewport renders these directly as line geometry
+        // Return a minimal placeholder shape ID
+        let solid = Solid::cube(CVec3::ZERO, cvec(DVec3::new(0.001, 0.001, 0.001)));
         Ok(self.insert(solid))
     }
 
-    fn axis(&mut self, origin: DVec3, direction: DVec3, length: f64) -> GeomResult<ShapeId> {
-        // Create a cylinder along the axis direction (Creo-style thin cylinder)
-        let radius = length * 0.01; // Thin cylinder for axis
-        let dir = direction.normalize_or_zero() * length;
-        let solid = Solid::cylinder(radius, cvec(dir));
-        let solid = solid.translate(cvec(origin));
+    fn axis(&mut self, _origin: DVec3, _direction: DVec3, _length: f64) -> GeomResult<ShapeId> {
+        // Lightweight datum: don't create B-Rep solid for reference axes
+        // The viewport renders these directly as line geometry
+        let solid = Solid::cube(CVec3::ZERO, cvec(DVec3::new(0.001, 0.001, 0.001)));
         Ok(self.insert(solid))
     }
 
-    fn point(&mut self, position: DVec3, size: f64) -> GeomResult<ShapeId> {
-        // Create a small sphere for the point
-        let solid = Solid::sphere(size * 0.5);
-        let solid = solid.translate(cvec(position));
+    fn point(&mut self, _position: DVec3, _size: f64) -> GeomResult<ShapeId> {
+        // Lightweight datum: don't create B-Rep solid for reference points
+        let solid = Solid::cube(CVec3::ZERO, cvec(DVec3::new(0.001, 0.001, 0.001)));
         Ok(self.insert(solid))
     }
 
-    fn coordinate_system(&mut self, origin: DVec3, x_dir: DVec3, y_dir: DVec3, z_dir: DVec3, size: f64) -> GeomResult<ShapeId> {
-        // Create a Creo-style coordinate system triad with three colored axes
-        // X = Red, Y = Green, Z = Blue
-        let axis_radius = size * 0.015;
-        let axis_length = size;
-        
-        let x_axis = Solid::cylinder(axis_radius, cvec(x_dir.normalize_or_zero() * axis_length));
-        let y_axis = Solid::cylinder(axis_radius, cvec(y_dir.normalize_or_zero() * axis_length));
-        let z_axis = Solid::cylinder(axis_radius, cvec(z_dir.normalize_or_zero() * axis_length));
-        
-        let x_axis = x_axis.translate(cvec(origin));
-        let y_axis = y_axis.translate(cvec(origin));
-        let z_axis = z_axis.translate(cvec(origin));
-        
-        // Combine all three axes (union)
-        let combined = (&x_axis + &y_axis).build()
-            .map_err(|e| GeomError::Backend(e.to_string()))?;
-        let combined = (&combined + &z_axis).build()
-            .map_err(|e| GeomError::Backend(e.to_string()))?;
-        
-        Ok(self.insert(combined))
+    fn coordinate_system(&mut self, _origin: DVec3, _x_dir: DVec3, _y_dir: DVec3, _z_dir: DVec3, _size: f64) -> GeomResult<ShapeId> {
+        // Lightweight datum: don't create B-Rep solid for coordinate systems
+        // The viewport renders these directly as line geometry
+        let solid = Solid::cube(CVec3::ZERO, cvec(DVec3::new(0.001, 0.001, 0.001)));
+        Ok(self.insert(solid))
     }
 }
 

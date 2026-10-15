@@ -4099,6 +4099,7 @@ name = "rcad-app"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
  "eframe",
  "egui",
  "glam 0.30.10",
@@ -4116,6 +4117,7 @@ dependencies = [
  "rcad-skeleton",
  "rcad-sketch",
  "rcad-table",
+ "rcad-truck",
  "rcad-underlay",
  "rfd",
  "tracing",
