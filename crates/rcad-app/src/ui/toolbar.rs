@@ -740,9 +740,9 @@ impl VerticalToolbar {
             return;
         }
 
-        let width = self.width();
-        ui.set_min_width(width);
-        ui.set_max_width(width);
+        // The panel owns the width now: it is resizable and the value is
+        // persisted. Forcing set_min_width here overrode the panel, so dragging
+        // the edge did nothing and left a wide empty strip beside the commands.
         
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Toolbar header: view toggles. The File/Edit/Help commands live in
