@@ -366,6 +366,11 @@ pub struct Feature {
     pub created_timestamp: String,           // RFC3339 for trail log
     #[serde(default)]
     pub modified_timestamp: String,          // RFC3339 for trail log
+    /// Logical colour id, e.g. "fit zone". The RGB value for that id lives in
+    /// the project manifest, so a component stores a name and never a colour:
+    /// editing the project updates every component that uses it.
+    #[serde(default)]
+    pub colour_id: Option<String>,
 }
 
 impl Feature {
@@ -385,7 +390,22 @@ impl Feature {
             visible: true,  // Visible by default
             created_timestamp: chrono::Utc::now().to_rfc3339(),
             modified_timestamp: chrono::Utc::now().to_rfc3339(),
+            colour_id: None,
         }
+    }
+
+    /// Tag this feature with a logical colour id from the project vocabulary.
+    pub fn with_colour(mut self, colour_id: impl Into<String>) -> Self {
+        self.colour_id = Some(colour_id.into());
+        self
+    }
+
+    /// The RGB value for this feature, given the project manifest.
+    ///
+    /// Returns `None` when the feature has no colour id or the project does not
+    /// define one for it, in which case the viewport uses its default shading.
+    pub fn colour(&self, manifest: &ProjectManifest) -> Option<[u8; 3]> {
+        manifest.colour(self.colour_id.as_deref()?)
     }
 }
 
@@ -537,5 +557,40 @@ mod project_io_tests {
         assert_eq!(loaded.parts[0].name, "Bracket");
         assert_eq!(loaded.parts[0].features.len(), 1);
         assert_eq!(loaded.parts[0].features[0].name, "Base");
+    }
+}
+
+#[cfg(test)]
+mod colour_id_tests {
+    use super::*;
+
+    fn a_box() -> Feature {
+        Feature::new("Base", FeatureKind::Box { size: [10.0, 10.0, 10.0] })
+    }
+
+    #[test]
+    fn a_feature_carries_the_logical_id_not_a_value() {
+        let feature = a_box().with_colour("fit zone");
+        assert_eq!(feature.colour_id.as_deref(), Some("fit zone"));
+    }
+
+    #[test]
+    fn the_colour_id_survives_a_round_trip() {
+        let feature = a_box().with_colour("metric thread");
+        let bytes = rmp_serde::to_vec(&feature).expect("serialise");
+        let back: Feature = rmp_serde::from_slice(&bytes).expect("deserialise");
+        assert_eq!(back.colour_id.as_deref(), Some("metric thread"));
+    }
+
+    /// An untagged feature resolves to no colour, so the viewport keeps its
+    /// default shading instead of guessing.
+    #[test]
+    fn an_untagged_feature_has_no_colour() {
+        let mut manifest = ProjectManifest::default();
+        manifest.surface_colors.insert("fit zone".to_string(), [0, 255, 0]);
+
+        assert_eq!(a_box().colour(&manifest), None);
+        assert_eq!(a_box().with_colour("fit zone").colour(&manifest), Some([0, 255, 0]));
+        assert_eq!(a_box().with_colour("unknown").colour(&manifest), None);
     }
 }
