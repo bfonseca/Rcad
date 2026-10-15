@@ -410,3 +410,24 @@ already computed by OpenCascade on every rebuild; no new kernel work is needed.
 
 Note: cadrum also exposes its own `colormap`, but the project manifest must own
 the RGB values, so rcad should use `face_ids` and resolve colours itself.
+
+#### Known limitation found while verifying (open, needs a decision)
+
+`cadrum` face ids are the `TopoDS_TShape*` **address** of the face
+(`src/occt/face.rs` -> `ffi::face_tshape_id`), so they are process-local, not
+persistent names. Evidence from the two screenshot runs: the same demo top face
+was `140117738460192` in one process and `1401181894554144` in the next, and the
+two PNGs differ *only* in that status-bar text (1 176 pixels, all inside the
+status bar); the geometry and the colours are pixel-identical.
+
+Within one process the id is stable as long as the kernel shape is alive or
+reused from `ShapeCache` (which is what "rebuild after editing one parameter"
+does, so step D does survive that case). But a fully re-created shape, a reopened
+document, or another machine produces different ids, so a colour saved in a
+part file would attach to the wrong face - or to none - on reload.
+
+Before this becomes a user-facing feature the tag key has to become stable, for
+example by re-resolving at load time from a geometric signature (quantised face
+centroid + normal + area), or by storing a Creo-style stable face name on the
+feature that created the face. The map on `Part` can stay; only the key needs to
+change. Tracked here so the next session does not re-discover it.
