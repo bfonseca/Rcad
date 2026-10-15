@@ -771,7 +771,8 @@ impl VerticalToolbar {
             
             ui.separator();
             
-            // Tab bar: tight spacing so all six tabs stay on one row.
+            // Tab bar: pointless when only the Model palette exists.
+            if self.tabs.len() > 1 {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for (i, tab) in self.tabs.iter().enumerate() {
@@ -807,9 +808,9 @@ impl VerticalToolbar {
                     }
                 }
             });
-            
             ui.separator();
-            
+            }
+
             // Active tab content
             if !self.collapsed {
                 // Clone so render_button can take &mut self for the texture cache.

@@ -269,7 +269,7 @@ See [instructions.md](instructions.md) for detailed plan and milestones.
 - [x] Project manifest (rcad.toml)
 - [x] STEP/STL export through OCCT (wired to the real kernel)
 - [x] MCP server (`rcad-mcp`) with modelling tools and resources
-- [x] CI workflow (`ci/ci.yml`; move it into `.github/workflows/` to enable it)
+- [x] CI workflow (`.github/workflows/ci.yml`)
 - [x] Committed icon sprites so a fresh clone builds
 - [ ] Assembly mates (Phase D)
 - [ ] UI polish: vertical toolbar + adaptive history overlay
