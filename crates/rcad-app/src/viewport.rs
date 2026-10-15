@@ -438,7 +438,8 @@ fn draw_mesh(painter: &egui::Painter, rect: Rect, mesh: &TriangleMesh, camera: &
              continue; // back-face
          }
          let light = Vec3::new(0.4, 0.8, 0.5).normalize();
-         let shade = (n.dot(light).clamp(0.15, 1.0) * 220.0) as u8;
+         // Ambient floor of 0.3 keeps unlit faces readable instead of near-black.
+        let shade = (n.dot(light).clamp(0.3, 1.0) * 220.0) as u8;
          let mut color = Color32::from_rgb(shade, shade.saturating_add(10), shade.saturating_add(30));
          
          // Highlight selected triangle
@@ -560,11 +561,16 @@ fn draw_datum_plane(
     if projected.len() == 4 {
         let center = (corners[0] + corners[1] + corners[2] + corners[3]) / 4.0;
         
-        // Use a distinctive color for planes - transparent solid
+        // Datum planes are a faint tint plus an outline. These used
+        // from_rgba_premultiplied() with un-premultiplied values, which
+        // saturated the fill and hid the model behind seven opaque rectangles.
         let (base_color, edge_color) = if is_selected {
-            (Color32::from_rgba_premultiplied(100, 200, 255, 180), Color32::YELLOW)
+            (Color32::from_rgba_unmultiplied(120, 200, 255, 64), Color32::YELLOW)
         } else {
-            (Color32::from_rgba_premultiplied(100, 180, 255, 100), Color32::from_rgb(100, 200, 255))
+            (
+                Color32::from_rgba_unmultiplied(110, 180, 255, 22),
+                Color32::from_rgb(90, 150, 215),
+            )
         };
         
         // Draw filled quad with transparency (transparent solid)
@@ -576,8 +582,9 @@ fn draw_datum_plane(
             painter.line_segment([projected[i], projected[(i + 1) % 4]], Stroke::new(edge_width, edge_color));
         }
         
-        // Draw center label
-        if let Some(center_pos) = project(vp, rect, center) {
+        // Label only the selected plane: naming all seven at once buried the
+        // model under overlapping text.
+        if let Some(center_pos) = project(vp, rect, center).filter(|_| is_selected) {
             painter.text(
                 center_pos + Vec2::new(0.0, -20.0),
                 egui::Align2::CENTER_CENTER,

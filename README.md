@@ -308,8 +308,41 @@ cargo run --release --package rcad-app
 cargo run --package rcad-mcp -- --allow-write true
 ```
 
-The toolbar embeds `rcad-icons/sprite-light.svg` and `rcad-icons/sprite-dark.svg`
-at compile time. Both files are committed; if you change the icon generator,
+### Command line options
+
+```
+rcad [options]
+
+  --screenshot <path>   Render the UI, write a PNG to <path>, then exit
+  --frames <n>          Frames to render before capturing (default 30)
+  --demo                Start with a sample bracket instead of an empty part
+  --renderer <backend>  default | glow | wgpu
+  --view <name>         iso | front | back | left | right | top | bottom
+  --help                Show this message
+```
+
+### Screenshots, and machines without a GPU
+
+`--screenshot` renders the real UI, captures the framebuffer and exits. It is
+how documentation images and bug reports are produced:
+
+```bash
+cargo run --release --package rcad-app -- --demo --view iso --screenshot docs/app.png
+```
+
+On a headless machine or a CI runner, drive it with Mesa's software rasteriser
+and eframe's OpenGL backend:
+
+```bash
+LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
+  cargo run --package rcad-app -- --renderer glow --demo --screenshot app.png
+```
+
+### Icons
+
+The toolbar embeds the committed 64px PNGs from `rcad-icons/png/64/<theme>/...`
+(see `crates/rcad-app/build.rs`) and decodes them into GPU textures on first
+use. The two sprite SVGs are kept for the icon browser in `rcad-icons/index.html`;
 regenerate them with:
 
 ```bash

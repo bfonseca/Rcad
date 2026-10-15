@@ -1,6 +1,6 @@
 use eframe::egui;
 use crate::viewport::{draw_viewport, handle_picking, SelectionState};
-use crate::camera::OrbitCamera;
+use crate::camera::{OrbitCamera, Projection};
 use crate::undo::UndoStack;
 use crate::shortcuts::{Shortcuts, handle_shortcuts, shortcuts_list};
 use crate::ui::{VerticalToolbar, ToolbarAction, HistoryOverlay, HistoryOverlayAction};
@@ -36,6 +36,30 @@ pub enum SelectionMode {
     Face,
     Edge,
     Vertex,
+}
+
+/// Headless screenshot mode (see `--screenshot`).
+///
+/// Renders `frames` frames, asks egui for the framebuffer, writes it to `path`
+/// and quits. This is how the UI can be verified without a person watching the
+/// screen, and how documentation images are produced.
+#[derive(Debug, Clone)]
+pub struct CaptureRequest {
+    pub path: PathBuf,
+    pub frames: u32,
+    requested: bool,
+    rendered: u32,
+}
+
+impl CaptureRequest {
+    pub fn new(path: PathBuf, frames: u32) -> Self {
+        Self {
+            path,
+            frames,
+            requested: false,
+            rendered: 0,
+        }
+    }
 }
 
 pub struct RcadApp {
@@ -75,6 +99,10 @@ pub struct RcadApp {
     /// Set whenever the part tree changes. The kernel worker only rebuilds
     /// when this is set; previously a job was queued on *every frame*.
     needs_rebuild: bool,
+    /// Set by `--screenshot` to capture the next rendered frame and exit.
+    pub capture: Option<CaptureRequest>,
+    /// Frame the model as soon as the first mesh arrives.
+    needs_fit: bool,
 }
 
 impl RcadApp {
@@ -141,6 +169,8 @@ impl RcadApp {
             kernel_version: version_counter,
             kernel_worker_handle: Some(kernel_worker_handle),
             needs_rebuild: true,
+            capture: None,
+            needs_fit: true,
         };
         
         // Create default datum geometry (coordinate system + datum planes) for new part
@@ -421,6 +451,29 @@ impl RcadApp {
                         ui.close();
                     }
                     ui.separator();
+                    // CAD is normally viewed orthographically; perspective is
+                    // for a quick sense of depth.
+                    if ui
+                        .radio(
+                            self.camera.projection == Projection::Orthographic,
+                            "Orthographic",
+                        )
+                        .clicked()
+                    {
+                        self.camera.projection = Projection::Orthographic;
+                        ui.close();
+                    }
+                    if ui
+                        .radio(
+                            self.camera.projection == Projection::Perspective,
+                            "Perspective",
+                        )
+                        .clicked()
+                    {
+                        self.camera.projection = Projection::Perspective;
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Shaded").clicked() {
                         // TODO: Set shaded mode
                         ui.close();
@@ -430,7 +483,7 @@ impl RcadApp {
                         ui.close();
                     }
                     if ui.button("Zoom Fit").clicked() {
-                        // TODO: Zoom fit
+                        self.zoom_fit();
                         ui.close();
                     }
                 });
@@ -599,6 +652,14 @@ impl RcadApp {
                     // Only apply if this is the latest version
                     if response.version >= self.kernel_version.load(Ordering::Relaxed) {
                         self.mesh = response.mesh;
+                        // Frame the model the first time it appears: the app
+                        // previously opened at a fixed camera distance.
+                        if self.needs_fit {
+                            if let Some((min, max)) = self.mesh.bounds() {
+                                self.camera.fit_to_bounds(min, max);
+                                self.needs_fit = false;
+                            }
+                        }
                         if !response.errors.is_empty() {
                             self.last_error = Some(response.errors.join("\n"));
                         }
@@ -652,8 +713,53 @@ impl RcadApp {
                 self.show_relations_dialog = None;
             }
         }
+
+        // Headless screenshot support (see --screenshot).
+        self.handle_capture(ctx);
     }
-    
+
+    /// Capture mode: let a few frames render (so the async kernel rebuild can
+    /// land), then ask egui for the framebuffer, write it out and quit.
+    fn handle_capture(&mut self, ctx: &egui::Context) {
+        let Some(capture) = self.capture.as_mut() else {
+            return;
+        };
+
+        // Keep frames coming even though there is no user input.
+        ctx.request_repaint();
+
+        if let Some(image) = take_screenshot(ctx) {
+            match save_screenshot(&capture.path, &image) {
+                Ok(()) => tracing::info!("screenshot written to {}", capture.path.display()),
+                Err(err) => tracing::error!("could not write screenshot: {err}"),
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        capture.rendered += 1;
+        if !capture.requested && capture.rendered >= capture.frames {
+            capture.requested = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+    }
+
+    /// Load a small demo part so screenshots and first runs show real geometry.
+    pub fn load_demo_part(&mut self) {
+        if let Some(part) = self.get_active_part_mut() {
+            rcad_features::add_box(part, "Base", [40.0, 30.0, 8.0]);
+            let tool = rcad_features::add_cylinder(part, "HoleTool", 5.0, 20.0);
+            part.features.push(Feature::new(
+                "CutHole",
+                FeatureKind::Boolean {
+                    tool_feature: tool,
+                    op: rcad_geom::BooleanOp::Subtract,
+                },
+            ));
+        }
+        self.rebuild_active_part();
+    }
+
     fn draw_shortcuts_dialog(&mut self, ui: &mut egui::Ui) {
         let shortcuts = shortcuts_list();
         egui::ScrollArea::vertical().max_height(500.0).show(ui, |ui| {
@@ -1257,14 +1363,16 @@ impl RcadApp {
         self.camera.pitch = 0.0;
     }
     
+    // Exact poles: the camera picks a fallback up vector there, so the views no
+    // longer need the 0.01 radian fudge that made them visually unstable.
     pub fn set_view_top(&mut self) {
         self.camera.yaw = 0.0;
-        self.camera.pitch = std::f32::consts::PI / 2.0 - 0.01;
+        self.camera.pitch = std::f32::consts::FRAC_PI_2;
     }
-    
+
     pub fn set_view_bottom(&mut self) {
         self.camera.yaw = 0.0;
-        self.camera.pitch = -std::f32::consts::PI / 2.0 + 0.01;
+        self.camera.pitch = -std::f32::consts::FRAC_PI_2;
     }
     
     pub fn set_view_iso(&mut self) {
@@ -1274,6 +1382,14 @@ impl RcadApp {
     
     pub fn reset_view(&mut self) {
         self.camera = OrbitCamera::default();
+    }
+
+    /// Frame the model in the viewport (View > Zoom Fit, or the toolbar button).
+    pub fn zoom_fit(&mut self) {
+        match self.mesh.bounds() {
+            Some((min, max)) => self.camera.fit_to_bounds(min, max),
+            None => self.reset_view(),
+        }
     }
     
     pub fn new_document(&mut self) {
@@ -1503,10 +1619,10 @@ impl RcadApp {
             ToolbarAction::ViewIso => self.set_view_iso(),
             ToolbarAction::ViewReset => self.reset_view(),
             ToolbarAction::ViewPerspective => {
-                // TODO: Toggle perspective
+                self.camera.projection = Projection::Perspective;
             }
             ToolbarAction::ViewOrthographic => {
-                // TODO: Toggle orthographic
+                self.camera.projection = Projection::Orthographic;
             }
             ToolbarAction::ViewShaded => {
                 // TODO: Set shaded mode
@@ -1514,9 +1630,7 @@ impl RcadApp {
             ToolbarAction::ViewWireframe => {
                 // TODO: Set wireframe mode
             }
-            ToolbarAction::ViewZoomFit => {
-                // TODO: Zoom to fit
-            }
+            ToolbarAction::ViewZoomFit => self.zoom_fit(),
             ToolbarAction::ViewPrevious => {
                 // TODO: Previous view
             }
@@ -1931,6 +2045,8 @@ impl Default for RcadApp {
             kernel_version: version_counter,
             kernel_worker_handle: Some(kernel_worker_handle),
             needs_rebuild: true,
+            capture: None,
+            needs_fit: true,
         }
     }
 }
@@ -1939,4 +2055,31 @@ impl eframe::App for RcadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update(ctx, _frame);
     }
+}
+
+/// Pull a screenshot out of this frame's input events, if egui delivered one.
+fn take_screenshot(ctx: &egui::Context) -> Option<egui::ColorImage> {
+    ctx.input(|input| {
+        input.events.iter().find_map(|event| match event {
+            egui::Event::Screenshot { image, .. } => Some((**image).clone()),
+            _ => None,
+        })
+    })
+}
+
+/// Write an egui framebuffer capture to a PNG file.
+fn save_screenshot(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
+    let [width, height] = image.size;
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for pixel in &image.pixels {
+        rgba.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b(), pixel.a()]);
+    }
+    let buffer = image::RgbaImage::from_raw(width as u32, height as u32, rgba)
+        .ok_or_else(|| "screenshot size does not match its pixel buffer".to_string())?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+    buffer.save(path).map_err(|e| e.to_string())
 }
