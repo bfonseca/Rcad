@@ -88,7 +88,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn extrude_sketch(profile: &rcad_geom::Profile2D) -> Result<(), Box<dyn std::error::Error>> {
-    use rcad_geom::GeometryBackend;
 
     let mut backend = OcctBackend::default();
 

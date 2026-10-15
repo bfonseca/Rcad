@@ -78,17 +78,34 @@ impl OrbitCamera {
         proj * view
     }
 
+    /// Orbit by a pointer-motion delta, roughly 0.01 radians per point.
+    ///
+    /// Pitch wraps through the poles instead of stopping there. The old clamp
+    /// made the view jam at straight-up / straight-down, so a continued drag
+    /// did nothing and the user had to release the mouse and start again.
+    /// Wrapping keeps the eye position continuous across the pole, so the user
+    /// can keep spinning in any direction.
     pub fn orbit(&mut self, delta: Vec2) {
-        self.yaw += delta.x * 0.01;
-        self.pitch += delta.y * 0.01;
-        // Allow full 360º rotation, but keep pitch reasonable for usability
-        // Allow pitch to wrap around for continuous rotation
-        // Clamp to avoid singularity at poles but allow full range
-        if self.pitch > std::f32::consts::FRAC_PI_2 - 0.01 {
-            self.pitch = std::f32::consts::FRAC_PI_2 - 0.01;
-        } else if self.pitch < -std::f32::consts::FRAC_PI_2 + 0.01 {
-            self.pitch = -std::f32::consts::FRAC_PI_2 + 0.01;
+        const SENSITIVITY: f32 = 0.01;
+        const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
+        const TAU: f32 = std::f32::consts::TAU;
+
+        self.yaw = (self.yaw + delta.x * SENSITIVITY).rem_euclid(TAU);
+        self.pitch += delta.y * SENSITIVITY;
+
+        // Reflect the pitch about the pole and turn the yaw half a turn. The
+        // two changes cancel out in `eye()`, so the camera does not jump.
+        for _ in 0..8 {
+            if self.pitch > HALF_PI {
+                self.pitch = std::f32::consts::PI - self.pitch;
+            } else if self.pitch < -HALF_PI {
+                self.pitch = -std::f32::consts::PI - self.pitch;
+            } else {
+                break;
+            }
+            self.yaw = (self.yaw + std::f32::consts::PI).rem_euclid(TAU);
         }
+        self.pitch = self.pitch.clamp(-HALF_PI, HALF_PI);
     }
 
     pub fn pan(&mut self, delta: Vec2) {
@@ -184,3 +201,49 @@ mod tests {
         }
     }
 }
+
+    /// A continued vertical drag must keep turning instead of jamming at the
+    /// pole (the old code clamped pitch to +/- 90 degrees).
+    #[test]
+    fn orbit_keeps_turning_past_the_poles() {
+        let mut camera = OrbitCamera::default();
+        for _ in 0..500 {
+            camera.orbit(Vec2::new(0.0, 10.0));
+            assert!(camera.pitch >= -std::f32::consts::FRAC_PI_2 - 1e-5);
+            assert!(camera.pitch <= std::f32::consts::FRAC_PI_2 + 1e-5);
+            assert!(camera.eye().is_finite());
+            assert!(camera.view_proj(1.5).is_finite());
+        }
+    }
+
+    /// Crossing a pole must not teleport the camera: the reflection of the
+    /// pitch and the half-turn of the yaw have to cancel out.
+    #[test]
+    fn crossing_a_pole_keeps_the_camera_continuous() {
+        let mut camera = OrbitCamera {
+            pitch: std::f32::consts::FRAC_PI_2 - 0.02,
+            yaw: 0.4,
+            ..Default::default()
+        };
+        let before = camera.eye();
+        camera.orbit(Vec2::new(0.0, 3.0)); // 0.03 rad: just past the pole
+        let after = camera.eye();
+        let jump = (after - before).length() / camera.distance;
+        assert!(jump < 0.05, "camera jumped {jump} of its distance crossing a pole");
+    }
+
+    /// Yaw must accumulate without bound so horizontal spinning never stops.
+    #[test]
+    fn yaw_accumulates_through_a_full_turn() {
+        let mut camera = OrbitCamera::default();
+        let start = camera.eye();
+        let per_frame = std::f32::consts::TAU / 0.01 / 360.0; // 1 degree per frame
+        for _ in 0..360 {
+            camera.orbit(Vec2::new(per_frame, 0.0));
+        }
+        let end = camera.eye();
+        assert!(
+            (end - start).length() < 0.01,
+            "a full turn did not return to the start: {start} vs {end}"
+        );
+    }

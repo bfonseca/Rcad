@@ -677,3 +677,332 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Relations
+// ---------------------------------------------------------------------------
+
+/// Evaluate the part relations in order, writing each left-hand side back into
+/// `part.parameters` as a real value.
+///
+/// Supported syntax: `+ - * /`, parentheses, unary minus, numbers and names.
+/// A name resolves to an existing parameter, or to a value defined earlier in
+/// the relation list. Returns one message per relation that failed.
+pub fn evaluate_relations(part: &mut Part) -> Vec<String> {
+    let mut scope: HashMap<String, f64> = HashMap::new();
+    for (name, parameter) in &part.parameters {
+        match &parameter.value {
+            rcad_doc::ParameterValue::Real(value) => {
+                scope.insert(name.clone(), *value);
+            }
+            rcad_doc::ParameterValue::Integer(value) => {
+                scope.insert(name.clone(), *value as f64);
+            }
+            _ => {}
+        }
+    }
+
+    let mut errors = Vec::new();
+    for relation in part.relations.clone() {
+        // Tolerate "name = expression" in the right-hand side, which is how the
+        // relation field was documented.
+        let expression = match relation.rhs.split_once('=') {
+            Some((_, tail)) => tail.trim().to_string(),
+            None => relation.rhs.clone(),
+        };
+
+        match eval_expression(&expression, &scope) {
+            Ok(value) => {
+                scope.insert(relation.lhs.clone(), value);
+                let entry = part
+                    .parameters
+                    .entry(relation.lhs.clone())
+                    .or_insert_with(|| rcad_doc::Parameter {
+                        name: relation.lhs.clone(),
+                        value: rcad_doc::ParameterValue::Real(value),
+                        description: Some("computed by a relation".to_string()),
+                        is_global: false,
+                    });
+                entry.value = rcad_doc::ParameterValue::Real(value);
+            }
+            Err(err) => errors.push(format!("{}: {err}", relation.lhs)),
+        }
+    }
+    errors
+}
+
+/// Evaluate a single arithmetic expression against `scope`.
+pub fn eval_expression(input: &str, scope: &HashMap<String, f64>) -> Result<f64, String> {
+    let tokens = tokenize(input)?;
+    if tokens.is_empty() {
+        return Err("empty expression".to_string());
+    }
+    let mut parser = ExprParser {
+        tokens: &tokens,
+        pos: 0,
+        scope,
+    };
+    let value = parser.parse_sum()?;
+    if parser.pos != tokens.len() {
+        return Err("unexpected trailing input".to_string());
+    }
+    if !value.is_finite() {
+        return Err("expression is not a finite number".to_string());
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    Number(f64),
+    Name(String),
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    LParen,
+    RParen,
+}
+
+fn tokenize(input: &str) -> Result<Vec<Token>, String> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            c if c.is_whitespace() => i += 1,
+            '+' => {
+                tokens.push(Token::Plus);
+                i += 1;
+            }
+            '-' => {
+                tokens.push(Token::Minus);
+                i += 1;
+            }
+            '*' => {
+                tokens.push(Token::Star);
+                i += 1;
+            }
+            '/' => {
+                tokens.push(Token::Slash);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
+            c if c.is_ascii_digit() || c == '.' => {
+                let start = i;
+                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                    i += 1;
+                }
+                let text: String = chars[start..i].iter().collect();
+                let value: f64 = text
+                    .parse()
+                    .map_err(|_| format!("invalid number '{text}'"))?;
+                tokens.push(Token::Number(value));
+            }
+            c if c.is_alphabetic() || c == '_' => {
+                let start = i;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                tokens.push(Token::Name(chars[start..i].iter().collect()));
+            }
+            other => return Err(format!("unexpected character '{other}'")),
+        }
+    }
+    Ok(tokens)
+}
+
+struct ExprParser<'a> {
+    tokens: &'a [Token],
+    pos: usize,
+    scope: &'a HashMap<String, f64>,
+}
+
+impl<'a> ExprParser<'a> {
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
+    fn parse_sum(&mut self) -> Result<f64, String> {
+        let mut value = self.parse_product()?;
+        loop {
+            if matches!(self.peek(), Some(Token::Plus)) {
+                self.pos += 1;
+                value += self.parse_product()?;
+            } else if matches!(self.peek(), Some(Token::Minus)) {
+                self.pos += 1;
+                value -= self.parse_product()?;
+            } else {
+                break;
+            }
+        }
+        Ok(value)
+    }
+
+    fn parse_product(&mut self) -> Result<f64, String> {
+        let mut value = self.parse_unary()?;
+        loop {
+            if matches!(self.peek(), Some(Token::Star)) {
+                self.pos += 1;
+                value *= self.parse_unary()?;
+            } else if matches!(self.peek(), Some(Token::Slash)) {
+                self.pos += 1;
+                let divisor = self.parse_unary()?;
+                if divisor == 0.0 {
+                    return Err("division by zero".to_string());
+                }
+                value /= divisor;
+            } else {
+                break;
+            }
+        }
+        Ok(value)
+    }
+
+    fn parse_unary(&mut self) -> Result<f64, String> {
+        if matches!(self.peek(), Some(Token::Minus)) {
+            self.pos += 1;
+            return Ok(-self.parse_unary()?);
+        }
+        if matches!(self.peek(), Some(Token::Plus)) {
+            self.pos += 1;
+        }
+        self.parse_atom()
+    }
+
+    fn parse_atom(&mut self) -> Result<f64, String> {
+        match self.peek().cloned() {
+            Some(Token::Number(value)) => {
+                self.pos += 1;
+                Ok(value)
+            }
+            Some(Token::Name(name)) => {
+                self.pos += 1;
+                self.scope
+                    .get(&name)
+                    .copied()
+                    .ok_or_else(|| format!("unknown parameter '{name}'"))
+            }
+            Some(Token::LParen) => {
+                self.pos += 1;
+                let value = self.parse_sum()?;
+                if matches!(self.peek(), Some(Token::RParen)) {
+                    self.pos += 1;
+                    Ok(value)
+                } else {
+                    Err("missing ')'".to_string())
+                }
+            }
+            other => Err(format!("unexpected {other:?}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod relation_tests {
+    use super::*;
+    use rcad_doc::{Parameter, ParameterValue, Part, Relation};
+
+    fn part_with(parameters: Vec<(&str, f64)>) -> Part {
+        let mut part = Part::new_solid("P");
+        for (name, value) in parameters {
+            part.parameters.insert(
+                name.to_string(),
+                Parameter {
+                    name: name.to_string(),
+                    value: ParameterValue::Real(value),
+                    description: None,
+                    is_global: false,
+                },
+            );
+        }
+        part
+    }
+
+    fn relation(lhs: &str, rhs: &str) -> Relation {
+        Relation {
+            lhs: lhs.to_string(),
+            rhs: rhs.to_string(),
+            comment: None,
+        }
+    }
+
+    fn real(part: &Part, name: &str) -> f64 {
+        match &part.parameters.get(name).expect("parameter exists").value {
+            ParameterValue::Real(value) => *value,
+            other => panic!("expected a real parameter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluates_arithmetic_with_correct_precedence() {
+        let scope = HashMap::new();
+        assert_eq!(eval_expression("2 + 3 * 4", &scope).unwrap(), 14.0);
+        assert_eq!(eval_expression("(2 + 3) * 4", &scope).unwrap(), 20.0);
+        assert_eq!(eval_expression("-4 + 10 / 2", &scope).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn resolves_names_from_the_scope() {
+        let mut scope = HashMap::new();
+        scope.insert("width".to_string(), 10.0);
+        assert_eq!(eval_expression("width * 2 + 1", &scope).unwrap(), 21.0);
+    }
+
+    #[test]
+    fn reports_unknown_names_and_bad_syntax() {
+        let scope = HashMap::new();
+        assert!(eval_expression("missing + 1", &scope).is_err());
+        assert!(eval_expression("1 +", &scope).is_err());
+        assert!(eval_expression("(1 + 2", &scope).is_err());
+        assert!(eval_expression("1 / 0", &scope).is_err());
+        assert!(eval_expression("", &scope).is_err());
+    }
+
+    #[test]
+    fn relations_write_results_back_into_the_part() {
+        let mut part = part_with(vec![("width", 10.0)]);
+        part.relations.push(relation("height", "width * 2"));
+        part.relations.push(relation("volume", "width * height * 5"));
+
+        let errors = evaluate_relations(&mut part);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(real(&part, "height"), 20.0);
+        // Later relations can use values defined by earlier ones.
+        assert_eq!(real(&part, "volume"), 1000.0);
+    }
+
+    #[test]
+    fn accepts_an_assignment_in_the_right_hand_side() {
+        let mut part = part_with(vec![("shaft_dia", 20.0)]);
+        part.relations
+            .push(relation("hole_dia", "hole_dia = shaft_dia + 0.5"));
+
+        let errors = evaluate_relations(&mut part);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(real(&part, "hole_dia"), 20.5);
+    }
+
+    #[test]
+    fn a_failing_relation_is_reported_and_does_not_stop_the_rest() {
+        let mut part = part_with(vec![("a", 2.0)]);
+        part.relations.push(relation("bad", "nope * 2"));
+        part.relations.push(relation("good", "a * 3"));
+
+        let errors = evaluate_relations(&mut part);
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("bad:"), "{errors:?}");
+        assert_eq!(real(&part, "good"), 6.0);
+    }
+}

@@ -32,6 +32,8 @@ struct Cli {
     renderer: RendererChoice,
     /// Standard view to open in: iso, front, top, right, ...
     view: Option<String>,
+    /// Open the feature dialog on startup (for screenshots and docs).
+    dialog: bool,
 }
 
 const USAGE: &str = "\
@@ -45,6 +47,7 @@ Options:
   --demo                Start with a sample bracket instead of an empty part
   --renderer <backend>  default | glow | wgpu
   --view <name>         iso | front | back | left | right | top | bottom
+  --dialog              Open the feature dialog for the first feature
   --help                Show this message
 ";
 
@@ -71,6 +74,7 @@ fn parse_args() -> Result<Cli, String> {
                 cli.frames = frames;
             }
             "--demo" => cli.demo = true,
+            "--dialog" => cli.dialog = true,
             "--view" => {
                 cli.view = Some(args.next().ok_or("--view needs a name")?);
             }
@@ -145,6 +149,7 @@ fn main() -> eframe::Result<()> {
         .map(|path| CaptureRequest::new(path, cli.frames));
     let demo = cli.demo;
     let view = cli.view.clone();
+    let dialog = cli.dialog;
 
     eframe::run_native(
         "rcad",
@@ -164,6 +169,9 @@ fn main() -> eframe::Result<()> {
             }
             if demo {
                 app.load_demo_part();
+            }
+            if dialog {
+                app.open_feature_dialog_for_first_feature();
             }
             app.capture = capture;
             Ok(Box::new(app))

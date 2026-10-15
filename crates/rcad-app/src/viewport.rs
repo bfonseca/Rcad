@@ -242,15 +242,20 @@ pub fn draw_viewport(
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
-    // Middle mouse button drag = Orbit
+    // Middle mouse button drag = Orbit.
+    //
+    // drag_motion() uses the raw, unaccelerated pointer motion, which - unlike
+    // drag_delta() - is not clamped by the screen edges. With drag_delta() the
+    // rotation stopped as soon as the cursor reached the edge of the screen and
+    // the user had to let go and start a new drag to keep turning.
     if response.dragged_by(egui::PointerButton::Middle) {
-        let d = response.drag_delta();
+        let d = response.drag_motion();
         camera.orbit(glam::Vec2::new(d.x, d.y));
     }
-    
+
     // Right mouse button drag = Pan (only when dragged, not clicked)
     if response.dragged_by(egui::PointerButton::Secondary) {
-        let d = response.drag_delta();
+        let d = response.drag_motion();
         camera.pan(glam::Vec2::new(d.x, d.y));
     }
     

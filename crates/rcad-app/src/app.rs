@@ -103,6 +103,19 @@ pub struct RcadApp {
     pub capture: Option<CaptureRequest>,
     /// Frame the model as soon as the first mesh arrives.
     needs_fit: bool,
+    /// Which tab the feature dialog shows (0 parameters, 1 relations).
+    feature_dialog_tab: usize,
+    /// Draft values for the feature dialog's "add parameter" row.
+    new_parameter: NewParameterDraft,
+}
+
+/// Transient state for the feature dialog's "add parameter" row.
+#[derive(Debug, Clone, Default)]
+pub struct NewParameterDraft {
+    pub name: String,
+    /// 0 = real, 1 = string, 2 = boolean.
+    pub kind: u8,
+    pub value: String,
 }
 
 impl RcadApp {
@@ -171,6 +184,8 @@ impl RcadApp {
             needs_rebuild: true,
             capture: None,
             needs_fit: true,
+            feature_dialog_tab: 0,
+            new_parameter: NewParameterDraft::default(),
         };
         
         // Create default datum geometry (coordinate system + datum planes) for new part
@@ -330,7 +345,11 @@ impl RcadApp {
         Ok(())
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    /// Draw one frame of the whole application.
+    ///
+    /// Kept free of eframe types so tests can drive the UI directly with
+    /// egui_kittest: click a button, then assert on the resulting state.
+    pub fn ui(&mut self, ctx: &egui::Context) {
         // Handle keyboard shortcuts
         handle_shortcuts(self, ctx, &self.shortcuts.clone());
         
@@ -702,7 +721,7 @@ impl RcadApp {
         // Show relations dialog if requested
         if let Some(feature_id) = self.show_relations_dialog {
             let mut open = true;
-            egui::Window::new("Relations & Parameters")
+            egui::Window::new("Feature")
                 .open(&mut open)
                 .resizable(true)
                 .default_size([500.0, 400.0])
@@ -741,6 +760,20 @@ impl RcadApp {
         if !capture.requested && capture.rendered >= capture.frames {
             capture.requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+    }
+
+    /// Open the feature dialog for the first feature in the model tree.
+    ///
+    /// Used by `--dialog` to capture the dialog in documentation images.
+    pub fn open_feature_dialog_for_first_feature(&mut self) {
+        if let Some(feature) = self
+            .project
+            .parts
+            .first()
+            .and_then(|part| part.features.first())
+        {
+            self.show_relations_dialog = Some(feature.id);
         }
     }
 
@@ -784,183 +817,80 @@ impl RcadApp {
         }
     }
     
-    fn draw_relations_dialog(&mut self, ui: &mut egui::Ui, feature_id: uuid::Uuid) {
-        // Find the feature - clone data to avoid borrow issues
-        let feature_name = {
-            let part = self.get_active_part();
-            part.and_then(|p| p.features.iter().find(|f| f.id == feature_id))
-                .map(|f| (f.name.clone(), f.parameters.clone()))
-        };
-        
-        if let Some((name, parameters)) = feature_name {
-            ui.heading(format!("Relations & Parameters - {}", name));
+    /// Feature dialog: edit the feature parameters, and its part relations.
+    ///
+    /// Opened from the model tree by clicking a feature type icon. This is the
+    /// Creo "Edit Definition" surface: a Parameters tab where parameters can be
+    /// edited, added and removed, and a Relations tab for part-level equations.
+    fn draw_feature_dialog(&mut self, ui: &mut egui::Ui, feature_id: uuid::Uuid) {
+        let mut status: Option<String> = None;
+        let mut close = false;
+        let mut tab: usize = self.feature_dialog_tab;
+
+        {
+            let Some(part) = self.project.parts.first_mut() else {
+                ui.label("No active part");
+                return;
+            };
+            let Some(index) = part.features.iter().position(|f| f.id == feature_id) else {
+                ui.label("Feature not found");
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+                // Fall through to the shared footer below.
+                if close {
+                    self.feature_dialog_tab = tab;
+                    self.show_relations_dialog = None;
+                }
+                return;
+            };
+
+            let kind_name = feature_kind_label(&part.features[index].kind);
+            ui.heading(format!("{} — {kind_name}", part.features[index].name));
             ui.separator();
-            
-            // Tab selector
-            let mut tab = 0;
+
             ui.horizontal(|ui| {
-                if ui.selectable_label(tab == 0, "Relations").clicked() { tab = 0; }
-                if ui.selectable_label(tab == 1, "Parameters").clicked() { tab = 1; }
-                if ui.selectable_label(tab == 2, "Programmatic").clicked() { tab = 2; }
+                ui.selectable_value(&mut tab, 0, "Parameters");
+                ui.selectable_value(&mut tab, 1, "Relations");
             });
             ui.separator();
-            
+
             match tab {
-                0 => {
-                    // Relations tab
-                    ui.label("Equations and relations:");
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if parameters.string.is_empty() && parameters.numeric.is_empty() {
-                            ui.label("No relations defined.");
-                            ui.label("Click 'Add Relation' to create equations like: length = width * 2");
+                0 => draw_parameters_tab(ui, &mut part.features[index].parameters, &mut self.new_parameter),
+                _ => {
+                    if draw_relations_tab(ui, &mut part.relations) {
+                        let errors = rcad_param::evaluate_relations(part);
+                        status = Some(if errors.is_empty() {
+                            format!(
+                                "Regenerated {} relation(s).",
+                                part.relations.len()
+                            )
                         } else {
-                            for (key, value) in &parameters.string {
-                                ui.horizontal(|ui| {
-                                    ui.monospace(key);
-                                    ui.label("=");
-                                    ui.monospace(value);
-                                });
-                            }
-                            for (key, value) in &parameters.numeric {
-                                ui.horizontal(|ui| {
-                                    ui.monospace(key);
-                                    ui.label("=");
-                                    ui.monospace(format!("{:.3}", value));
-                                });
-                            }
-                        }
-                        
-                        ui.separator();
-                        if ui.button("Add Relation").clicked() {
-                            self.last_error = Some("Add Relation - TODO: Implement relation editor".to_string());
-                        }
-                        if ui.button("Edit Relation").clicked() {
-                            self.last_error = Some("Edit Relation - TODO".to_string());
-                        }
-                        if ui.button("Delete Relation").clicked() {
-                            self.last_error = Some("Delete Relation - TODO".to_string());
-                        }
-                    });
-                },
-                1 => {
-                    // Parameters tab
-                    ui.label("Feature parameters:");
-                    
-                    // Use cloned parameters to avoid borrow issues
-                    let mut params = parameters.clone();
-                    let mut changed = false;
-                    
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if params.numeric.is_empty() && params.string.is_empty() && params.boolean.is_empty() {
-                            ui.label("No parameters defined.");
-                        } else {
-                            egui::Grid::new("params_grid").num_columns(3).show(ui, |ui| {
-                                ui.strong("Name");
-                                ui.strong("Value");
-                                ui.strong("Type");
-                                ui.end_row();
-                                
-                                // Collect keys first to avoid borrow issues
-                                let numeric_keys: Vec<String> = params.numeric.keys().cloned().collect();
-                                for name in numeric_keys {
-                                    if let Some(value) = params.numeric.get_mut(&name) {
-                                        ui.label(&name);
-                                        let mut v = *value;
-                                        if ui.add(egui::DragValue::new(&mut v).speed(0.1)).changed() {
-                                            *value = v;
-                                            changed = true;
-                                        }
-                                        ui.label("Real");
-                                        ui.end_row();
-                                    }
-                                }
-                                let string_keys: Vec<String> = params.string.keys().cloned().collect();
-                                for name in string_keys {
-                                    if let Some(value) = params.string.get(&name) {
-                                        ui.label(&name);
-                                        ui.label(value);
-                                        ui.label("String");
-                                        ui.end_row();
-                                    }
-                                }
-                                let boolean_keys: Vec<String> = params.boolean.keys().cloned().collect();
-                                for name in boolean_keys {
-                                    if let Some(value) = params.boolean.get_mut(&name) {
-                                        ui.label(&name);
-                                        let mut v = *value;
-                                        if ui.checkbox(&mut v, "").changed() {
-                                            *value = v;
-                                            changed = true;
-                                        }
-                                        ui.label("Boolean");
-                                        ui.end_row();
-                                    }
-                                }
-                            });
-                        }
-                    });
-                    
-                    // Apply changes back to feature if modified
-                    if changed {
-                        if let Some(part) = self.get_active_part_mut() {
-                            if let Some(f) = part.features.iter_mut().find(|f| f.id == feature_id) {
-                                f.parameters = params;
-                            }
-                        }
+                            format!("Relation errors: {}", errors.join("; "))
+                        });
                     }
-                    
-                    ui.separator();
-                    if ui.button("Add Parameter").clicked() {
-                        self.last_error = Some("Add Parameter - TODO: Implement parameter editor".to_string());
-                    }
-                },
-                2 => {
-                    // Programmatic tab
-                    ui.label("Programmatic behavior (Creo-style):");
-                    ui.separator();
-                    ui.label("This tab allows defining programmatic logic for the feature.");
-                    ui.label("Examples: conditional suppression, pattern logic, family table driven values.");
-                    ui.separator();
-                    ui.label("Programmatic logic:");
-                    
-                    // Get programmatic logic value from cloned parameters
-                    let mut programmatic = parameters.string.get("programmatic")
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut changed = false;
-                    
-                    if ui.text_edit_multiline(&mut programmatic).changed() {
-                        changed = true;
-                    }
-                    
-                    // Apply changes
-                    if changed {
-                        if let Some(part) = self.get_active_part_mut() {
-                            if let Some(f) = part.features.iter_mut().find(|f| f.id == feature_id) {
-                                f.parameters.string.insert("programmatic".to_string(), programmatic);
-                            }
-                        }
-                    }
-                    
-                    ui.separator();
-                    if ui.button("Edit Programmatic Logic").clicked() {
-                        self.last_error = Some("Edit Programmatic - TODO: Implement code editor".to_string());
-                    }
-                },
-                _ => {}
+                }
             }
-            
+
             ui.separator();
             if ui.button("Close").clicked() {
-                self.show_relations_dialog = None;
-            }
-        } else {
-            ui.label("Feature not found");
-            if ui.button("Close").clicked() {
-                self.show_relations_dialog = None;
+                close = true;
             }
         }
+
+        self.feature_dialog_tab = tab;
+        if let Some(message) = status {
+            self.last_error = Some(message);
+        }
+        if close {
+            self.show_relations_dialog = None;
+        }
     }
+
+    fn draw_relations_dialog(&mut self, ui: &mut egui::Ui, feature_id: uuid::Uuid) {
+        self.draw_feature_dialog(ui, feature_id);
+    }
+
     
     fn sketch_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Sketch");
@@ -2047,13 +1977,15 @@ impl Default for RcadApp {
             needs_rebuild: true,
             capture: None,
             needs_fit: true,
+            feature_dialog_tab: 0,
+            new_parameter: NewParameterDraft::default(),
         }
     }
 }
 
 impl eframe::App for RcadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.update(ctx, _frame);
+        self.ui(ctx);
     }
 }
 
@@ -2082,4 +2014,443 @@ fn save_screenshot(path: &Path, image: &egui::ColorImage) -> Result<(), String> 
         }
     }
     buffer.save(path).map_err(|e| e.to_string())
+}
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use crate::ui::ToolbarAction;
+
+    /// A headless egui session driving the real application UI.
+    ///
+    /// Clicks are delivered as genuine pointer events, so these tests go
+    /// through the same path a user does: layout, hit-testing, action dispatch
+    /// and state mutation. That catches wiring bugs which unit tests on the
+    /// underlying functions cannot see.
+    struct Session {
+        ctx: egui::Context,
+        app: RcadApp,
+        screen: egui::Rect,
+    }
+
+    impl Session {
+        fn new(app: RcadApp) -> Self {
+            let ctx = egui::Context::default();
+            let screen =
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+            let mut session = Self { ctx, app, screen };
+            // Two frames: widgets only report their rect once laid out.
+            session.frame();
+            session.frame();
+            session
+        }
+
+        fn input(&self, events: Vec<egui::Event>) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(self.screen),
+                events,
+                ..Default::default()
+            }
+        }
+
+        /// Run one frame with no input.
+        fn frame(&mut self) {
+            let raw = self.input(Vec::new());
+            let Self { ctx, app, .. } = self;
+            let _ = ctx.run(raw, |ctx| app.ui(ctx));
+        }
+
+        /// Press and release the primary button at `pos`, then settle.
+        fn click(&mut self, pos: egui::Pos2) {
+            let press = vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ];
+            let raw = self.input(press);
+            {
+                let Self { ctx, app, .. } = self;
+                let _ = ctx.run(raw, |ctx| app.ui(ctx));
+            }
+
+            let release = vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }];
+            let raw = self.input(release);
+            {
+                let Self { ctx, app, .. } = self;
+                let _ = ctx.run(raw, |ctx| app.ui(ctx));
+            }
+
+            // One more frame so the dispatched action is fully applied.
+            self.frame();
+        }
+
+        /// Send a key press with modifiers (for shortcut tests).
+        fn press_key(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
+            let events = vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }];
+            let mut raw = self.input(events);
+            raw.modifiers = modifiers;
+            {
+                let Self { ctx, app, .. } = self;
+                let _ = ctx.run(raw, |ctx| app.ui(ctx));
+            }
+            // Release: the next frame has no modifiers and no key events.
+            self.frame();
+        }
+
+        /// Centre of a toolbar button drawn in the last frame.
+        fn button_center(&self, action: ToolbarAction) -> egui::Pos2 {
+            self.app
+                .toolbar
+                .button_rect(&action)
+                .unwrap_or_else(|| panic!("{action:?} was not drawn on the active tab"))
+                .center()
+        }
+
+        fn click_toolbar(&mut self, action: ToolbarAction) {
+            let center = self.button_center(action);
+            self.click(center);
+        }
+    }
+
+    fn features(app: &RcadApp) -> &Vec<Feature> {
+        &app.project.parts.first().expect("project has a part").features
+    }
+
+    #[test]
+    fn clicking_the_box_button_adds_a_feature() {
+        let mut session = Session::new(RcadApp::default());
+        let before = features(&session.app).len();
+
+        session.click_toolbar(ToolbarAction::ModelBox);
+
+        assert_eq!(
+            features(&session.app).len(),
+            before + 1,
+            "clicking Box in the toolbar did not add a feature"
+        );
+    }
+
+    #[test]
+    fn clicking_box_twice_creates_two_uniquely_named_features() {
+        let mut session = Session::new(RcadApp::default());
+        session.click_toolbar(ToolbarAction::ModelBox);
+        session.click_toolbar(ToolbarAction::ModelBox);
+
+        let names: Vec<String> = features(&session.app)
+            .iter()
+            .map(|feature| feature.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Box1".to_string(), "Box2".to_string()]);
+    }
+
+    #[test]
+    fn ctrl_z_reverts_the_box_added_by_the_toolbar() {
+        let mut session = Session::new(RcadApp::default());
+        let before = features(&session.app).len();
+
+        session.click_toolbar(ToolbarAction::ModelBox);
+        assert_eq!(features(&session.app).len(), before + 1);
+
+        session.press_key(egui::Key::Z, egui::Modifiers::CTRL);
+
+        assert_eq!(
+            features(&session.app).len(),
+            before,
+            "Ctrl+Z did not undo the box that the toolbar added"
+        );
+    }
+
+    /// Clicking the feature type icon in the model tree must open the feature
+    /// dialog for that feature.
+    #[test]
+    fn clicking_a_feature_type_icon_opens_the_feature_dialog() {
+        let mut session = Session::new(RcadApp::default());
+        session.click_toolbar(ToolbarAction::ModelBox);
+        let feature_id = features(&session.app)[0].id;
+        assert!(session.app.show_relations_dialog.is_none());
+
+        let rect = session
+            .app
+            .history_overlay
+            .type_button_rect(feature_id)
+            .expect("the feature type icon was not drawn in the model tree");
+        session.click(rect.center());
+
+        assert_eq!(
+            session.app.show_relations_dialog,
+            Some(feature_id),
+            "clicking the feature type icon did not open the feature dialog"
+        );
+    }
+
+    #[test]
+    fn clicking_a_view_button_moves_the_camera() {
+        let mut session = Session::new(RcadApp::default());
+        session.app.toolbar.set_active_tab(4);
+        session.frame();
+
+        session.app.camera.pitch = 0.0;
+        session.click_toolbar(ToolbarAction::ViewTop);
+
+        assert!(
+            (session.app.camera.pitch - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+            "the Top view button did not move the camera: pitch = {}",
+            session.app.camera.pitch
+        );
+    }
+}
+
+/// Human-readable feature type for the dialog heading.
+fn feature_kind_label(kind: &FeatureKind) -> &'static str {
+    match kind {
+        FeatureKind::Box { .. } => "Box",
+        FeatureKind::Cylinder { .. } => "Cylinder",
+        FeatureKind::Extrude { .. } => "Extrude",
+        FeatureKind::ExtrudeSurface { .. } => "Extrude surface",
+        FeatureKind::Revolve { .. } => "Revolve",
+        FeatureKind::Boolean { .. } => "Boolean",
+        FeatureKind::Translate { .. } => "Translate",
+        FeatureKind::Fillet { .. } => "Round",
+        FeatureKind::Chamfer { .. } => "Chamfer",
+        FeatureKind::Sew { .. } => "Sew",
+        FeatureKind::Loft { .. } => "Loft",
+        FeatureKind::Boundary { .. } => "Boundary surface",
+        FeatureKind::Thicken { .. } => "Thicken",
+        FeatureKind::Construction { kind, .. } => match kind {
+            ConstructionKind::Plane => "Datum plane",
+            ConstructionKind::Axis => "Datum axis",
+            ConstructionKind::Point => "Datum point",
+            ConstructionKind::Curve => "Datum curve",
+            ConstructionKind::CoordSystem => "Coordinate system",
+            ConstructionKind::Solid => "Datum solid",
+        },
+    }
+}
+
+/// Parameters tab: edit, add and remove the feature's parameters.
+///
+/// Creo calls this the feature dashboard; here the parameters are the
+/// structured values stored on the feature (numeric, string, boolean).
+fn draw_parameters_tab(
+    ui: &mut egui::Ui,
+    parameters: &mut rcad_doc::FeatureParameters,
+    draft: &mut NewParameterDraft,
+) {
+    egui::ScrollArea::vertical()
+        .max_height(240.0)
+        .show(ui, |ui| {
+            egui::Grid::new("feature_parameters")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("Name");
+                    ui.strong("Value");
+                    ui.strong("Type");
+                    ui.strong("");
+                    ui.end_row();
+
+                    let numeric_keys: Vec<String> = parameters.numeric.keys().cloned().collect();
+                    let mut remove_numeric: Option<String> = None;
+                    for name in numeric_keys {
+                        ui.label(&name);
+                        if let Some(value) = parameters.numeric.get_mut(&name) {
+                            ui.add(egui::DragValue::new(value).speed(0.1));
+                        }
+                        ui.label("Real");
+                        if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                            remove_numeric = Some(name.clone());
+                        }
+                        ui.end_row();
+                    }
+                    if let Some(name) = remove_numeric {
+                        parameters.numeric.remove(&name);
+                    }
+
+                    let string_keys: Vec<String> = parameters.string.keys().cloned().collect();
+                    let mut remove_string: Option<String> = None;
+                    for name in string_keys {
+                        ui.label(&name);
+                        if let Some(value) = parameters.string.get_mut(&name) {
+                            ui.add(egui::TextEdit::singleline(value).desired_width(120.0));
+                        }
+                        ui.label("String");
+                        if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                            remove_string = Some(name.clone());
+                        }
+                        ui.end_row();
+                    }
+                    if let Some(name) = remove_string {
+                        parameters.string.remove(&name);
+                    }
+
+                    let boolean_keys: Vec<String> = parameters.boolean.keys().cloned().collect();
+                    let mut remove_boolean: Option<String> = None;
+                    for name in boolean_keys {
+                        ui.label(&name);
+                        if let Some(value) = parameters.boolean.get_mut(&name) {
+                            ui.checkbox(value, "");
+                        }
+                        ui.label("Boolean");
+                        if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                            remove_boolean = Some(name.clone());
+                        }
+                        ui.end_row();
+                    }
+                    if let Some(name) = remove_boolean {
+                        parameters.boolean.remove(&name);
+                    }
+                });
+
+            ui.separator();
+            ui.label("Add a parameter:");
+
+            let name_ok = !draft.name.trim().is_empty();
+            // Only complain once something has been typed: an empty box is not
+            // an error yet.
+            let value_ok = draft.value.trim().is_empty()
+                || match draft.kind {
+                    0 => draft.value.trim().parse::<f64>().is_ok(),
+                    _ => true,
+                };
+
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .hint_text("name")
+                        .desired_width(90.0),
+                );
+                egui::ComboBox::from_id_salt("new_parameter_kind")
+                    .selected_text(match draft.kind {
+                        1 => "String",
+                        2 => "Boolean",
+                        _ => "Real",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut draft.kind, 0, "Real");
+                        ui.selectable_value(&mut draft.kind, 1, "String");
+                        ui.selectable_value(&mut draft.kind, 2, "Boolean");
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.value)
+                        .hint_text("value")
+                        .desired_width(70.0),
+                );
+
+                let add = ui.add_enabled(
+                    name_ok && value_ok,
+                    egui::Button::new("Add"),
+                );
+                if add.clicked() {
+                    let name = draft.name.trim().to_string();
+                    match draft.kind {
+                        1 => {
+                            parameters.string.insert(name, draft.value.clone());
+                        }
+                        2 => {
+                            let value = matches!(draft.value.trim(), "true" | "1" | "yes");
+                            parameters.boolean.insert(name, value);
+                        }
+                        _ => {
+                            if let Ok(value) = draft.value.trim().parse::<f64>() {
+                                parameters.numeric.insert(name, value);
+                            }
+                        }
+                    }
+                    draft.name.clear();
+                    draft.value.clear();
+                }
+
+                if !value_ok {
+                    ui.colored_label(egui::Color32::LIGHT_RED, "value must be a number");
+                } else if !name_ok {
+                    ui.label(egui::RichText::new("give the parameter a name").size(10.0));
+                }
+            });
+        });
+}
+
+/// Relations tab: Creo-style part equations.
+///
+/// Returns true when the user asks to regenerate, so the caller can evaluate
+/// the relation list and update the parameters.
+fn draw_relations_tab(ui: &mut egui::Ui, relations: &mut Vec<rcad_doc::Relation>) -> bool {
+    let mut regenerate = false;
+    let mut remove: Option<usize> = None;
+
+    egui::ScrollArea::vertical()
+        .max_height(200.0)
+        .show(ui, |ui| {
+            if relations.is_empty() {
+                ui.label("No relations yet.");
+                ui.label(
+                    egui::RichText::new("For example:  height = width * 2")
+                        .size(10.0)
+                        .color(egui::Color32::GRAY),
+                );
+            }
+
+            for (index, relation) in relations.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut relation.lhs)
+                            .desired_width(90.0)
+                            .hint_text("name"),
+                    );
+                    ui.label("=");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut relation.rhs)
+                            .desired_width(200.0)
+                            .hint_text("expression"),
+                    );
+                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                        remove = Some(index);
+                    }
+                });
+            }
+        });
+
+    if let Some(index) = remove {
+        relations.remove(index);
+    }
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button("Add relation").clicked() {
+            relations.push(rcad_doc::Relation {
+                lhs: "new_param".to_string(),
+                rhs: "1".to_string(),
+                comment: None,
+            });
+        }
+        if ui
+            .button("Regenerate")
+            .on_hover_text("Evaluate every relation and update the parameters")
+            .clicked()
+        {
+            regenerate = true;
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "Names resolve to part parameters, or to values defined earlier in this list.",
+        )
+        .size(10.0)
+        .color(egui::Color32::GRAY),
+    );
+
+    regenerate
 }
