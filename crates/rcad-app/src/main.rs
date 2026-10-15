@@ -37,6 +37,8 @@ struct Cli {
     dialog: bool,
     /// Open this project folder directly, skipping the project picker.
     project: Option<PathBuf>,
+    /// Open the Options dialog on startup.
+    options: bool,
 }
 
 const USAGE: &str = "\
@@ -78,6 +80,7 @@ fn parse_args() -> Result<Cli, String> {
             }
             "--demo" => cli.demo = true,
             "--dialog" => cli.dialog = true,
+            "--options" => cli.options = true,
             "--project" => {
                 cli.project = Some(PathBuf::from(args.next().ok_or("--project needs a folder")?));
             }
@@ -157,6 +160,7 @@ fn main() -> eframe::Result<()> {
     let view = cli.view.clone();
     let dialog = cli.dialog;
     let project = cli.project.clone();
+    let open_options = cli.options;
 
     eframe::run_native(
         "rcad",
@@ -166,6 +170,9 @@ fn main() -> eframe::Result<()> {
             app.restore_last_project();
             if let Some(folder) = project.clone() {
                 app.open_project_folder(folder);
+            }
+            if open_options {
+                app.open_options();
             }
             match view.as_deref() {
                 Some("iso") => app.set_view_iso(),

@@ -132,6 +132,8 @@ pub struct RcadApp {
     manifest: ProjectManifest,
     /// Why the last attempt to open a project failed.
     project_error: Option<String>,
+    /// Text being typed in Options to add a colour id to the vocabulary.
+    new_colour_id: String,
 }
 
 /// Transient state for the feature dialog's "add parameter" row.
@@ -221,6 +223,7 @@ impl RcadApp {
             project_root: None,
             manifest: ProjectManifest::default(),
             project_error: None,
+            new_colour_id: String::new(),
         };
         
         // Create default datum geometry (coordinate system + datum planes) for new part
@@ -882,6 +885,11 @@ impl RcadApp {
         self.open_project_folder(root);
     }
 
+    /// Open the Options dialog (also used by the screenshot mode).
+    pub fn open_options(&mut self) {
+        self.show_settings = true;
+    }
+
     /// The welcome screen: shown instead of the modelling UI until a project is
     /// open, because every component needs the project's definitions.
     fn draw_project_gate(&mut self, ctx: &egui::Context) {
@@ -951,6 +959,45 @@ impl RcadApp {
     }
     /// Options dialog: the settings that survive a restart.
     fn draw_settings_dialog(&mut self, ui: &mut egui::Ui) {
+        // The project comes first: it is what every component shares.
+        if let Some(root) = self.project_root.clone() {
+            ui.strong("Project");
+            ui.label(
+                egui::RichText::new(root.display().to_string())
+                    .size(10.0)
+                    .color(egui::Color32::GRAY),
+            );
+            ui.horizontal(|ui| {
+                ui.label("name");
+                ui.text_edit_singleline(&mut self.manifest.project.name);
+            });
+            ui.horizontal(|ui| {
+                ui.label("linear tolerance");
+                ui.add(
+                    egui::DragValue::new(&mut self.manifest.general_tolerance.linear)
+                        .speed(0.001)
+                        .range(0.0..=1.0),
+                );
+            });
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} global variable(s), {} function(s), {} colour(s) defined here",
+                    self.manifest.global_parameters.len(),
+                    self.manifest.functions.len(),
+                    self.manifest.surface_colors.len(),
+                ))
+                .size(10.0)
+                .color(egui::Color32::GRAY),
+            );
+            if ui.button("Save the project settings").clicked() {
+                match self.manifest.save(&root) {
+                    Ok(()) => self.status = Some("Project settings saved.".to_string()),
+                    Err(err) => self.last_error = Some(err),
+                }
+            }
+            ui.separator();
+        }
+
         ui.strong("Tool palette");
         ui.add(
             egui::Slider::new(&mut self.settings.toolbar_width, 120.0..=420.0)
@@ -973,6 +1020,74 @@ impl RcadApp {
             self.settings.show_grid,
             egui::Slider::new(&mut self.settings.grid_spacing, 1.0..=100.0).text("spacing"),
         );
+        ui.separator();
+
+        ui.strong("Colour vocabulary");
+        ui.label(
+            egui::RichText::new(
+                "Names for logical surfaces. The RGB values for these names live in\n\
+                 each project, so two projects can colour the same name differently.",
+            )
+            .size(10.0)
+            .color(egui::Color32::GRAY),
+        );
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_colour_id)
+                    .hint_text("new colour id")
+                    .desired_width(140.0),
+            );
+            if ui.button("Add").clicked() {
+                let id = self.new_colour_id.trim().to_string();
+                if !id.is_empty() && !self.settings.colour_ids.contains(&id) {
+                    self.settings.colour_ids.push(id);
+                }
+                self.new_colour_id.clear();
+            }
+        });
+
+        let mut remove = None;
+        for (index, id) in self.settings.colour_ids.iter().enumerate() {
+            ui.horizontal(|ui| {
+                if ui.small_button("✖").clicked() {
+                    remove = Some(index);
+                }
+                ui.label(id);
+                match self.manifest.colour(id) {
+                    Some([r, g, b]) => {
+                        let (rect, _) = ui
+                            .allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                        ui.painter()
+                            .rect_filled(rect, 2.0, egui::Color32::from_rgb(r, g, b));
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new("not set in this project")
+                                .size(9.0)
+                                .color(egui::Color32::GRAY),
+                        );
+                    }
+                }
+            });
+        }
+        if let Some(index) = remove {
+            self.settings.colour_ids.remove(index);
+        }
+
+        // Ids the project uses that this installation has never heard of.
+        let unknown = self
+            .manifest
+            .colours_missing_from(&self.settings.colour_ids);
+        if !unknown.is_empty() {
+            ui.label(
+                egui::RichText::new(format!("This project also uses: {}", unknown.join(", ")))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(230, 160, 60)),
+            );
+            if ui.button("Add them to the vocabulary").clicked() {
+                self.settings.colour_ids.extend(unknown);
+            }
+        }
         ui.separator();
 
         match AppSettings::path() {
@@ -2009,6 +2124,7 @@ impl Default for RcadApp {
             project_root: None,
             manifest: ProjectManifest::default(),
             project_error: None,
+            new_colour_id: String::new(),
         }
     }
 }
@@ -2312,6 +2428,104 @@ mod interaction_tests {
             (eye_direction - glam::Vec3::Z).length() < 1e-3,
             "the floating bar Top button did not move the camera: {eye_direction:?}"
         );
+    }
+
+    /// 0.1: a folder without a manifest becomes a project.
+    #[test]
+    fn opening_a_folder_without_a_manifest_creates_the_project() {
+        let root = temp_project_dir();
+        let mut app = RcadApp::default();
+        app.open_project_folder(root.clone());
+
+        assert_eq!(app.project_root.as_deref(), Some(root.as_path()));
+        assert!(rcad_doc::ProjectManifest::path_in(&root).exists());
+        assert_eq!(
+            app.settings.last_project.as_deref(),
+            Some(root.to_string_lossy().as_ref())
+        );
+        assert!(app.project_error.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 0.1: with no project, the modelling UI must be unreachable.
+    #[test]
+    fn without_a_project_the_toolbar_is_not_drawn() {
+        let session = Session::without_project(RcadApp::default());
+        assert!(session.app.project_root.is_none());
+        assert!(
+            session
+                .app
+                .toolbar
+                .button_rect(&ToolbarAction::ModelBox)
+                .is_none(),
+            "the modelling toolbar must not exist before a project is open"
+        );
+    }
+
+    /// ...and it appears as soon as a project is open.
+    #[test]
+    fn opening_a_project_reveals_the_modelling_ui() {
+        let mut session = Session::new(RcadApp::default());
+        session.frame();
+        assert!(session.app.project_root.is_some());
+        assert!(
+            session
+                .app
+                .toolbar
+                .button_rect(&ToolbarAction::ModelBox)
+                .is_some()
+        );
+    }
+
+    /// File > New must not throw the project away.
+    #[test]
+    fn a_new_document_keeps_the_project() {
+        let mut session = Session::new(RcadApp::default());
+        let root = session.app.project_root.clone();
+        assert!(root.is_some(), "the session opens a project");
+        session.app.new_document();
+        assert_eq!(session.app.project_root, root);
+    }
+
+    /// 0.2: the manifest is read when the project opens.
+    #[test]
+    fn opening_a_project_reads_its_manifest() {
+        let root = temp_project_dir();
+        let mut manifest = rcad_doc::ProjectManifest::create_default("Cliente A");
+        manifest.general_tolerance.linear = 0.002;
+        manifest
+            .surface_colors
+            .insert("fit zone".to_string(), [10, 20, 30]);
+        manifest.save(&root).expect("write the manifest");
+
+        let mut app = RcadApp::default();
+        app.open_project_folder(root.clone());
+
+        assert_eq!(app.manifest.project.name, "Cliente A");
+        assert_eq!(app.manifest.general_tolerance.linear, 0.002);
+        assert_eq!(app.manifest.colour("fit zone"), Some([10, 20, 30]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Opening projects remembers them, most recent first and without repeats.
+    #[test]
+    fn opening_projects_remembers_them_without_repeats() {
+        let first = temp_project_dir();
+        let second = temp_project_dir();
+        let mut app = RcadApp::default();
+        app.open_project_folder(first.clone());
+        app.open_project_folder(second.clone());
+        app.open_project_folder(first.clone());
+
+        assert_eq!(
+            app.settings.recent_projects,
+            vec![
+                first.to_string_lossy().to_string(),
+                second.to_string_lossy().to_string()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
     }
 }
 
