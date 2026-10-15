@@ -35,6 +35,12 @@ todos:
   - id: rcad-table-integration
     content: "Conectar rcad-table a features/partes para parametrizacao por CSV/Excel"
     status: pending
+  - id: project-model
+    content: "Modelo de projeto: pasta do projeto, tolerancias, variaveis e funcoes globais; sem projeto ativo nao se cria peca/assembly/skeleton"
+    status: pending
+  - id: project-color-scheme
+    content: "Esquema de cores: nomes/ids definidos nas configuracoes da app (instalacao), valores RGB definidos por projeto em rcad.toml"
+    status: pending
 isProject: false
 
 ---
