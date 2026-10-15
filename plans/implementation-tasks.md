@@ -283,3 +283,68 @@ Phases 6-10: Can be done in parallel after core phases stable
 
 *Document Version: 1.0*
 *Date: 2026-10-12*
+
+---
+
+## Phase 0: Project Model (blocking - nothing can be created before this) 🔴
+
+Added from the 2026-10 user brief. This is the foundation everything else sits
+on: a project is a set of general definitions shared by every component, plus
+the folder where those components are stored. No part, assembly or skeleton can
+exist outside a project.
+
+Much of this is already specified in `instructions.md` (section "Gestão de
+Projeto via rcad.toml") and `rcad.toml`; the items marked NEW are from the brief
+and are not written down anywhere yet. `plans/creo-workflow-analysis.md` already
+flags rcad.toml integration as Critical: the file exists but nothing reads it.
+
+### 0.1 Project folder is the entry point
+- [ ] **0.1.1** (NEW) On a clean install - no recent projects, no history - the app
+      opens the project picker first: create a project (choosing its folder) or
+      open an existing one. The modelling UI is unreachable until a project is
+      active.
+- [ ] **0.1.2** (NEW) A project owns its folder; new components are saved there by
+      default.
+- [ ] **0.1.3** Persist the recent-project list (instructions.md names
+      `~/.config/rcad/recent.json`) and honour `[startup] auto_open_last` and
+      `max_recent_projects`.
+
+### 0.2 Project-wide definitions
+- [ ] **0.2.1** Load `rcad.toml` when a project opens. The parser is the missing
+      piece flagged as Critical in the Creo workflow analysis.
+- [ ] **0.2.2** `[general_tolerance]` linear / angular, used by kernel operations
+      and shown in the UI.
+- [ ] **0.2.3** `[global_parameters]` - variables callable from any component or
+      feature in the project.
+- [ ] **0.2.4** (NEW) Project **functions** callable from relations: a named
+      formula shared by the whole project, so a relation can read
+      `wall_thickness(diameter)` instead of repeating the expression. Needs a
+      new `[functions]` section in rcad.toml.
+- [ ] **0.2.5** `[external_tables]` - Excel/CSV driven parameters (ties into the
+      rcad-table crate).
+
+### 0.3 Colour scheme: names are global, values are per project (NEW)
+The distinction the brief draws, which the current `[surface_colors]` section
+does not make: the *vocabulary* of colour ids belongs to the installation, the
+*RGB values* belong to the project.
+- [ ] **0.3.1** In the application settings (per install, shared by all projects)
+      the user defines any number of colour ids - a unique name/identifier each,
+      e.g. "fit zone", "metric thread", "high gloss zone". Changing this list
+      changes only the vocabulary, never any geometry.
+- [ ] **0.3.2** In the project file, `[surface_colors]` maps each id to an RGB
+      value. Client A and client B can therefore use different colours for the
+      same logical id.
+- [ ] **0.3.3** Changing an RGB in the project file must propagate to every
+      component and feature of that project on the next load: nothing is baked
+      into a component, they only store the logical id.
+- [ ] **0.3.4** Apply the mapping in the viewport (already tracked as
+      `surface-color-rendering` in instructions.md).
+- [ ] **0.3.5** A face is tagged with the logical colour id, never with a literal
+      RGB value.
+
+### 0.4 Acceptance
+- [ ] A fresh install cannot reach the modelling UI without an active project.
+- [ ] Editing one colour in rcad.toml changes the display of every component in
+      that project, without touching any of them.
+- [ ] The same global parameter is visible and usable from a part, a skeleton and
+      an assembly.
