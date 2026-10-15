@@ -1,8 +1,0 @@
-Record the face-id finding that de-risks Phase 0.3
-
-cadrum::Mesh already carries face_ids (one per triangle) and a colormap;
-triangle_mesh_from_cadrum drops face_ids, so the triangle-to-face mapping
-OpenCascade computes on every rebuild is being thrown away.
-
-Records the six concrete steps and the verification for applying the colour
-scheme in the viewport, so the work can resume from the plan alone.
