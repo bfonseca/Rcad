@@ -240,46 +240,45 @@ struct IconCache {
     dark_sprites: HashMap<String, String>,
 }
 
+/// Extract every `<symbol id="...">...</symbol>` from a sprite file.
+///
+/// The previous loader assumed exactly one symbol per line and sliced the line
+/// with `find(">")`, so any other formatting silently yielded empty icons.
+/// Scanning for the tags keeps this correct however the generator formats them.
+pub fn parse_sprite(sprite: &str) -> HashMap<String, String> {
+    let mut symbols = HashMap::new();
+    let mut rest = sprite;
+    while let Some(start) = rest.find("<symbol") {
+        let candidate = &rest[start..];
+        let Some(open_end) = candidate.find('>') else {
+            break;
+        };
+        let Some(close) = candidate.find("</symbol>") else {
+            break;
+        };
+        if let Some(id) = extract_attr(&candidate[..open_end], "id") {
+            symbols.insert(id, candidate[open_end + 1..close].to_string());
+        }
+        rest = &candidate[close + "</symbol>".len()..];
+    }
+    symbols
+}
+
+/// Read `name="value"` out of a tag body.
+fn extract_attr(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let start = tag.find(&needle)? + needle.len();
+    let end = tag[start..].find('"')? + start;
+    Some(tag[start..end].to_string())
+}
+
 impl IconCache {
     fn new() -> Self {
-        let mut light_sprites = HashMap::new();
-        let mut dark_sprites = HashMap::new();
-        
-        // Load light theme sprites
-        include_str!("../../../../rcad-icons/sprite-light.svg")
-            .lines()
-            .for_each(|line| {
-                if let Some(start) = line.find("id=\"") {
-                    let start = start + 4;
-                    if let Some(end) = line[start..].find("\"") {
-                        let id = &line[start..start+end];
-                        let content_start = line.find(">").unwrap_or(0) + 1;
-                        let content_end = line.rfind("</symbol>").unwrap_or(line.len());
-                        let symbol = line[content_start..content_end].to_string();
-                        light_sprites.insert(id.to_string(), symbol);
-                    }
-                }
-            });
-        
-        // Load dark theme sprites
-        include_str!("../../../../rcad-icons/sprite-dark.svg")
-            .lines()
-            .for_each(|line| {
-                if let Some(start) = line.find("id=\"") {
-                    let start = start + 4;
-                    if let Some(end) = line[start..].find("\"") {
-                        let id = &line[start..start+end];
-                        let content_start = line.find(">").unwrap_or(0) + 1;
-                        let content_end = line.rfind("</symbol>").unwrap_or(line.len());
-                        let symbol = line[content_start..content_end].to_string();
-                        dark_sprites.insert(id.to_string(), symbol);
-                    }
-                }
-            });
-        
-        Self { light_sprites, dark_sprites }
+        Self {
+            light_sprites: parse_sprite(include_str!("../../../../rcad-icons/sprite-light.svg")),
+            dark_sprites: parse_sprite(include_str!("../../../../rcad-icons/sprite-dark.svg")),
+        }
     }
-    
     fn get(&self, id: &str, theme: IconTheme) -> Option<&str> {
         match theme {
             IconTheme::Light => self.light_sprites.get(id).map(|s| s.as_str()),
@@ -882,5 +881,48 @@ impl VerticalToolbar {
                 });
             });
         }
+    }
+}
+#[cfg(test)]
+mod sprite_tests {
+    use super::*;
+
+    #[test]
+    fn parse_sprite_extracts_symbol_bodies() {
+        let sprite = "<svg><symbol id=\"features-extrude\" viewBox=\"0 0 32 32\"><path d=\"M0 0\"/></symbol><symbol id=\"sketch-line\" viewBox=\"0 0 32 32\"><rect/></symbol></svg>";
+        let parsed = parse_sprite(sprite);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed["features-extrude"].as_str(), "<path d=\"M0 0\"/>");
+        assert_eq!(parsed["sketch-line"].as_str(), "<rect/>");
+    }
+
+    #[test]
+    fn parse_sprite_handles_symbols_spanning_lines() {
+        let sprite = "<symbol id=\"a-b\" viewBox=\"0 0 32 32\">\n  <path d=\"M1 1\"/>\n</symbol>";
+        let parsed = parse_sprite(sprite);
+        assert_eq!(parsed["a-b"].as_str(), "\n  <path d=\"M1 1\"/>\n");
+    }
+
+    #[test]
+    fn parse_sprite_ignores_a_leading_document_tag() {
+        let sprite = "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\">\n<symbol id=\"x\" viewBox=\"0 0 32 32\"><g/></symbol>\n</svg>";
+        let parsed = parse_sprite(sprite);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed["x"].as_str(), "<g/>");
+    }
+
+    /// Regression guard for the broken build: `.gitignore` used to exclude the
+    /// generated sprites, so a fresh clone could not compile the app at all.
+    #[test]
+    fn embedded_sprites_are_present_and_complete() {
+        let cache = IconCache::new();
+        assert!(
+            cache.light_sprites.len() > 150,
+            "light sprite has only {} symbols",
+            cache.light_sprites.len()
+        );
+        assert_eq!(cache.light_sprites.len(), cache.dark_sprites.len());
+        assert!(get_icon("features-extrude", IconTheme::Light).is_some());
+        assert!(get_icon("features-revolve", IconTheme::Dark).is_some());
     }
 }

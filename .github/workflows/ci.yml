@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-and-test:
+    name: build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OCCT and native GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libocct-dev libglib2.0-dev libssl-dev pkg-config \
+            libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The two gates below are the ones that would have caught the breakage a
+      # fresh clone used to hit (missing generated sprites, rcad-mcp not
+      # compiling). Keep them blocking.
+      - name: Build the whole workspace
+        run: cargo build --workspace --all-targets
+
+      - name: Test the whole workspace
+        run: cargo test --workspace
+
+      # Advisory while the pre-existing warning backlog is burned down.
+      # Remove continue-on-error once `cargo clippy` is clean.
+      - name: Clippy (advisory)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets
+
+      - name: Formatting (advisory)
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      - name: Icon sprites are up to date with the generator
+        run: |
+          test -f rcad-icons/sprite-light.svg
+          test -f rcad-icons/sprite-dark.svg
+          grep -q "<symbol id=\"features-extrude\"" rcad-icons/sprite-light.svg

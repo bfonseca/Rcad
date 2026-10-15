@@ -23,10 +23,16 @@ Categories: Sketch 28, Sketch constraints 12, Solid features 27, Surfaces 12, Cu
 ```
 cd source
 pip install cairosvg pillow fonttools numpy
-python3 build.py dist ../out        # svg + png
+python3 build.py dist ../out        # svg + png deliverable tree
+python3 build.py sprites ..         # sprite-light.svg + sprite-dark.svg (REQUIRED)
 python3 build.py sheet all light sheet.png
 python3 logo.py export ../logo      # logo files
 ```
+
+> `python3 build.py sprites ..` writes `sprite-light.svg` and `sprite-dark.svg` next
+> to this README. They are embedded by `crates/rcad-app` with `include_str!`, so
+> they must be regenerated and committed whenever an icon changes - otherwise the
+> desktop app does not build.
 Add an icon: create a function decorated with `@icon("<category>", "<name>", "<Label>")` in `source/icons/`.
 
 ## Notes

@@ -104,6 +104,14 @@ impl Sketch {
         id
     }
 
+    /// Add a circle from a centre point and radius.
+    pub fn add_circle(&mut self, center_x: f64, center_y: f64, radius: f64) -> Uuid {
+        let center = self.add_point(center_x, center_y);
+        let id = Uuid::new_v4();
+        self.circles.push(SketchCircle { id, center, radius });
+        id
+    }
+
     pub fn add_rectangle(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) -> [Uuid; 4] {
         let p0 = self.add_point(x0, y0);
         let p1 = self.add_point(x1, y0);
@@ -430,6 +438,83 @@ impl Sketch {
     }
 }
 
+/// Parameter `t` along segment `a->b` where it crosses segment `c->d` (both strict interior).
+fn segment_segment_t(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> Option<f64> {
+    let r = [b[0] - a[0], b[1] - a[1]];
+    let s = [d[0] - c[0], d[1] - c[1]];
+    let denom = r[0] * s[1] - r[1] * s[0];
+    if denom.abs() < 1e-12 {
+        return None; // parallel or degenerate
+    }
+    let qp = [c[0] - a[0], c[1] - a[1]];
+    let t = (qp[0] * s[1] - qp[1] * s[0]) / denom;
+    let u = (qp[0] * r[1] - qp[1] * r[0]) / denom;
+    if t > 1e-9 && t < 1.0 - 1e-9 && u >= -1e-9 && u <= 1.0 + 1e-9 {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+/// Parameter `t` along the *infinite* line `a->b` where it crosses the line `c->d`.
+fn line_line_t(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> Option<f64> {
+    let r = [b[0] - a[0], b[1] - a[1]];
+    let s = [d[0] - c[0], d[1] - c[1]];
+    let denom = r[0] * s[1] - r[1] * s[0];
+    if denom.abs() < 1e-12 {
+        return None;
+    }
+    let qp = [c[0] - a[0], c[1] - a[1]];
+    Some((qp[0] * s[1] - qp[1] * s[0]) / denom)
+}
+
+/// Parameters along the segment `a->b` where it crosses a circle (strict interior).
+fn segment_circle_ts(a: [f64; 2], b: [f64; 2], center: [f64; 2], radius: f64) -> Vec<f64> {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let f = [a[0] - center[0], a[1] - center[1]];
+    let aa = d[0] * d[0] + d[1] * d[1];
+    if aa < 1e-12 {
+        return Vec::new();
+    }
+    let bb = 2.0 * (f[0] * d[0] + f[1] * d[1]);
+    let cc = f[0] * f[0] + f[1] * f[1] - radius * radius;
+    let disc = bb * bb - 4.0 * aa * cc;
+    if disc < 0.0 {
+        return Vec::new();
+    }
+    let sq = disc.sqrt();
+    [(-bb - sq) / (2.0 * aa), (-bb + sq) / (2.0 * aa)]
+        .into_iter()
+        .filter(|t| *t > 1e-9 && *t < 1.0 - 1e-9)
+        .collect()
+}
+
+/// Parameters along the *infinite* line `a->b` where it crosses a circle.
+fn line_circle_ts(a: [f64; 2], b: [f64; 2], center: [f64; 2], radius: f64) -> Vec<f64> {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let f = [a[0] - center[0], a[1] - center[1]];
+    let aa = d[0] * d[0] + d[1] * d[1];
+    if aa < 1e-12 {
+        return Vec::new();
+    }
+    let bb = 2.0 * (f[0] * d[0] + f[1] * d[1]);
+    let cc = f[0] * f[0] + f[1] * f[1] - radius * radius;
+    let disc = bb * bb - 4.0 * aa * cc;
+    if disc < 0.0 {
+        return Vec::new();
+    }
+    let sq = disc.sqrt();
+    vec![(-bb - sq) / (2.0 * aa), (-bb + sq) / (2.0 * aa)]
+}
+
+fn lerp2(a: [f64; 2], b: [f64; 2], t: f64) -> [f64; 2] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+}
+
+fn dist_sq(a: [f64; 2], b: [f64; 2]) -> f64 {
+    (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)
+}
+
 fn lines_intersect(p1: &SketchPoint, p2: &SketchPoint, p3: &SketchPoint, p4: &SketchPoint) -> bool {
     let x1 = p1.x; let y1 = p1.y;
     let x2 = p2.x; let y2 = p2.y;
@@ -447,10 +532,6 @@ fn lines_intersect(p1: &SketchPoint, p2: &SketchPoint, p3: &SketchPoint, p4: &Sk
     t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0
 }
 
-// Fix the lines_intersect signature to take references
-fn line_line_intersect(p1: &SketchPoint, p2: &SketchPoint, p3: &SketchPoint, p4: &SketchPoint) -> bool {
-    lines_intersect(p1, p2, p3, p4)
-}
 
 #[allow(dead_code)]
 fn tracing_fallback() {}
@@ -515,6 +596,123 @@ pub enum Constraint {
     Concentric { a: Uuid, b: Uuid },
 }
 
+/// Which relationship [`align_lines`] should impose between two segments.
+#[derive(Clone, Copy)]
+enum AlignTarget {
+    Parallel,
+    Perpendicular,
+}
+
+/// Rotate segment `b` around a pivot until it is parallel or perpendicular to
+/// segment `a`, respecting fixed endpoints.
+///
+/// Previously the iterative solver only *measured* the parallel/perpendicular
+/// error and never moved any geometry, so those constraints were no-ops.
+fn align_lines(sketch: &mut Sketch, a: Uuid, b: Uuid, max_err: &mut f64, target: AlignTarget) {
+    let segment = |sketch: &Sketch, id: Uuid| -> Option<(Uuid, Uuid, [f64; 2], [f64; 2], bool, bool)> {
+        let line = sketch.lines.iter().find(|l| l.id == id)?;
+        let p1 = sketch.point(line.a)?;
+        let p2 = sketch.point(line.b)?;
+        Some((line.a, line.b, [p1.x, p1.y], [p2.x, p2.y], p1.fixed, p2.fixed))
+    };
+
+    let (Some((_, _, pa1, pa2, _, _)), Some((b1, b2, pb1, pb2, f1, f2))) =
+        (segment(sketch, a), segment(sketch, b))
+    else {
+        return;
+    };
+
+    let (dax, day) = (pa2[0] - pa1[0], pa2[1] - pa1[1]);
+    let (dbx, dby) = (pb2[0] - pb1[0], pb2[1] - pb1[1]);
+    let len_a = (dax * dax + day * day).sqrt();
+    let len_b = (dbx * dbx + dby * dby).sqrt();
+    if len_a < 1e-12 || len_b < 1e-12 {
+        return;
+    }
+    let (uax, uay) = (dax / len_a, day / len_a);
+    let (ubx, uby) = (dbx / len_b, dby / len_b);
+    let dot = uax * ubx + uay * uby;
+    let cross = uax * uby - uay * ubx;
+    let err = match target {
+        AlignTarget::Parallel => cross.abs(),
+        AlignTarget::Perpendicular => dot.abs(),
+    };
+    *max_err = max_err.max(err);
+    if err < 1e-9 || (f1 && f2) {
+        return;
+    }
+
+    // Target direction for b, picking whichever orientation is already closest.
+    let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+    let (tx, ty) = match target {
+        AlignTarget::Parallel => (uax * sign, uay * sign),
+        AlignTarget::Perpendicular => (-uay * sign, uax * sign),
+    };
+
+    // Rotation taking u_b onto t.
+    let cos_t = tx * ubx + ty * uby;
+    let sin_t = ubx * ty - uby * tx;
+
+    let pivot = if f1 {
+        pb1
+    } else if f2 {
+        pb2
+    } else {
+        [(pb1[0] + pb2[0]) * 0.5, (pb1[1] + pb2[1]) * 0.5]
+    };
+
+    for (id, p, is_fixed) in [(b1, pb1, f1), (b2, pb2, f2)] {
+        if is_fixed {
+            continue;
+        }
+        let vx = p[0] - pivot[0];
+        let vy = p[1] - pivot[1];
+        let nx = pivot[0] + cos_t * vx - sin_t * vy;
+        let ny = pivot[1] + sin_t * vx + cos_t * vy;
+        if let Some(pt) = sketch.point_mut(id) {
+            pt.x = nx;
+            pt.y = ny;
+        }
+    }
+}
+
+/// Scale segment `e1-e2` towards `target` length around a pivot (its midpoint,
+/// or a fixed endpoint). Fixed endpoints never move.
+#[allow(clippy::too_many_arguments)]
+fn resize_segment(
+    sketch: &mut Sketch,
+    e1: Uuid,
+    e2: Uuid,
+    p1: [f64; 2],
+    p2: [f64; 2],
+    f1: bool,
+    f2: bool,
+    target: f64,
+) {
+    let len = dist_sq(p1, p2).sqrt();
+    if len < 1e-12 || target <= 0.0 || (f1 && f2) {
+        return;
+    }
+    let scale = target / len;
+    let pivot = if f1 {
+        p1
+    } else if f2 {
+        p2
+    } else {
+        [(p1[0] + p2[0]) * 0.5, (p1[1] + p2[1]) * 0.5]
+    };
+    for (id, p, is_fixed) in [(e1, p1, f1), (e2, p2, f2)] {
+        if is_fixed {
+            continue;
+        }
+        let x = pivot[0] + (p[0] - pivot[0]) * scale;
+        let y = pivot[1] + (p[1] - pivot[1]) * scale;
+        if let Some(pt) = sketch.point_mut(id) {
+            pt.x = x;
+            pt.y = y;
+        }
+    }
+}
 fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
     for _ in 0..80 {
         let mut max_err = 0.0f64;
@@ -644,30 +842,48 @@ fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
                     }
                 }
                 Constraint::Tangent { a, b } => {
-                    // Tangent constraint between two entities (line-line, line-arc, arc-arc, line-spline, arc-spline)
-                    // For now, handle line-arc and arc-arc
-                    if let Some(arc_a) = sketch.arcs.iter().find(|arc| arc.id == a) {
-                        if let Some(_arc_b) = sketch.arcs.iter().find(|arc| arc.id == b) {
-                            // Arc-arc tangency: distance between centers = sum of radii (external) or diff (internal)
-                            // This is handled by the distance constraints already
-                        } else if let Some(line_b) = sketch.lines.iter().find(|line| line.id == b) {
-                            // Line-arc tangency: distance from arc center to line = radius
-                            if let (Some(p1), Some(p2)) = (sketch.point(line_b.a), sketch.point(line_b.b)) {
-                                let cx = sketch.point(arc_a.center).map(|p| p.x).unwrap_or(0.0);
-                                let cy = sketch.point(arc_a.center).map(|p| p.y).unwrap_or(0.0);
-                                let radius = arc_a.radius;
-                                // Distance from point to line
-                                let x1 = p1.x;
-                                let y1 = p1.y;
-                                let x2 = p2.x;
-                                let y2 = p2.y;
-                                let num = ((y2 - y1) * cx - (x2 - x1) * cy + x2 * y1 - y2 * x1).abs();
-                                let den = ((y2 - y1).powi(2) + (x2 - x1).powi(2)).sqrt().max(1e-9);
-                                let dist = num / den;
-                                let err = (dist - radius).abs();
-                                max_err = max_err.max(err);
-                                // Move center towards/away from line to satisfy tangency
-                                // This is a simplified approach - full implementation needs line direction
+                    // Line/arc tangency: move the arc centre along the line
+                    // normal until its distance to the line equals the radius.
+                    // The previous version measured the error and then changed
+                    // nothing at all. Arc/arc tangency is still not handled.
+                    let arc = sketch
+                        .arcs
+                        .iter()
+                        .find(|arc| arc.id == a || arc.id == b)
+                        .map(|arc| (arc.center, arc.radius));
+                    let line = sketch
+                        .lines
+                        .iter()
+                        .find(|l| l.id == a || l.id == b)
+                        .map(|l| (l.a, l.b));
+                    if let (Some((center_id, radius)), Some((l1, l2))) = (arc, line) {
+                        let data = match (
+                            sketch.point(center_id),
+                            sketch.point(l1),
+                            sketch.point(l2),
+                        ) {
+                            (Some(c), Some(p1), Some(p2)) => {
+                                Some((c.x, c.y, c.fixed, p1.x, p1.y, p2.x, p2.y))
+                            }
+                            _ => None,
+                        };
+                        if let Some((cx, cy, fixed, x1, y1, x2, y2)) = data {
+                            let dx = x2 - x1;
+                            let dy = y2 - y1;
+                            let len = (dx * dx + dy * dy).sqrt();
+                            if len > 1e-12 {
+                                let nx = -dy / len;
+                                let ny = dx / len;
+                                let signed = (cx - x1) * nx + (cy - y1) * ny;
+                                max_err = max_err.max((signed.abs() - radius).abs());
+                                if !fixed {
+                                    let target = if signed < 0.0 { -radius } else { radius };
+                                    let delta = target - signed;
+                                    if let Some(p) = sketch.point_mut(center_id) {
+                                        p.x = cx + nx * delta;
+                                        p.y = cy + ny * delta;
+                                    }
+                                }
                             }
                         }
                     }
@@ -723,94 +939,106 @@ fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
                     }
                 }
                 Constraint::EqualRadius { a, b } => {
-                    // Equal radius between two arcs or circles
-                    let mut radius_a = None;
-                    let mut radius_b = None;
-                    if let Some(arc) = sketch.arcs.iter().find(|arc| arc.id == a) {
-                        radius_a = Some(arc.radius);
-                    } else if let Some(circle) = sketch.circles.iter().find(|circle| circle.id == a) {
-                        radius_a = Some(circle.radius);
-                    }
-                    if let Some(arc) = sketch.arcs.iter().find(|arc| arc.id == b) {
-                        radius_b = Some(arc.radius);
-                    } else if let Some(circle) = sketch.circles.iter().find(|circle| circle.id == b) {
-                        radius_b = Some(circle.radius);
-                    }
-                    if let (Some(ra), Some(rb)) = (radius_a, radius_b) {
-                        let err = (ra - rb).abs();
-                        max_err = max_err.max(err);
-                        // Adjust both towards average
-                        let _avg = (ra + rb) * 0.5;
-                        // Note: In iterative solver, we'd need to adjust the geometry
-                        // This is a placeholder for the logic
+                    // Equal radius between two arcs or circles. The radii are
+                    // moved to their average; previously the error was measured
+                    // but never applied, so the constraint did nothing.
+                    let radius_of = |sketch: &Sketch, id: Uuid| -> Option<f64> {
+                        sketch
+                            .arcs
+                            .iter()
+                            .find(|x| x.id == id)
+                            .map(|x| x.radius)
+                            .or_else(|| {
+                                sketch
+                                    .circles
+                                    .iter()
+                                    .find(|x| x.id == id)
+                                    .map(|x| x.radius)
+                            })
+                    };
+                    if let (Some(ra), Some(rb)) = (radius_of(sketch, a), radius_of(sketch, b)) {
+                        max_err = max_err.max((ra - rb).abs());
+                        if (ra - rb).abs() > 1e-12 {
+                            let avg = (ra + rb) * 0.5;
+                            for id in [a, b] {
+                                if let Some(arc) = sketch.arcs.iter_mut().find(|x| x.id == id) {
+                                    arc.radius = avg;
+                                } else if let Some(circle) =
+                                    sketch.circles.iter_mut().find(|x| x.id == id)
+                                {
+                                    circle.radius = avg;
+                                }
+                            }
+                            // Keep arc endpoints on the new radius.
+                            let rescaled: Vec<(Uuid, f64, f64)> = sketch
+                                .arcs
+                                .iter()
+                                .filter(|arc| arc.id == a || arc.id == b)
+                                .filter_map(|arc| {
+                                    let c = sketch.point(arc.center)?;
+                                    let s = sketch.point(arc.start_point)?;
+                                    let e = sketch.point(arc.end_point)?;
+                                    let sa = (s.y - c.y).atan2(s.x - c.x);
+                                    let ea = (e.y - c.y).atan2(e.x - c.x);
+                                    Some(vec![
+                                        (
+                                            arc.start_point,
+                                            c.x + avg * sa.cos(),
+                                            c.y + avg * sa.sin(),
+                                        ),
+                                        (
+                                            arc.end_point,
+                                            c.x + avg * ea.cos(),
+                                            c.y + avg * ea.sin(),
+                                        ),
+                                    ])
+                                })
+                                .flatten()
+                                .collect();
+                            for (id, x, y) in rescaled {
+                                if let Some(p) = sketch.point_mut(id) {
+                                    p.x = x;
+                                    p.y = y;
+                                }
+                            }
+                        }
                     }
                 }
                 Constraint::EqualLength { a, b } => {
-                    // Equal length between two lines
-                    if let (Some(line_a), Some(line_b)) = (
-                        sketch.lines.iter().find(|l| l.id == a),
-                        sketch.lines.iter().find(|l| l.id == b),
-                    ) {
-                        if let (Some(pa1), Some(pa2), Some(pb1), Some(pb2)) = (
-                            sketch.point(line_a.a),
-                            sketch.point(line_a.b),
-                            sketch.point(line_b.a),
-                            sketch.point(line_b.b),
-                        ) {
-                            let len_a = ((pa2.x - pa1.x).powi(2) + (pa2.y - pa1.y).powi(2)).sqrt();
-                            let len_b = ((pb2.x - pb1.x).powi(2) + (pb2.y - pb1.y).powi(2)).sqrt();
-                            let err = (len_a - len_b).abs();
-                            max_err = max_err.max(err);
-                        }
+                    // Equal length between two lines: scale each towards the
+                    // average length around its midpoint. Previously the error
+                    // was measured but never applied.
+                    let segment = |sketch: &Sketch,
+                                   id: Uuid|
+     -> Option<(Uuid, Uuid, [f64; 2], [f64; 2], bool, bool)> {
+                        let line = sketch.lines.iter().find(|l| l.id == id)?;
+                        let p1 = sketch.point(line.a)?;
+                        let p2 = sketch.point(line.b)?;
+                        Some((
+                            line.a,
+                            line.b,
+                            [p1.x, p1.y],
+                            [p2.x, p2.y],
+                            p1.fixed,
+                            p2.fixed,
+                        ))
+                    };
+                    if let (Some(sa), Some(sb)) = (segment(sketch, a), segment(sketch, b)) {
+                        let len_a = dist_sq(sa.2, sa.3).sqrt();
+                        let len_b = dist_sq(sb.2, sb.3).sqrt();
+                        max_err = max_err.max((len_a - len_b).abs());
+                        let target = (len_a + len_b) * 0.5;
+                        resize_segment(sketch, sa.0, sa.1, sa.2, sa.3, sa.4, sa.5, target);
+                        resize_segment(sketch, sb.0, sb.1, sb.2, sb.3, sb.4, sb.5, target);
                     }
                 }
                 Constraint::Parallel { a, b } => {
-                    // Parallel between two lines
-                    if let (Some(line_a), Some(line_b)) = (
-                        sketch.lines.iter().find(|l| l.id == a),
-                        sketch.lines.iter().find(|l| l.id == b),
-                    ) {
-                        if let (Some(pa1), Some(pa2), Some(pb1), Some(pb2)) = (
-                            sketch.point(line_a.a),
-                            sketch.point(line_a.b),
-                            sketch.point(line_b.a),
-                            sketch.point(line_b.b),
-                        ) {
-                            let dax = pa2.x - pa1.x;
-                            let day = pa2.y - pa1.y;
-                            let dbx = pb2.x - pb1.x;
-                            let dby = pb2.y - pb1.y;
-                            let cross = dax * dby - day * dbx;
-                            let len_a = (dax * dax + day * day).sqrt().max(1e-9);
-                            let len_b = (dbx * dbx + dby * dby).sqrt().max(1e-9);
-                            let err = (cross / (len_a * len_b)).abs();
-                            max_err = max_err.max(err);
-                        }
-                    }
+                    // Rotate line b until it is parallel to line a.
+                    align_lines(sketch, a, b, &mut max_err, AlignTarget::Parallel);
                 }
                 Constraint::Perpendicular { a, b } => {
-                    // Perpendicular between two lines
-                    if let (Some(line_a), Some(line_b)) = (
-                        sketch.lines.iter().find(|l| l.id == a),
-                        sketch.lines.iter().find(|l| l.id == b),
-                    ) {
-                        if let (Some(pa1), Some(pa2), Some(pb1), Some(pb2)) = (
-                            sketch.point(line_a.a),
-                            sketch.point(line_a.b),
-                            sketch.point(line_b.a),
-                            sketch.point(line_b.b),
-                        ) {
-                            let dax = pa2.x - pa1.x;
-                            let day = pa2.y - pa1.y;
-                            let dbx = pb2.x - pb1.x;
-                            let dby = pb2.y - pb1.y;
-                            let dot = dax * dbx + day * dby;
-                            let len_a = (dax * dax + day * day).sqrt().max(1e-9);
-                            let len_b = (dbx * dbx + dby * dby).sqrt().max(1e-9);
-                            let err = (dot / (len_a * len_b)).abs();
-                            max_err = max_err.max(err);
-                        }
-                    }
+                    // Rotate line b until it is perpendicular to line a.
+                    align_lines(sketch, a, b, &mut max_err, AlignTarget::Perpendicular);
                 }
                 Constraint::Midpoint { point, line } => {
                     // Point is midpoint of line
@@ -1039,77 +1267,149 @@ impl Sketch {
             .collect()
     }
 
-    /// Trim a line/arc at intersection with another entity
+    /// Trim a line back to its nearest intersection with another entity.
+    ///
+    /// Returns `Err(SketchError::Unknown)` when `entity_id` is not a line, and
+    /// an explicit error when nothing crosses the segment. The previous version
+    /// silently returned `Ok(())` in both cases, so a failed trim looked like a
+    /// successful one.
     pub fn trim_entity(&mut self, entity_id: Uuid, trim_point: [f64; 2]) -> Result<(), SketchError> {
-        // First, find the line and collect data needed
-        let line_data = self.lines.iter()
+        let line = self
+            .lines
+            .iter()
             .find(|l| l.id == entity_id)
-            .and_then(|line| {
-                Some((
-                    line.a, line.b,
-                    self.point(line.a)?.clone(),
-                    self.point(line.b)?.clone(),
-                ))
-            });
-        
-        if let Some((pt_a, pt_b, pa, pb)) = line_data {
-            // Project trim_point onto line
-            let v = Vec2::new(pb.x as f32 - pa.x as f32, pb.y as f32 - pa.y as f32);
-            let _w = Vec2::new(trim_point[0] as f32 - pa.x as f32, trim_point[1] as f32 - pa.y as f32);
-            let v_len_sq = v.length_squared().max(1e-6);
-            let t = (Vec2::new(trim_point[0] as f32 - pa.x as f32, trim_point[1] as f32 - pa.y as f32).dot(v)) / v_len_sq;
-            
-            if t >= 0.0 && t <= 1.0 {
-                let dist_a = ((pa.x - trim_point[0]).powi(2) + (pa.y - trim_point[1]).powi(2)).sqrt();
-                let dist_b = ((pb.x - trim_point[0]).powi(2) + (pb.y - trim_point[1]).powi(2)).sqrt();
-                
-                if dist_a < dist_b {
-                    if let Some(p) = self.point_mut(pt_a) {
-                        p.x = trim_point[0];
-                        p.y = trim_point[1];
-                    }
-                } else {
-                    if let Some(p) = self.point_mut(pt_b) {
-                        p.x = trim_point[0];
-                        p.y = trim_point[1];
-                    }
+            .cloned()
+            .ok_or(SketchError::Unknown(entity_id))?;
+        let (pa, pb) = match (self.point(line.a), self.point(line.b)) {
+            (Some(a), Some(b)) => ([a.x, a.y], [b.x, b.y]),
+            _ => return Err(SketchError::Unknown(entity_id)),
+        };
+
+        // Every point where this segment crosses another line, circle or arc.
+        let mut hits: Vec<[f64; 2]> = Vec::new();
+        for other in &self.lines {
+            if other.id == entity_id {
+                continue;
+            }
+            if let (Some(c), Some(d)) = (self.point(other.a), self.point(other.b)) {
+                if let Some(t) = segment_segment_t(pa, pb, [c.x, c.y], [d.x, d.y]) {
+                    hits.push(lerp2(pa, pb, t));
                 }
             }
         }
-        // Similar for arcs...
+        let round_entities: Vec<([f64; 2], f64)> = self
+            .circles
+            .iter()
+            .filter_map(|c| self.point(c.center).map(|p| ([p.x, p.y], c.radius)))
+            .chain(
+                self.arcs
+                    .iter()
+                    .filter_map(|a| self.point(a.center).map(|p| ([p.x, p.y], a.radius))),
+            )
+            .collect();
+        for (center, radius) in round_entities {
+            for t in segment_circle_ts(pa, pb, center, radius) {
+                hits.push(lerp2(pa, pb, t));
+            }
+        }
+
+        let target = match hits.into_iter().min_by(|p, q| {
+            dist_sq(*p, trim_point)
+                .partial_cmp(&dist_sq(*q, trim_point))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            Some(p) => p,
+            None => {
+                return Err(SketchError::Solver(
+                    "trim: the segment does not cross any other entity".into(),
+                ))
+            }
+        };
+
+        // Shorten from the end the user clicked on.
+        let endpoint = if dist_sq(pa, trim_point) <= dist_sq(pb, trim_point) {
+            line.a
+        } else {
+            line.b
+        };
+        if let Some(p) = self.point_mut(endpoint) {
+            p.x = target[0];
+            p.y = target[1];
+        }
         Ok(())
     }
 
-    /// Extend a line to meet another entity
-    pub fn extend_entity(&mut self, entity_id: Uuid, _target_id: Uuid) -> Result<(), SketchError> {
-        // First collect line data
-        let line_data = self.lines.iter()
+    /// Extend a line until it meets `target_id`.
+    ///
+    /// Only intersections *outside* the current segment are used, so this always
+    /// grows the line. The previous implementation ignored `target_id` entirely
+    /// and moved both endpoints outwards by a fixed 10 units.
+    pub fn extend_entity(&mut self, entity_id: Uuid, target_id: Uuid) -> Result<(), SketchError> {
+        let line = self
+            .lines
+            .iter()
             .find(|l| l.id == entity_id)
-            .and_then(|line| {
-                Some((
-                    line.a, line.b,
-                    self.point(line.a)?.clone(),
-                    self.point(line.b)?.clone(),
-                ))
-            });
-        
-        if let Some((pt_a, pt_b, pa, pb)) = line_data {
-            let dir = Vec2::new(pb.x as f32 - pa.x as f32, pb.y as f32 - pa.y as f32);
-            let len = dir.length().max(1e-6);
-            let unit = dir / len;
-            
-            // Extend both endpoints by 10 units
-            let ext = 10.0;
-            if let Some(p) = self.point_mut(pt_a) {
-                p.x -= unit.x as f64 * ext;
-                p.y -= unit.y as f64 * ext;
+            .cloned()
+            .ok_or(SketchError::Unknown(entity_id))?;
+        let (pa, pb) = match (self.point(line.a), self.point(line.b)) {
+            (Some(a), Some(b)) => ([a.x, a.y], [b.x, b.y]),
+            _ => return Err(SketchError::Unknown(entity_id)),
+        };
+
+        // (which endpoint to move, where to move it)
+        let mut candidates: Vec<(usize, [f64; 2])> = Vec::new();
+        let push_ts = |line_ts: Vec<f64>, candidates: &mut Vec<(usize, [f64; 2])>| {
+            for t in line_ts {
+                if t > 1.0 {
+                    candidates.push((1, lerp2(pa, pb, t)));
+                } else if t < 0.0 {
+                    candidates.push((0, lerp2(pa, pb, t)));
+                }
             }
-            if let Some(p) = self.point_mut(pt_b) {
-                p.x += unit.x as f64 * ext;
-                p.y += unit.y as f64 * ext;
+        };
+
+        if let Some(target) = self.lines.iter().find(|l| l.id == target_id) {
+            if let (Some(c), Some(d)) = (self.point(target.a), self.point(target.b)) {
+                let ts: Vec<f64> = line_line_t(pa, pb, [c.x, c.y], [d.x, d.y])
+                    .into_iter()
+                    .collect();
+                push_ts(ts, &mut candidates);
             }
+        } else if let Some(circle) = self.circles.iter().find(|c| c.id == target_id) {
+            if let Some(c) = self.point(circle.center) {
+                let ts = line_circle_ts(pa, pb, [c.x, c.y], circle.radius);
+                push_ts(ts, &mut candidates);
+            }
+        } else if let Some(arc) = self.arcs.iter().find(|a| a.id == target_id) {
+            if let Some(c) = self.point(arc.center) {
+                let ts = line_circle_ts(pa, pb, [c.x, c.y], arc.radius);
+                push_ts(ts, &mut candidates);
+            }
+        } else {
+            return Err(SketchError::Unknown(target_id));
         }
-        Ok(())
+
+        // Grow by the smallest amount needed.
+        let best = candidates.into_iter().min_by(|(_, p), (_, q)| {
+            dist_sq(pa, *p)
+                .min(dist_sq(pb, *p))
+                .partial_cmp(&dist_sq(pa, *q).min(dist_sq(pb, *q)))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        match best {
+            Some((which, p)) => {
+                let id = if which == 0 { line.a } else { line.b };
+                if let Some(pt) = self.point_mut(id) {
+                    pt.x = p[0];
+                    pt.y = p[1];
+                }
+                Ok(())
+            }
+            None => Err(SketchError::Solver(
+                "extend: the line does not reach the target entity".into(),
+            )),
+        }
     }
 
     /// Offset an entity by a distance
@@ -1146,98 +1446,158 @@ impl Sketch {
         Err(SketchError::Unknown(entity_id))
     }
 
-    /// Mirror entities across a line (axis)
+    /// Duplicate entities through a 2D transform, returning the new entity ids.
+    ///
+    /// Handles points, lines, circles and arcs. The previous mirror/pattern
+    /// helpers only looked at point ids and silently returned an empty vector
+    /// for lines, circles and arcs.
+    pub fn duplicate_entities<F>(&mut self, entity_ids: &[Uuid], transform: F) -> Vec<Uuid>
+    where
+        F: Fn([f64; 2]) -> [f64; 2],
+    {
+        enum Source {
+            Point([f64; 2]),
+            Line([f64; 2], [f64; 2]),
+            Circle([f64; 2], f64),
+            /// centre, radius, start point, end point
+            Arc([f64; 2], f64, [f64; 2], [f64; 2]),
+        }
+
+        // Snapshot the sources before mutating the sketch.
+        let mut sources: Vec<Source> = Vec::new();
+        for id in entity_ids {
+            if let Some(p) = self.point(*id) {
+                sources.push(Source::Point([p.x, p.y]));
+            } else if let Some(l) = self.lines.iter().find(|l| l.id == *id) {
+                if let (Some(a), Some(b)) = (self.point(l.a), self.point(l.b)) {
+                    sources.push(Source::Line([a.x, a.y], [b.x, b.y]));
+                }
+            } else if let Some(c) = self.circles.iter().find(|c| c.id == *id) {
+                if let Some(center) = self.point(c.center) {
+                    sources.push(Source::Circle([center.x, center.y], c.radius));
+                }
+            } else if let Some(a) = self.arcs.iter().find(|a| a.id == *id) {
+                if let (Some(center), Some(start), Some(end)) =
+                    (self.point(a.center), self.point(a.start_point), self.point(a.end_point))
+                {
+                    sources.push(Source::Arc(
+                        [center.x, center.y],
+                        a.radius,
+                        [start.x, start.y],
+                        [end.x, end.y],
+                    ));
+                }
+            }
+        }
+
+        let mut new_ids = Vec::new();
+        for source in sources {
+            match source {
+                Source::Point(p) => {
+                    let q = transform(p);
+                    new_ids.push(self.add_point(q[0], q[1]));
+                }
+                Source::Line(a, b) => {
+                    let qa = transform(a);
+                    let qb = transform(b);
+                    let na = self.add_point(qa[0], qa[1]);
+                    let nb = self.add_point(qb[0], qb[1]);
+                    new_ids.push(self.add_line(na, nb));
+                }
+                Source::Circle(center, radius) => {
+                    let q = transform(center);
+                    new_ids.push(self.add_circle(q[0], q[1], radius));
+                }
+                Source::Arc(center, radius, start, end) => {
+                    let qc = transform(center);
+                    let qs = transform(start);
+                    let qe = transform(end);
+                    let a0 = (qs[1] - qc[1]).atan2(qs[0] - qc[0]);
+                    let a1 = (qe[1] - qc[1]).atan2(qe[0] - qc[0]);
+                    new_ids.push(self.add_arc(qc[0], qc[1], radius, a0, a1));
+                }
+            }
+        }
+        new_ids
+    }
+
+    /// Mirror entities across a line (axis).
     pub fn mirror_entities(&mut self, entity_ids: &[Uuid], axis_line_id: Uuid) -> Result<Vec<Uuid>, SketchError> {
-        // First collect axis data
-        let axis_data = self.lines.iter()
+        let axis = self
+            .lines
+            .iter()
             .find(|l| l.id == axis_line_id)
-            .and_then(|axis| {
-                Some((
-                    self.point(axis.a)?.clone(),
-                    self.point(axis.b)?.clone(),
-                ))
-            });
-        
-        let (p1, p2) = match axis_data {
-            Some((a, b)) => (a, b),
-            None => return Err(SketchError::Unknown(axis_line_id)),
+            .cloned()
+            .ok_or(SketchError::Unknown(axis_line_id))?;
+        let (p1, p2) = match (self.point(axis.a), self.point(axis.b)) {
+            (Some(a), Some(b)) => ([a.x, a.y], [b.x, b.y]),
+            _ => return Err(SketchError::Unknown(axis_line_id)),
         };
-        
-        let axis_dir = Vec2::new(p2.x as f32 - p1.x as f32, p2.y as f32 - p1.y as f32);
-        let axis_len = axis_dir.length().max(1e-6);
-        let axis_unit = axis_dir / axis_len;
-        
-        let mut new_ids = Vec::new();
-        
-        for entity_id in entity_ids {
-            if let Some(point) = self.points.iter().find(|p| p.id == *entity_id).cloned() {
-                let v = Vec2::new(point.x as f32 - p1.x as f32, point.y as f32 - p1.y as f32);
-                let proj = v.dot(axis_unit);
-                let perp = v - axis_unit * proj;
-                let mirrored = Vec2::new(p1.x as f32 + proj * axis_unit.x - perp.x,
-                                        p1.y as f32 + proj * axis_unit.y - perp.y);
-                
-                let new_id = self.add_point(mirrored.x as f64, mirrored.y as f64);
-                new_ids.push(new_id);
-            }
-            // Also handle lines, arcs, circles by mirroring their defining points
+        let dx = p2[0] - p1[0];
+        let dy = p2[1] - p1[1];
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-12 {
+            return Err(SketchError::Solver("mirror axis has zero length".into()));
         }
-        
-        Ok(new_ids)
+        let (ux, uy) = (dx / len, dy / len);
+        let origin = p1;
+        Ok(self.duplicate_entities(entity_ids, move |p| {
+            let vx = p[0] - origin[0];
+            let vy = p[1] - origin[1];
+            let proj = vx * ux + vy * uy;
+            let perp_x = vx - proj * ux;
+            let perp_y = vy - proj * uy;
+            [
+                origin[0] + proj * ux - perp_x,
+                origin[1] + proj * uy - perp_y,
+            ]
+        }))
     }
 
-    /// Create a linear pattern of entities
-    pub fn linear_pattern(&mut self, entity_ids: &[Uuid], direction: [f64; 2], spacing: f64, count: usize) -> Result<Vec<Uuid>, SketchError> {
-        let dir = Vec2::new(direction[0] as f32, direction[1] as f32).normalize_or_zero();
+    /// Create a linear pattern of entities (points, lines, circles and arcs).
+    pub fn linear_pattern(
+        &mut self,
+        entity_ids: &[Uuid],
+        direction: [f64; 2],
+        spacing: f64,
+        count: usize,
+    ) -> Result<Vec<Uuid>, SketchError> {
+        let len = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
+        if len < 1e-12 {
+            return Err(SketchError::Solver("linear pattern direction is zero".into()));
+        }
+        let (ux, uy) = (direction[0] / len, direction[1] / len);
         let mut new_ids = Vec::new();
-        
-        // First collect all points to pattern
-        let points_to_pattern: Vec<_> = entity_ids.iter()
-            .filter_map(|id| self.points.iter().find(|p| p.id == *id).cloned())
-            .collect();
-        
         for i in 1..count {
-            let offset = dir * (spacing as f32 * i as f32);
-            
-            for point in &points_to_pattern {
-                let new_id = self.add_point(
-                    point.x + offset.x as f64,
-                    point.y + offset.y as f64,
-                );
-                new_ids.push(new_id);
-            }
-            // Also handle lines, arcs, circles by patterning their defining points
+            let d = spacing * i as f64;
+            let ids = self.duplicate_entities(entity_ids, move |p| [p[0] + ux * d, p[1] + uy * d]);
+            new_ids.extend(ids);
         }
-        
         Ok(new_ids)
     }
 
-    /// Create a circular pattern of entities
-    pub fn circular_pattern(&mut self, entity_ids: &[Uuid], center: [f64; 2], angle_step: f64, count: usize) -> Result<Vec<Uuid>, SketchError> {
+    /// Create a circular pattern of entities (points, lines, circles and arcs).
+    pub fn circular_pattern(
+        &mut self,
+        entity_ids: &[Uuid],
+        center: [f64; 2],
+        angle_step: f64,
+        count: usize,
+    ) -> Result<Vec<Uuid>, SketchError> {
         let mut new_ids = Vec::new();
-        
-        // First collect all points to pattern
-        let points_to_pattern: Vec<_> = entity_ids.iter()
-            .filter_map(|id| self.points.iter().find(|p| p.id == *id).cloned())
-            .collect();
-        
         for i in 1..count {
             let angle = angle_step * i as f64;
-            let cos_a = angle.cos();
-            let sin_a = angle.sin();
-            
-            for point in &points_to_pattern {
-                let dx = point.x - center[0];
-                let dy = point.y - center[1];
-                let new_x = center[0] + dx * cos_a - dy * sin_a;
-                let new_y = center[1] + dx * sin_a + dy * cos_a;
-                
-                let new_id = self.add_point(new_x, new_y);
-                new_ids.push(new_id);
-            }
-            // Also handle lines, arcs, circles by patterning their defining points
+            let (sin_a, cos_a) = angle.sin_cos();
+            let ids = self.duplicate_entities(entity_ids, move |p| {
+                let dx = p[0] - center[0];
+                let dy = p[1] - center[1];
+                [
+                    center[0] + dx * cos_a - dy * sin_a,
+                    center[1] + dx * sin_a + dy * cos_a,
+                ]
+            });
+            new_ids.extend(ids);
         }
-        
         Ok(new_ids)
     }
 }
@@ -1279,5 +1639,226 @@ mod tests {
         s.points[1].y += 0.5;
         s.solve().unwrap();
         assert!((s.points[0].y - s.points[1].y).abs() < 1e-3);
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn linear_pattern_copies_lines_and_circles() {
+        let mut sketch = Sketch::new("p");
+        let p0 = sketch.add_point(0.0, 0.0);
+        let p1 = sketch.add_point(10.0, 0.0);
+        let line = sketch.add_line(p0, p1);
+        let circle = sketch.add_circle(5.0, 5.0, 2.0);
+
+        let created = sketch
+            .linear_pattern(&[line, circle], [1.0, 0.0], 20.0, 3)
+            .unwrap();
+
+        // Two extra copies of one line and one circle each.
+        assert_eq!(created.len(), 4);
+        assert_eq!(sketch.lines.len(), 3);
+        assert_eq!(sketch.circles.len(), 3);
+
+        // The last copy of the line is offset by 40 in x.
+        let last = sketch.lines.last().unwrap();
+        let a = sketch.point(last.a).unwrap();
+        assert!((a.x - 40.0).abs() < 1e-9, "unexpected x: {}", a.x);
+    }
+
+    #[test]
+    fn circular_pattern_rotates_geometry() {
+        let mut sketch = Sketch::new("c");
+        let p0 = sketch.add_point(10.0, 0.0);
+        let p1 = sketch.add_point(20.0, 0.0);
+        let line = sketch.add_line(p0, p1);
+
+        let created = sketch
+            .circular_pattern(&[line], [0.0, 0.0], std::f64::consts::FRAC_PI_2, 4)
+            .unwrap();
+        assert_eq!(created.len(), 3);
+
+        // The first copy is rotated 90 degrees onto the +Y axis.
+        let first = sketch.lines.iter().find(|l| l.id == created[0]).unwrap();
+        let a = sketch.point(first.a).unwrap();
+        assert!(
+            a.x.abs() < 1e-9 && (a.y - 10.0).abs() < 1e-9,
+            "unexpected rotated point: ({}, {})",
+            a.x,
+            a.y
+        );
+    }
+
+    #[test]
+    fn mirror_copies_circles_and_arcs() {
+        let mut sketch = Sketch::new("m");
+        let a0 = sketch.add_point(0.0, -10.0);
+        let a1 = sketch.add_point(0.0, 10.0);
+        let axis = sketch.add_line(a0, a1);
+        let circle = sketch.add_circle(5.0, 0.0, 2.0);
+        let arc = sketch.add_arc(3.0, 0.0, 1.0, 0.0, std::f64::consts::PI);
+
+        let created = sketch.mirror_entities(&[circle, arc], axis).unwrap();
+        assert_eq!(created.len(), 2);
+        assert_eq!(sketch.circles.len(), 2);
+        assert_eq!(sketch.arcs.len(), 2);
+
+        let mirrored = sketch.circles.last().unwrap();
+        let center = sketch.point(mirrored.center).unwrap();
+        assert!(
+            (center.x + 5.0).abs() < 1e-9,
+            "mirrored centre x = {}",
+            center.x
+        );
+    }
+
+    #[test]
+    fn extend_moves_the_line_to_the_target() {
+        let mut sketch = Sketch::new("e");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(5.0, 0.0);
+        let line = sketch.add_line(a, b);
+        let c = sketch.add_point(12.0, -5.0);
+        let d = sketch.add_point(12.0, 5.0);
+        let target = sketch.add_line(c, d);
+
+        sketch.extend_entity(line, target).unwrap();
+
+        assert!((sketch.point(b).unwrap().x - 12.0).abs() < 1e-9);
+        assert!(sketch.point(a).unwrap().x.abs() < 1e-9, "wrong endpoint moved");
+    }
+
+    #[test]
+    fn extend_reports_entities_that_never_meet() {
+        let mut sketch = Sketch::new("e2");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(5.0, 0.0);
+        let line = sketch.add_line(a, b);
+        let c = sketch.add_point(0.0, 5.0);
+        let d = sketch.add_point(5.0, 5.0);
+        let parallel = sketch.add_line(c, d);
+        assert!(sketch.extend_entity(line, parallel).is_err());
+    }
+
+    #[test]
+    fn trim_shortens_to_the_nearest_intersection() {
+        let mut sketch = Sketch::new("t");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(10.0, 0.0);
+        let line = sketch.add_line(a, b);
+        let c = sketch.add_point(4.0, -5.0);
+        let d = sketch.add_point(4.0, 5.0);
+        sketch.add_line(c, d);
+
+        // Click near the right end to remove that portion.
+        sketch.trim_entity(line, [9.0, 0.0]).unwrap();
+
+        assert!((sketch.point(b).unwrap().x - 4.0).abs() < 1e-9);
+        assert!(sketch.point(a).unwrap().x.abs() < 1e-9, "wrong endpoint moved");
+    }
+
+    #[test]
+    fn trim_reports_unknown_entities() {
+        let mut sketch = Sketch::new("t2");
+        assert!(sketch.trim_entity(Uuid::new_v4(), [0.0, 0.0]).is_err());
+    }
+
+    #[test]
+    fn parallel_constraint_is_enforced() {
+        let mut sketch = Sketch::new("par");
+        let a0 = sketch.add_point(0.0, 0.0);
+        let a1 = sketch.add_point(10.0, 0.0);
+        let line_a = sketch.add_line(a0, a1);
+        let b0 = sketch.add_point(0.0, 10.0);
+        let b1 = sketch.add_point(10.0, 15.0);
+        let line_b = sketch.add_line(b0, b1);
+        sketch.constraints.push(Constraint::Parallel {
+            a: line_a,
+            b: line_b,
+        });
+
+        sketch.solve().unwrap();
+
+        let dy = (sketch.point(b1).unwrap().y - sketch.point(b0).unwrap().y).abs();
+        assert!(dy < 1e-3, "line b is not parallel to line a: dy = {}", dy);
+    }
+
+    #[test]
+    fn perpendicular_constraint_is_enforced() {
+        let mut sketch = Sketch::new("perp");
+        let a0 = sketch.add_point(0.0, 0.0);
+        let a1 = sketch.add_point(10.0, 0.0);
+        let line_a = sketch.add_line(a0, a1);
+        let b0 = sketch.add_point(0.0, 10.0);
+        let b1 = sketch.add_point(2.0, 20.0);
+        let line_b = sketch.add_line(b0, b1);
+        sketch.constraints.push(Constraint::Perpendicular {
+            a: line_a,
+            b: line_b,
+        });
+
+        sketch.solve().unwrap();
+
+        let dx = (sketch.point(b1).unwrap().x - sketch.point(b0).unwrap().x).abs();
+        assert!(dx < 1e-3, "line b is not perpendicular to line a: dx = {}", dx);
+    }
+
+    #[test]
+    fn equal_length_constraint_is_enforced() {
+        let mut sketch = Sketch::new("eq");
+        let a0 = sketch.add_point(0.0, 0.0);
+        let a1 = sketch.add_point(10.0, 0.0);
+        let line_a = sketch.add_line(a0, a1);
+        let b0 = sketch.add_point(0.0, 10.0);
+        let b1 = sketch.add_point(4.0, 10.0);
+        let line_b = sketch.add_line(b0, b1);
+        sketch.constraints.push(Constraint::EqualLength {
+            a: line_a,
+            b: line_b,
+        });
+
+        sketch.solve().unwrap();
+
+        let length = |sketch: &Sketch, line: Uuid| {
+            let l = sketch.lines.iter().find(|l| l.id == line).unwrap();
+            let p0 = sketch.point(l.a).unwrap();
+            let p1 = sketch.point(l.b).unwrap();
+            ((p1.x - p0.x).powi(2) + (p1.y - p0.y).powi(2)).sqrt()
+        };
+        let len_a = length(&sketch, line_a);
+        let len_b = length(&sketch, line_b);
+        assert!(
+            (len_a - len_b).abs() < 1e-6,
+            "lengths converged to {} and {}",
+            len_a,
+            len_b
+        );
+    }
+
+    #[test]
+    fn equal_radius_constraint_updates_circles() {
+        let mut sketch = Sketch::new("eqr");
+        let c1 = sketch.add_circle(0.0, 0.0, 2.0);
+        let c2 = sketch.add_circle(10.0, 0.0, 6.0);
+        sketch
+            .constraints
+            .push(Constraint::EqualRadius { a: c1, b: c2 });
+
+        sketch.solve().unwrap();
+
+        let radii: Vec<f64> = sketch.circles.iter().map(|c| c.radius).collect();
+        assert!(
+            (radii[0] - radii[1]).abs() < 1e-9,
+            "radii did not converge: {:?}",
+            radii
+        );
+        assert!(
+            (radii[0] - 4.0).abs() < 1e-9,
+            "expected the average radius, got {:?}",
+            radii
+        );
     }
 }

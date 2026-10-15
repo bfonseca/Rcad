@@ -88,13 +88,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn extrude_sketch(profile: &rcad_geom::Profile2D) -> Result<(), Box<dyn std::error::Error>> {
+    use rcad_geom::GeometryBackend;
+
     let mut backend = OcctBackend::default();
-    
-    // Extrude the profile - using box_solid as placeholder since extrude from profile may not exist
-    // In a real implementation, you'd use backend.extrude_profile or similar
-    let solid = backend.box_solid(glam::DVec3::new(40.0, 30.0, 10.0))?;
-    
-    println!("Extruded solid created (using box as placeholder)");
+
+    // Extrude the sketch profile itself through the OCCT kernel.
+    let height = 10.0;
+    let solid = backend.extrude_profile(profile, height)?;
+    println!("Extruded solid created from profile (height {height})");
     
     // Tessellate
     let mesh = backend.tessellate(solid)?;
