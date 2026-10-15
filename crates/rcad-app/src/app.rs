@@ -15,7 +15,6 @@ use rcad_occt::OcctBackend;
 use rcad_param::{ShapeCache};
 use rcad_sketch::Sketch;
 use std::path::{Path, PathBuf};
-use rfd::FileDialog;
 use uuid::Uuid;
 use crossbeam_channel::{bounded, Sender, Receiver};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +34,7 @@ pub struct RebuildResponse {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // face/edge/vertex picking is not implemented yet
 pub enum SelectionMode {
     Object,
     Face,
@@ -93,12 +93,14 @@ pub struct RcadApp {
     // Selection state
     selected_feature: Option<uuid::Uuid>,
     selected_construction_feature: Option<usize>, // Feature index for construction geometry
+#[allow(dead_code)] // set but not read until picking modes exist
     selection_mode: SelectionMode,
     
     // Async kernel worker
     kernel_worker_tx: Option<Sender<RebuildJob>>,
     kernel_worker_rx: Option<Receiver<RebuildResponse>>,
     kernel_version: Arc<AtomicU64>,
+#[allow(dead_code)] // keeps the worker thread alive
     kernel_worker_handle: Option<thread::JoinHandle<()>>,
     /// Set whenever the part tree changes. The kernel worker only rebuilds
     /// when this is set; previously a job was queued on *every frame*.
@@ -395,7 +397,7 @@ impl RcadApp {
         
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 // File menu
                 ui.menu_button("File", |ui| {
                     if ui.button("New  Ctrl+N").clicked() {
@@ -1017,284 +1019,6 @@ impl RcadApp {
     }
 
     
-    fn sketch_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Sketch");
-        if ui.button("New Sketch").clicked() {
-            self.undo_stack.push(self.project.clone());
-            self.sketch = Some(Sketch::new("Sketch1"));
-            self.last_error = None;
-        }
-
-        // Handle adding points, lines, rectangle (these mutate sketch)
-        if let Some(sketch) = &mut self.sketch {
-            if ui.button("Add Point").clicked() {
-                self.undo_stack.push(self.project.clone());
-                sketch.add_point(0.0, 0.0);
-            }
-            if ui.button("Add Line").clicked() && sketch.points.len() >= 2 {
-                self.undo_stack.push(self.project.clone());
-                let n = sketch.points.len();
-                let (a, b) = (sketch.points[n - 2].id, sketch.points[n - 1].id);
-                sketch.add_line(a, b);
-            }
-            if ui.button("Add Rectangle").clicked() {
-                self.undo_stack.push(self.project.clone());
-                sketch.add_rectangle(-25.0, -25.0, 25.0, 25.0);
-            }
-            if ui.button("Solve Constraints").clicked() {
-                if let Err(e) = sketch.solve() {
-                    self.last_error = Some(format!("Constraints: {e}"));
-                }
-            }
-        }
-
-        // Handle extrude and revolve (need profile from sketch, but call self methods)
-        let mut profile_to_extrude = None;
-        let mut profile_to_revolve = None;
-        if let Some(sketch) = &self.sketch {
-            if ui.button("Extrude Sketch").clicked() {
-                profile_to_extrude = sketch.to_profile();
-            }
-            if ui.button("Revolve Sketch").clicked() {
-                profile_to_revolve = sketch.to_profile();
-            }
-        }
-
-        if let Some(profile) = profile_to_extrude {
-            if let Err(e) = self.extrude_sketch_internal(profile, 10.0) {
-                self.last_error = Some(format!("Extrude failed: {e}"));
-            }
-        }
-        if let Some(profile) = profile_to_revolve {
-            if let Err(e) = self.revolve_sketch_internal(profile, 360.0) {
-                self.last_error = Some(format!("Revolve failed: {e}"));
-            }
-        }
-
-        ui.separator();
-        if let Some(sketch) = &self.sketch {
-            ui.label(format!("Current sketch: {}", sketch.name));
-            ui.label(format!("Points: {}", sketch.points.len()));
-            ui.label(format!("Lines: {}", sketch.lines.len()));
-            ui.label(format!("Circles: {}", sketch.circles.len()));
-            ui.label(format!("Constraints: {}", sketch.constraints.len()));
-        }
-    }
-
-    fn feature_tree_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Feature Tree");
-        
-        // First, collect what needs to be changed without mutating
-        let (suppress_these, unsuppress_these) = if let Some(part) = self.get_active_part_mut() {
-            let mut suppress_these = Vec::new();
-            let mut unsuppress_these = Vec::new();
-
-            for i in 0..part.features.len() {
-                let feature = &part.features[i];
-                ui.horizontal(|ui| {
-                    let label = if feature.suppressed {
-                        format!("☐ {} (suppressed)", feature.name)
-                    } else {
-                        format!("☑ {}", feature.name)
-                    };
-                    if ui.selectable_label(false, label).clicked() {
-                        // TODO: feature editing
-                    }
-                    if ui.button("Suppress").clicked() {
-                        if !feature.suppressed {
-                            suppress_these.push(i);
-                        }
-                    }
-                    if feature.suppressed && ui.button("Unsuppress").clicked() {
-                        unsuppress_these.push(i);
-                    }
-                });
-            }
-            
-            (suppress_these, unsuppress_these)
-        } else {
-            ui.label("No active part");
-            return;
-        };
-        
-        // Now we can safely clone and modify
-        if !suppress_these.is_empty() || !unsuppress_these.is_empty() {
-            self.undo_stack.push(self.project.clone());
-        }
-
-        if let Some(part) = self.get_active_part_mut() {
-            for i in &suppress_these {
-                let feature = &mut part.features[*i];
-                if !feature.suppressed {
-                    feature.suppressed = true;
-                    part.suppressed.push(feature.id);
-                }
-            }
-            for i in &unsuppress_these {
-                let feature = &mut part.features[*i];
-                if feature.suppressed {
-                    feature.suppressed = false;
-                    part.suppressed.retain(|id| *id != feature.id);
-                }
-            }
-
-            if !suppress_these.is_empty() || !unsuppress_these.is_empty() {
-                self.rebuild_active_part();
-            }
-        }
-    }
-
-    fn feature_tree_with_sketch_panel(&mut self, ui: &mut egui::Ui) {
-        // Sketch section (if active sketch exists)
-        // First collect sketch info without holding borrow across closure
-        let sketch_info = if let Some(sketch) = &self.sketch {
-            Some((
-                sketch.name.clone(),
-                sketch.points.len(),
-                sketch.lines.len(),
-                sketch.circles.len(),
-                sketch.constraints.len(),
-                sketch.points.len() >= 2, // can add line
-            ))
-        } else {
-            None
-        };
-        
-        if let Some((name, points_len, lines_len, circles_len, constraints_len, can_add_line)) = sketch_info {
-            ui.collapsing("Sketch", |ui| {
-                ui.label(format!("Name: {}", name));
-                ui.label(format!("Points: {}", points_len));
-                ui.label(format!("Lines: {}", lines_len));
-                ui.label(format!("Circles: {}", circles_len));
-                ui.label(format!("Constraints: {}", constraints_len));
-                ui.separator();
-                
-                // Sketch editing buttons with icons
-                ui.horizontal(|ui| {
-                    if ui.button("➕ Point").clicked() {
-                        self.undo_stack.push(self.project.clone());
-                        if let Some(s) = &mut self.sketch {
-                            s.add_point(0.0, 0.0);
-                        }
-                    }
-                    if ui.button("📏 Line").clicked() && can_add_line {
-                        self.undo_stack.push(self.project.clone());
-                        if let Some(s) = &mut self.sketch {
-                            let n = s.points.len();
-                            let (a, b) = (s.points[n - 2].id, s.points[n - 1].id);
-                            s.add_line(a, b);
-                        }
-                    }
-                    if ui.button("▭ Rect").clicked() {
-                        self.undo_stack.push(self.project.clone());
-                        if let Some(s) = &mut self.sketch {
-                            s.add_rectangle(-25.0, -25.0, 25.0, 25.0);
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("✅ Solve").clicked() {
-                        if let Some(s) = &mut self.sketch {
-                            if let Err(e) = s.solve() {
-                                self.last_error = Some(format!("Constraints: {e}"));
-                            }
-                        }
-                    }
-                    if ui.button("⬆ Extrude").clicked() {
-                        if let Some(s) = &self.sketch {
-                            if let Some(profile) = s.to_profile() {
-                                if let Err(e) = self.extrude_sketch_internal(profile, 10.0) {
-                                    self.last_error = Some(format!("Extrude failed: {e}"));
-                                }
-                            }
-                        }
-                    }
-                    if ui.button("🔄 Revolve").clicked() {
-                        if let Some(s) = &self.sketch {
-                            if let Some(profile) = s.to_profile() {
-                                if let Err(e) = self.revolve_sketch_internal(profile, 360.0) {
-                                    self.last_error = Some(format!("Revolve failed: {e}"));
-                                }
-                            }
-                        }
-                    }
-                });
-                ui.separator();
-            });
-        } else {
-            // No active sketch - show "New Sketch" button
-            if ui.button("📝 New Sketch").clicked() {
-                self.new_sketch();
-            }
-            ui.separator();
-        }
-        
-        // Feature tree section - collect feature data first to avoid borrow issues
-        let features_data = if let Some(part) = self.get_active_part_mut() {
-            part.features.iter().enumerate().map(|(i, f)| {
-                (i, f.id, f.name.clone(), f.suppressed)
-            }).collect::<Vec<_>>()
-        } else {
-            vec![]
-        };
-        
-        ui.strong("Feature Tree");
-        if features_data.is_empty() && self.get_active_part().is_none() {
-            ui.label("No active part");
-        } else {
-            for (i, feature_id, name, suppressed) in features_data {
-                let mut suppress_action = false;
-                let mut unsuppress_action = false;
-                
-                ui.horizontal(|ui| {
-                    let icon = if suppressed { "🚫" } else { "✅" };
-                    let label = format!("{} {}", icon, name);
-                    if ui.selectable_label(false, label).clicked() {
-                        // TODO: feature editing
-                    }
-                    if ui.small_button(if suppressed { "⬆" } else { "🚫" })
-                        .on_hover_text(if suppressed { "Unsuppress" } else { "Suppress" })
-                        .clicked()
-                    {
-                        if suppressed {
-                            unsuppress_action = true;
-                        } else {
-                            suppress_action = true;
-                        }
-                    }
-                });
-                
-                // Apply actions after UI to avoid borrow issues
-                if suppress_action || unsuppress_action {
-                    self.undo_stack.push(self.project.clone());
-                    if let Some(part) = self.get_active_part_mut() {
-                        if let Some(feature) = part.features.get_mut(i) {
-                            if suppress_action {
-                                feature.suppressed = true;
-                                part.suppressed.push(feature.id);
-                            } else if unsuppress_action {
-                                feature.suppressed = false;
-                                part.suppressed.retain(|id| *id != feature.id);
-                            }
-                        }
-                        self.rebuild_active_part();
-                    }
-                }
-            }
-            
-            // Add feature buttons
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("📦 Box").clicked() {
-                    let _ = self.add_box_feature_internal();
-                }
-                if ui.button("📝 Sketch").clicked() {
-                    self.new_sketch();
-                }
-            });
-        }
-    }
-
     fn get_active_part_mut(&mut self) -> Option<&mut rcad_doc::Part> {
         // For now, just use the first part
         self.project.parts.get_mut(0)
@@ -1313,88 +1037,6 @@ impl RcadApp {
         self.needs_rebuild = true;
     }
 
-    fn file_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.menu_button("File", |ui| {
-            if ui.button("New").clicked() {
-                self.undo_stack.push(self.project.clone());
-                *self = Self::default();
-                // Create default datum geometry (coordinate system + datum planes)
-                let _ = self.create_default_datum_geometry();
-                ui.close_menu();
-            }
-            if ui.button("Undo").clicked() {
-                if self.undo_stack.undo(&mut self.project) {
-                    self.rebuild_active_part();
-                }
-                ui.close_menu();
-            }
-            if ui.button("Redo").clicked() {
-                if self.undo_stack.redo(&mut self.project) {
-                    self.rebuild_active_part();
-                }
-                ui.close_menu();
-            }
-            ui.separator();
-            if ui.button("Open").clicked() {
-                if let Some(path) = FileDialog::new().pick_file() {
-                    match Project::load(&path) {
-                        Ok(project) => {
-                            self.project = project;
-                            self.current_path = Some(path);
-                            // TODO: Load mesh from project
-                            self.last_error = None;
-                        }
-                        Err(e) => {
-                            self.last_error = Some(format!("Failed to load project: {e}"));
-                        }
-                    }
-                }
-                ui.close_menu();
-            }
-            if ui.button("Save").clicked() {
-                if let Some(path) = &self.current_path {
-                    if let Err(e) = self.project.save(path) {
-                        self.last_error = Some(format!("Failed to save project: {e}"));
-                    }
-                } else {
-                    // TODO: Implement Save As
-                    if let Some(path) = FileDialog::new().save_file() {
-                        if let Err(e) = self.project.save(&path) {
-                            self.last_error = Some(format!("Failed to save project: {e}"));
-                        } else {
-                            self.current_path = Some(path);
-                            self.last_error = None;
-                        }
-                    }
-                }
-                ui.close_menu();
-            }
-            if ui.button("Export STL").clicked() {
-                self.export_stl();
-                ui.close_menu();
-            }
-            if ui.button("Export STEP").clicked() {
-                self.export_step();
-                ui.close_menu();
-            }
-            if ui.button("Quit").clicked() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-        });
-    }
-
-    fn help_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("Help", |ui| {
-            if ui.button("About").clicked() {
-                // TODO: Show about dialog
-                ui.close_menu();
-            }
-            if ui.button("Shortcuts").clicked() {
-                self.show_shortcuts_dialog = true;
-                ui.close_menu();
-            }
-        });
-    }
     
     // ===== Public methods for keyboard shortcuts =====
     
@@ -2109,15 +1751,15 @@ impl RcadApp {
                 // TODO: Paste feature
                 self.last_error = Some(format!("Paste feature {:?} - TODO", feature_id));
             }
-            HistoryOverlayAction::PasteSpecialFeature(feature_id) => {
+            HistoryOverlayAction::PasteSpecialFeature(_feature_id) => {
                 // TODO: Paste special
             }
-            HistoryOverlayAction::ShowParents(feature_id) => {
+            HistoryOverlayAction::ShowParents(_feature_id) => {
                 self.history_overlay.show_parents = true;
                 self.history_overlay.show_children = false;
                 // TODO: Highlight parents
             }
-            HistoryOverlayAction::ShowChildren(feature_id) => {
+            HistoryOverlayAction::ShowChildren(_feature_id) => {
                 self.history_overlay.show_children = true;
                 self.history_overlay.show_parents = false;
                 // TODO: Highlight children

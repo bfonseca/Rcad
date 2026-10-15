@@ -2,6 +2,7 @@ use eframe::egui;
 
 /// Keyboard shortcuts configuration
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // picker keys are reserved for selection modes
 pub struct Shortcuts {
     // Viewport navigation
     pub reset_view: egui::Key,
@@ -115,10 +116,6 @@ impl Shortcuts {
         self.is_pressed(ctx, key, egui::Modifiers::CTRL)
     }
     
-    /// Check for Shift+Key combination
-    pub fn shift_pressed(&self, ctx: &egui::Context, key: egui::Key) -> bool {
-        self.is_pressed(ctx, key, egui::Modifiers::SHIFT)
-    }
     
     /// Check for Ctrl+Shift+Key combination
     pub fn ctrl_shift_pressed(&self, ctx: &egui::Context, key: egui::Key) -> bool {

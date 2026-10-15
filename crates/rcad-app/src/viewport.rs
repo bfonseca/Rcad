@@ -168,6 +168,7 @@ pub enum PickTarget {
 
 /// Selection state
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)] // edge/vertex picking is not implemented yet
 pub struct SelectionState {
     pub selected_triangle: Option<usize>,
     pub selected_edge: Option<usize>,
@@ -181,6 +182,7 @@ pub struct SelectionState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)] // face/edge/vertex picking is not implemented yet
 pub enum PickMode {
     #[default]
     Object,
@@ -358,23 +360,6 @@ fn draw_grid(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera, spacing:
 }
 
 // Draw world axes at viewport origin (for reference)
-fn draw_axes(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
-    let vp = view_proj(rect, camera);
-    let o = Vec3::ZERO;
-    let axes = [
-        (Vec3::X * 40.0, Color32::RED),
-        (Vec3::Y * 40.0, Color32::GREEN),
-        (Vec3::Z * 40.0, Color32::BLUE),
-    ];
-    if let Some(op) = project(vp, rect, o) {
-        for (end, color) in axes {
-            if let Some(ep) = project(vp, rect, end) {
-                painter.line_segment([op, ep], Stroke::new(2.0_f32, color));
-            }
-        }
-    }
-}
-
 // Draw coordinate system triad in bottom-left corner (CYS)
 fn draw_corner_cys(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
     // Fixed position in bottom-left corner (screen space)
@@ -386,14 +371,14 @@ fn draw_corner_cys(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
     let vp = view_proj(rect, camera);
     
     // World axes endpoints
-    let world_axes = [
+    let _world_axes = [
         (Vec3::X * size, Color32::RED, "X"),
         (Vec3::Y * size, Color32::GREEN, "Y"),
         (Vec3::Z * size, Color32::BLUE, "Z"),
     ];
     
     // Project world axes from origin
-    if let Some(op) = project(vp, rect, Vec3::ZERO) {
+    if let Some(_op) = project(vp, rect, Vec3::ZERO) {
         // Draw the corner CYS at fixed screen position
         // We'll draw it using screen-space coordinates directly
         let axes_2d = [
@@ -502,7 +487,7 @@ fn draw_construction_geometry(painter: &egui::Painter, rect: Rect, camera: &Orbi
             let dir_v = Vec3::new(direction[0] as f32, direction[1] as f32, direction[2] as f32).normalize_or_zero();
             
             // Compute screen-space depth for sorting
-            if let Some(center_pos) = project(vp, rect, origin_v) {
+            if let Some(_center_pos) = project(vp, rect, origin_v) {
                 // Use camera distance as depth
                 let depth = (origin_v - eye).length();
                 construction_items.push((depth, idx, feature, *kind, origin_v, dir_v));

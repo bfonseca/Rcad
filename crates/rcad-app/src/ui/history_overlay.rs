@@ -11,6 +11,7 @@ use super::toolbar::{feature_kind_icon_id, IconTextures, IconTheme};
 
 /// State for a tree node (expanded/collapsed)
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // selection state is not used yet
 pub struct TreeNodeState {
     pub expanded: bool,
     pub selected: bool,
@@ -18,6 +19,7 @@ pub struct TreeNodeState {
 
 /// History overlay state
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // hover tracking is not used yet
 pub struct HistoryOverlay {
     pub visible: bool,
     pub hovered: bool,
@@ -115,6 +117,7 @@ impl HistoryOverlay {
     }
     
     /// Screen rect of a feature type button as drawn in the last frame.
+#[cfg(test)]
     pub fn type_button_rect(&self, feature: EntityId) -> Option<egui::Rect> {
         self.type_button_rects.get(&feature).copied()
     }
@@ -304,7 +307,7 @@ impl HistoryOverlay {
         let is_expanded = self.is_expanded(feature.id);
         
         // Determine visual state
-        let (icon, label_color, strikethrough) = if feature.suppressed {
+        let (_icon, label_color, strikethrough) = if feature.suppressed {
             ("🚫", egui::Color32::GRAY, true)
         } else if self.is_feature_error(feature) {
             ("❌", egui::Color32::LIGHT_RED, false)
@@ -454,13 +457,13 @@ impl HistoryOverlay {
     }
     
     /// Check if feature has error (placeholder)
-    fn is_feature_error(&self, feature: &Feature) -> bool {
+    fn is_feature_error(&self, _feature: &Feature) -> bool {
         // In real implementation, check rebuild results
         false
     }
     
     /// Check if feature has warning (placeholder)
-    fn is_feature_warning(&self, feature: &Feature) -> bool {
+    fn is_feature_warning(&self, _feature: &Feature) -> bool {
         false
     }
     

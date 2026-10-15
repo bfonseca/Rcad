@@ -7,7 +7,6 @@
 use rcad_doc::{
     ConstructionKind, ExternalRefStatus, Feature, FeatureKind, Part, PartKind, Project, PublishType, PublishedRef,
 };
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Skeleton creation options

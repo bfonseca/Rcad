@@ -130,7 +130,7 @@ fn create_base_plate() -> Result<Part, Box<dyn std::error::Error>> {
     
     // Create a rectangular plate
     let solid = backend.box_solid(DVec3::new(100.0, 80.0, 10.0))?;
-    let mesh = backend.tessellate(solid)?;
+    let _mesh = backend.tessellate(solid)?;
     
     // Add body
     let body_id = Uuid::new_v4();
@@ -144,7 +144,7 @@ fn create_base_plate() -> Result<Part, Box<dyn std::error::Error>> {
     });
     
     // Add feature (using Extrude variant since Base doesn't exist)
-    let feat_id = Uuid::new_v4();
+    let _feat_id = Uuid::new_v4();
     part.features.push(Feature::new(
         "BasePlate",
         FeatureKind::Extrude {
@@ -162,7 +162,7 @@ fn create_bracket() -> Result<Part, Box<dyn std::error::Error>> {
     
     // Create an L-shaped bracket (base + vertical)
     let base = backend.box_solid(DVec3::new(60.0, 40.0, 10.0))?;
-    let mesh = backend.tessellate(base)?;
+    let _mesh = backend.tessellate(base)?;
     
     // Add body
     let body_id = Uuid::new_v4();
@@ -201,7 +201,7 @@ fn create_shaft() -> Result<Part, Box<dyn std::error::Error>> {
     
     // Create a cylindrical shaft
     let solid = backend.cylinder(5.0, 30.0)?;
-    let mesh = backend.tessellate(solid)?;
+    let _mesh = backend.tessellate(solid)?;
     
     // Add body
     let body_id = Uuid::new_v4();

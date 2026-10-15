@@ -73,6 +73,7 @@ impl OrbitCamera {
     }
 
     /// Unit vector from the eye towards the target.
+#[cfg(test)]
     pub fn forward(&self) -> Vec3 {
         -(self.orientation * Vec3::Z)
     }
