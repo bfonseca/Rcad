@@ -30,6 +30,10 @@ struct Cli {
     screenshot: Option<PathBuf>,
     frames: u32,
     demo: bool,
+    /// Tag two demo faces with the project colours (screenshots, docs).
+    demo_colours: bool,
+    /// Hide datum planes, axes and points (screenshots, docs).
+    hide_datums: bool,
     renderer: RendererChoice,
     /// Standard view to open in: iso, front, top, right, ...
     view: Option<String>,
@@ -50,6 +54,8 @@ Options:
   --screenshot <path>   Render the UI, write a PNG to <path>, then exit
   --frames <n>          Frames to render before capturing (default 30)
   --demo                Start with a sample bracket instead of an empty part
+  --demo-colours        Tag two demo faces with the first two project colours
+  --hide-datums         Do not draw datum planes, axes and points
   --renderer <backend>  default | glow | wgpu
   --view <name>         iso | front | back | left | right | top | bottom
   --dialog              Open the feature dialog for the first feature
@@ -79,6 +85,8 @@ fn parse_args() -> Result<Cli, String> {
                 cli.frames = frames;
             }
             "--demo" => cli.demo = true,
+            "--demo-colours" => cli.demo_colours = true,
+            "--hide-datums" => cli.hide_datums = true,
             "--dialog" => cli.dialog = true,
             "--options" => cli.options = true,
             "--project" => {
@@ -157,6 +165,8 @@ fn main() -> eframe::Result<()> {
         .clone()
         .map(|path| CaptureRequest::new(path, cli.frames));
     let demo = cli.demo;
+    let demo_colours = cli.demo_colours;
+    let hide_datums = cli.hide_datums;
     let view = cli.view.clone();
     let dialog = cli.dialog;
     let project = cli.project.clone();
@@ -187,6 +197,12 @@ fn main() -> eframe::Result<()> {
             }
             if demo {
                 app.load_demo_part();
+            }
+            if demo_colours {
+                app.tag_demo_faces_with_project_colours();
+            }
+            if hide_datums {
+                app.set_datums_visible(None, false);
             }
             if dialog {
                 app.open_feature_dialog_for_first_feature();

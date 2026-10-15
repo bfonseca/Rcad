@@ -190,6 +190,15 @@ pub struct Part {
     pub bodies: Vec<Body>,
     /// Active body for new features (Insert Here mode)
     pub active_body_index: Option<usize>,
+    /// Kernel face id -> logical colour id from the project vocabulary.
+    ///
+    /// The RGB value is never stored here: it lives in the project manifest,
+    /// so editing the project restyles every component that uses an id. Face
+    /// ids survive rebuilds because OpenCascade derives them from the same
+    /// body, and construction geometry is sentinel-tagged so it can never
+    /// match one of these.
+    #[serde(default)]
+    pub face_colours: HashMap<u64, String>,
     /// Skeleton reference published entities consumed by child parts.
     pub published: Vec<PublishedRef>,
     /// Optional skeleton this part is driven by.
@@ -222,6 +231,7 @@ impl Part {
             underlay_ids: Vec::new(),
             bodies: Vec::new(),
             active_body_index: None,
+            face_colours: HashMap::new(),
             published: Vec::new(),
             skeleton_of: None,
             // NEW fields with defaults
@@ -239,6 +249,28 @@ impl Part {
         let mut p = Self::new_solid(name);
         p.kind = PartKind::Skeleton;
         p
+    }
+
+    /// Tag a kernel face with a logical colour id from the project vocabulary.
+    pub fn set_face_colour(&mut self, face_id: u64, colour_id: impl Into<String>) {
+        self.face_colours.insert(face_id, colour_id.into());
+    }
+
+    /// Remove the colour of a face. Returns whether it had one.
+    pub fn clear_face_colour(&mut self, face_id: u64) -> bool {
+        self.face_colours.remove(&face_id).is_some()
+    }
+
+    /// The logical colour id of a face, if it is tagged.
+    pub fn face_colour_id(&self, face_id: u64) -> Option<&str> {
+        self.face_colours.get(&face_id).map(String::as_str)
+    }
+
+    /// The RGB value a face resolves to, given the project manifest. `None`
+    /// when the face is untagged or the project does not define its id, in
+    /// which case the viewport keeps its default shading.
+    pub fn face_colour(&self, face_id: u64, manifest: &ProjectManifest) -> Option<[u8; 3]> {
+        manifest.colour(self.face_colour_id(face_id)?)
     }
 }
 
@@ -592,5 +624,86 @@ mod colour_id_tests {
         assert_eq!(a_box().colour(&manifest), None);
         assert_eq!(a_box().with_colour("fit zone").colour(&manifest), Some([0, 255, 0]));
         assert_eq!(a_box().with_colour("unknown").colour(&manifest), None);
+    }
+}
+
+#[cfg(test)]
+mod face_colour_tests {
+    use super::*;
+
+    fn manifest_with(entries: &[(&str, [u8; 3])]) -> ProjectManifest {
+        let mut manifest = ProjectManifest::default();
+        for (id, rgb) in entries {
+            manifest.surface_colors.insert((*id).to_string(), *rgb);
+        }
+        manifest
+    }
+
+    #[test]
+    fn a_face_is_tagged_with_the_id_not_a_value() {
+        let mut part = Part::new_solid("P");
+        part.set_face_colour(12, "fit zone");
+
+        assert_eq!(part.face_colour_id(12), Some("fit zone"));
+        assert!(part.face_colour_id(13).is_none());
+    }
+
+    #[test]
+    fn a_face_colour_resolves_through_the_project() {
+        let mut part = Part::new_solid("P");
+        part.set_face_colour(12, "fit zone");
+        let manifest = manifest_with(&[("fit zone", [0, 255, 0])]);
+
+        assert_eq!(part.face_colour(12, &manifest), Some([0, 255, 0]));
+    }
+
+    /// An untagged face, or one whose id the project does not define, resolves
+    /// to no colour so the viewport keeps the default shading.
+    #[test]
+    fn an_untagged_or_unknown_face_has_no_colour() {
+        let manifest = manifest_with(&[("fit zone", [0, 255, 0])]);
+        let mut part = Part::new_solid("P");
+
+        assert_eq!(part.face_colour(1, &manifest), None);
+        part.set_face_colour(1, "not in this project");
+        assert_eq!(part.face_colour(1, &manifest), None);
+    }
+
+    #[test]
+    fn clearing_a_face_colour_is_reversible() {
+        let mut part = Part::new_solid("P");
+        part.set_face_colour(4, "thread");
+
+        assert!(part.clear_face_colour(4));
+        assert!(!part.clear_face_colour(4));
+        assert!(part.face_colour_id(4).is_none());
+    }
+
+    /// The vocabulary is global, the RGB value is per project: the part stores
+    /// the id, so the same component renders differently for client A and
+    /// client B without being touched.
+    #[test]
+    fn the_project_owns_the_rgb_value() {
+        let mut part = Part::new_solid("P");
+        part.set_face_colour(4, "fit zone");
+        let before = part.clone();
+
+        let client_a = manifest_with(&[("fit zone", [0, 255, 0])]);
+        let client_b = manifest_with(&[("fit zone", [255, 0, 0])]);
+
+        assert_eq!(part.face_colour(4, &client_a), Some([0, 255, 0]));
+        assert_eq!(part.face_colour(4, &client_b), Some([255, 0, 0]));
+        assert_eq!(part.face_colours, before.face_colours);
+    }
+
+    #[test]
+    fn face_colours_survive_a_round_trip() {
+        let mut part = Part::new_solid("P");
+        part.set_face_colour(8, "sealing zone");
+
+        let bytes = rmp_serde::to_vec_named(&part).expect("serialise");
+        let back: Part = rmp_serde::from_slice(&bytes).expect("deserialise");
+
+        assert_eq!(back.face_colour_id(8), Some("sealing zone"));
     }
 }

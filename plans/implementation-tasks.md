@@ -368,29 +368,45 @@ normals and indices, and drops `face_ids`. So the triangle-to-face mapping is
 already computed by OpenCascade on every rebuild; no new kernel work is needed.
 
 #### Steps
-- [ ] **A.** `rcad_geom::TriangleMesh` gains `face_ids: Vec<u64>`, one per
+- [x] **A.** `rcad_geom::TriangleMesh` gains `face_ids: Vec<u64>`, one per
       triangle, with `#[serde(default)]` and a `Default` impl so existing
-      constructors keep working.
-- [ ] **B.** `triangle_mesh_from_cadrum` copies `mesh.face_ids`.
-- [ ] **C.** In `rcad-param`, when the construction mesh is appended to the
+      constructors keep working. Also `NO_FACE_ID` (u64::MAX),
+      `face_id(triangle)`, `normalize_face_ids()` and
+      `append(&mesh, face_id)`, which keeps the two lists aligned.
+- [x] **B.** `triangle_mesh_from_cadrum` copies `mesh.face_ids`.
+- [x] **C.** In `rcad-param`, when the construction mesh is appended to the
       display mesh, extend `face_ids` with a sentinel (`u64::MAX`) so
       construction geometry is never colour-matched to a solid face.
-- [ ] **D.** The document maps `face_id -> colour_id`. Prefer a map on the
-      `Part` (it survives rebuilds, because the face ids come from the same
-      body) over a vector parallel to the triangles.
-- [ ] **E.** The viewport resolves each triangle: `face_ids[i]` -> colour id ->
+- [x] **D.** The document maps `face_id -> colour_id`: `Part::face_colours`,
+      with `set_face_colour` / `clear_face_colour` / `face_colour_id` /
+      `face_colour(face_id, manifest)`. It survives rebuilds because the face
+      ids come from the same body, and it takes part in serde round trips.
+- [x] **E.** The viewport resolves each triangle: `face_ids[i]` -> colour id ->
       `manifest.colour(id)` -> RGB, falling back to the current shading when
-      the face is untagged or the project does not define the id.
-- [ ] **F.** A way to tag a face in the UI: pick a face, choose an id from the
-      vocabulary. Until then the map can be set from the manifest or tests.
+      the face is untagged or the project does not define the id. The project
+      colour is lit by the same `n·light` factor, so a coloured face still
+      reads as a solid.
+- [x] **F.** A way to tag a face in the UI: pick a triangle in the viewport and
+      choose an id from the list of colours the project defines, in the status
+      bar. `--demo-colours` (with `--hide-datums`) is the headless path for
+      screenshots and docs.
 
 #### Verification
-- [ ] Unit test: a cube tessellates to six distinct face ids.
-- [ ] Unit test: an untagged face keeps the default shading.
-- [ ] Screenshot: two faces of the demo part with different project colours,
-      confirming the colour comes from rcad.toml and not from the component.
-- [ ] Changing the RGB in rcad.toml and re-running changes the display without
-      touching the part.
+- [x] Unit test: a cube tessellates to six distinct face ids
+      (`rcad-occt::tests::a_box_tessellates_to_six_distinct_face_ids`).
+- [x] Unit test: an untagged face keeps the default shading
+      (`rcad-app::viewport::tests::an_untagged_face_keeps_the_default_shading`).
+- [x] Screenshot: two faces of the demo part with different project colours,
+      confirming the colour comes from rcad.toml and not from the component
+      (`face-colours-a.png`, `face-colours-b.png`). Two projects with the same
+      demo part and different `[surface_colors]`: the top face and one side
+      change colour (116 368 pixels), everything else, including the third
+      face, is pixel-identical.
+- [x] Changing the RGB in rcad.toml and re-running changes the display without
+      touching the part: the two screenshots above differ only in rcad.toml,
+      and `rcad-doc::face_colour_tests::the_project_owns_the_rgb_value` plus
+      `rcad-app::viewport::tests::editing_the_project_changes_the_colour_without_touching_the_part`
+      pin it down in code.
 
 Note: cadrum also exposes its own `colormap`, but the project manifest must own
 the RGB values, so rcad should use `face_ids` and resolve colours itself.

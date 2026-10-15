@@ -1,6 +1,6 @@
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 use glam::{Mat4, Vec3, Vec4};
-use rcad_doc::{Feature, FeatureKind, ConstructionKind, Part};
+use rcad_doc::{Feature, FeatureKind, ConstructionKind, Part, ProjectManifest};
 use rcad_geom::TriangleMesh;
 
 use crate::camera::OrbitCamera;
@@ -241,6 +241,8 @@ pub fn draw_viewport(
      selected_triangle: Option<usize>,
      selected_construction: Option<usize>,
      part: Option<&Part>,
+    // The open project's rcad.toml: it owns the RGB value of every colour id.
+    manifest: &ProjectManifest,
     show_grid: bool,
     grid_spacing: f32,
 ) -> egui::Response {
@@ -291,7 +293,7 @@ pub fn draw_viewport(
     }
 
     if !mesh.is_empty() {
-        draw_mesh(&painter, rect, mesh, camera, selected_triangle);
+        draw_mesh(&painter, rect, mesh, camera, selected_triangle, part, manifest);
     } else {
         painter.text(
             rect.center(),
@@ -415,12 +417,45 @@ fn draw_corner_cys(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
     }
 }
 
-fn draw_mesh(painter: &egui::Painter, rect: Rect, mesh: &TriangleMesh, camera: &OrbitCamera, selected_triangle: Option<usize>) {
+/// The project colour a triangle should be drawn with.
+///
+/// Returns `None` when the triangle has no kernel face id, when the face is
+/// untagged, or when the project does not define a value for its id. The
+/// caller then keeps the default shading. Construction geometry is
+/// sentinel-tagged by the rebuild, so it can never match a face colour.
+pub fn face_colour(
+    face_id: Option<u64>,
+    part: Option<&Part>,
+    manifest: &ProjectManifest,
+) -> Option<[u8; 3]> {
+    let face_id = face_id?;
+    if face_id == rcad_geom::NO_FACE_ID {
+        return None;
+    }
+    part?.face_colour(face_id, manifest)
+}
+
+/// Apply the viewport lighting to a project colour, so a coloured face still
+/// reads as a solid rather than a flat sticker.
+pub fn shaded_colour(rgb: [u8; 3], brightness: f32) -> Color32 {
+    let scale = |channel: u8| (channel as f32 * brightness).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(scale(rgb[0]), scale(rgb[1]), scale(rgb[2]))
+}
+
+fn draw_mesh(
+    painter: &egui::Painter,
+    rect: Rect,
+    mesh: &TriangleMesh,
+    camera: &OrbitCamera,
+    selected_triangle: Option<usize>,
+    part: Option<&Part>,
+    manifest: &ProjectManifest,
+) {
      let vp = view_proj(rect, camera);
      let eye = camera.eye();
      let mut tris: Vec<(f32, [Pos2; 3], Color32)> = Vec::with_capacity(mesh.triangle_count());
 
-     for tri in mesh.indices.chunks_exact(3) {
+     for (triangle_index, tri) in mesh.indices.chunks_exact(3).enumerate() {
          let i0 = tri[0] as usize;
          let i1 = tri[1] as usize;
          let i2 = tri[2] as usize;
@@ -439,15 +474,23 @@ fn draw_mesh(painter: &egui::Painter, rect: Rect, mesh: &TriangleMesh, camera: &
          }
          let light = Vec3::new(0.4, 0.8, 0.5).normalize();
          // Ambient floor of 0.3 keeps unlit faces readable instead of near-black.
-        let shade = (n.dot(light).clamp(0.3, 1.0) * 220.0) as u8;
-         let mut color = Color32::from_rgb(shade, shade.saturating_add(10), shade.saturating_add(30));
-         
+         let brightness = n.dot(light).clamp(0.3, 1.0);
+         let shade = (brightness * 220.0) as u8;
+         // A triangle whose kernel face is tagged in the document takes the
+         // project colour for that id; every other triangle keeps the default
+         // shading instead of guessing a colour.
+         let mut color = match face_colour(mesh.face_id(triangle_index), part, manifest) {
+             Some(rgb) => shaded_colour(rgb, brightness),
+             None => Color32::from_rgb(
+                 shade,
+                 shade.saturating_add(10),
+                 shade.saturating_add(30),
+             ),
+         };
+
          // Highlight selected triangle
-         if let Some(selected) = selected_triangle {
-             let triangle_index = tri.as_ptr() as usize / std::mem::size_of::<[u32; 3]>();
-             if triangle_index == selected {
-                 color = Color32::YELLOW;
-             }
+         if Some(triangle_index) == selected_triangle {
+             color = Color32::YELLOW;
          }
          
          let (Some(a), Some(b), Some(c)) = (
@@ -933,5 +976,90 @@ pub fn handle_picking(
     } else {
         selection.hover_triangle = None;
         selection.hover_construction = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest_with(id: &str, rgb: [u8; 3]) -> ProjectManifest {
+        let mut manifest = ProjectManifest::default();
+        manifest.surface_colors.insert(id.to_string(), rgb);
+        manifest
+    }
+
+    /// Untagged faces keep the default shading: the viewport never invents a
+    /// colour for a face the document did not tag.
+    #[test]
+    fn an_untagged_face_keeps_the_default_shading() {
+        let manifest = manifest_with("fit zone", [0, 255, 0]);
+        let part = Part::new_solid("P");
+
+        assert_eq!(face_colour(Some(7), Some(&part), &manifest), None);
+        assert_eq!(face_colour(None, Some(&part), &manifest), None);
+        assert_eq!(face_colour(Some(7), None, &manifest), None);
+    }
+
+    /// Construction geometry carries the sentinel id, so it can never pick up
+    /// the colour of a solid face.
+    #[test]
+    fn construction_triangles_never_match_a_face_colour() {
+        let manifest = manifest_with("fit zone", [0, 255, 0]);
+        let mut part = Part::new_solid("P");
+        part.set_face_colour(rcad_geom::NO_FACE_ID, "fit zone");
+
+        assert_eq!(
+            face_colour(Some(rcad_geom::NO_FACE_ID), Some(&part), &manifest),
+            None
+        );
+    }
+
+    #[test]
+    fn a_tagged_face_resolves_to_the_project_colour() {
+        let manifest = manifest_with("fit zone", [0, 255, 0]);
+        let mut part = Part::new_solid("P");
+        part.set_face_colour(7, "fit zone");
+
+        assert_eq!(face_colour(Some(7), Some(&part), &manifest), Some([0, 255, 0]));
+    }
+
+    #[test]
+    fn an_id_the_project_does_not_define_falls_back_to_shading() {
+        let manifest = ProjectManifest::default();
+        let mut part = Part::new_solid("P");
+        part.set_face_colour(7, "fit zone");
+
+        assert_eq!(face_colour(Some(7), Some(&part), &manifest), None);
+    }
+
+    /// Step E verification: editing the RGB in rcad.toml changes the display,
+    /// and the component itself is not touched.
+    #[test]
+    fn editing_the_project_changes_the_colour_without_touching_the_part() {
+        let mut part = Part::new_solid("P");
+        part.set_face_colour(7, "fit zone");
+
+        let before = face_colour(Some(7), Some(&part), &manifest_with("fit zone", [0, 255, 0]));
+        let after = face_colour(Some(7), Some(&part), &manifest_with("fit zone", [255, 0, 0]));
+
+        assert_eq!(before, Some([0, 255, 0]));
+        assert_eq!(after, Some([255, 0, 0]));
+        assert_eq!(
+            part.face_colour_id(7),
+            Some("fit zone"),
+            "the part stores the id, never the RGB value"
+        );
+    }
+
+    #[test]
+    fn shading_scales_the_project_colour_but_keeps_its_hue() {
+        assert_eq!(shaded_colour([0, 255, 0], 1.0), Color32::from_rgb(0, 255, 0));
+        assert_eq!(shaded_colour([0, 255, 0], 0.5), Color32::from_rgb(0, 128, 0));
+        assert_eq!(
+            shaded_colour([255, 255, 255], 1.0),
+            Color32::from_rgb(255, 255, 255),
+            "a full-brightness colour must not overflow"
+        );
     }
 }

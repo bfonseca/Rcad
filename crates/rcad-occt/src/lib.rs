@@ -97,6 +97,9 @@ fn triangle_mesh_from_cadrum(mesh: &cadrum::Mesh) -> TriangleMesh {
             .map(|n| [n.x as f32, n.y as f32, n.z as f32])
             .collect(),
         indices: mesh.indices.iter().map(|&i| i as u32).collect(),
+        // OpenCascade already computes triangle -> face; keep it so a face can
+        // be tagged with a project colour.
+        face_ids: mesh.face_ids.clone(),
     }
 }
 
@@ -343,5 +346,22 @@ mod tests {
             std::fs::metadata(&stl_path).unwrap().len() > 100,
             "the STL file is empty"
         );
+    }
+
+    /// Step A of the face-colour work: the kernel attributes every triangle to
+    /// a face, and a cube has exactly six.
+    #[test]
+    fn a_box_tessellates_to_six_distinct_face_ids() {
+        let mut backend = OcctBackend::new();
+        let id = backend.box_solid(dvec3(10.0, 20.0, 30.0)).unwrap();
+        let mesh = backend.tessellate(id).unwrap();
+
+        assert_eq!(
+            mesh.face_ids.len(),
+            mesh.triangle_count(),
+            "one face id per triangle"
+        );
+        let distinct: std::collections::HashSet<u64> = mesh.face_ids.iter().copied().collect();
+        assert_eq!(distinct.len(), 6, "a cube has six faces");
     }
 }

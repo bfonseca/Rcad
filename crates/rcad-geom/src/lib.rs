@@ -11,12 +11,22 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ShapeId(pub u64);
 
+/// Face id for triangles that belong to no solid face (construction
+/// geometry, physics proxies). Never a real kernel face id, so a face tagged
+/// in the document can never match one by accident.
+pub const NO_FACE_ID: u64 = u64::MAX;
+
 /// Triangle mesh for viewport display and physics proxies.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TriangleMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+    /// Kernel face id for every triangle, one entry per triangle
+    /// (indices.len() / 3). Empty when the backend does not report face ids,
+    /// in which case no triangle can be colour-matched.
+    #[serde(default)]
+    pub face_ids: Vec<u64>,
 }
 
 impl TriangleMesh {
@@ -26,6 +36,37 @@ impl TriangleMesh {
 
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
+    }
+
+    /// Kernel face id of triangle `triangle`, when the backend reported one.
+    pub fn face_id(&self, triangle: usize) -> Option<u64> {
+        self.face_ids.get(triangle).copied()
+    }
+
+    /// Make `face_ids` as long as the triangle list, tagging any triangle the
+    /// backend did not attribute with [`NO_FACE_ID`]. Keeping the two lists the
+    /// same length means the viewport can index one by the other.
+    pub fn normalize_face_ids(&mut self) {
+        if self.face_ids.len() < self.triangle_count() {
+            self.face_ids.resize(self.triangle_count(), NO_FACE_ID);
+        }
+    }
+
+    /// Append another mesh, offsetting its indices, and tag every appended
+    /// triangle with `face_id`.
+    ///
+    /// Construction geometry is appended to the solid display mesh, and its
+    /// face ids come from different shapes: tagging it with [`NO_FACE_ID`]
+    /// keeps it out of the face-colour lookup.
+    pub fn append(&mut self, other: &TriangleMesh, face_id: u64) {
+        self.normalize_face_ids();
+        let offset = self.positions.len() as u32;
+        self.positions.extend_from_slice(&other.positions);
+        self.normals.extend_from_slice(&other.normals);
+        self.indices
+            .extend(other.indices.iter().map(|index| index + offset));
+        self.face_ids
+            .extend(std::iter::repeat_n(face_id, other.triangle_count()));
     }
 
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
@@ -118,4 +159,53 @@ pub trait GeometryBackend: Send {
     fn axis(&mut self, origin: DVec3, direction: DVec3, length: f64) -> GeomResult<ShapeId>;
     fn point(&mut self, position: DVec3, size: f64) -> GeomResult<ShapeId>;
     fn coordinate_system(&mut self, origin: DVec3, x_dir: DVec3, y_dir: DVec3, z_dir: DVec3, size: f64) -> GeomResult<ShapeId>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A one-triangle mesh, optionally carrying a face id.
+    fn tri_mesh(offset: f32, face: Option<u64>) -> TriangleMesh {
+        TriangleMesh {
+            positions: vec![
+                [offset, 0.0, 0.0],
+                [offset + 1.0, 0.0, 0.0],
+                [offset, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+            face_ids: face.into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn a_mesh_without_face_ids_reports_none() {
+        let mesh = TriangleMesh::default();
+        assert!(mesh.face_id(0).is_none());
+    }
+
+    /// The display mesh is the solid plus construction geometry: the appended
+    /// triangles are offset and sentinel-tagged so they cannot claim a solid
+    /// face colour.
+    #[test]
+    fn appending_tags_the_new_triangles_and_offsets_their_indices() {
+        let mut solid = tri_mesh(0.0, Some(7));
+        let construction = tri_mesh(10.0, Some(3));
+
+        solid.append(&construction, NO_FACE_ID);
+
+        assert_eq!(solid.triangle_count(), 2);
+        assert_eq!(solid.face_ids, vec![7, NO_FACE_ID]);
+        assert_eq!(solid.indices, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(solid.face_id(1), Some(NO_FACE_ID));
+    }
+
+    #[test]
+    fn normalizing_keeps_face_ids_as_long_as_the_triangle_list() {
+        let mut mesh = tri_mesh(0.0, None);
+        assert!(mesh.face_ids.is_empty());
+        mesh.normalize_face_ids();
+        assert_eq!(mesh.face_ids, vec![NO_FACE_ID]);
+    }
 }

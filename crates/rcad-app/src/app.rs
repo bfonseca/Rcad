@@ -134,6 +134,9 @@ pub struct RcadApp {
     project_error: Option<String>,
     /// Text being typed in Options to add a colour id to the vocabulary.
     new_colour_id: String,
+    /// Set by `--demo-colours`: tag two visible demo faces with the project's
+    /// first two colour ids once the mesh has been tessellated.
+    pending_demo_colours: bool,
 }
 
 /// Transient state for the feature dialog's "add parameter" row.
@@ -224,6 +227,7 @@ impl RcadApp {
             manifest: ProjectManifest::default(),
             project_error: None,
             new_colour_id: String::new(),
+            pending_demo_colours: false,
         };
         
         // Create default datum geometry (coordinate system + datum planes) for new part
@@ -660,6 +664,9 @@ impl RcadApp {
                         None => ui.label("rcad - Open Source CAD in Rust"),
                     },
                 };
+
+                // Pick a face in the viewport, then tag it with a project colour.
+                self.draw_face_colour_control(ui);
             });
         });
         
@@ -681,6 +688,7 @@ impl RcadApp {
                 self.selected_triangle,
                 self.selected_construction_feature,
                 part_clone.as_ref(),
+                &self.manifest,
                 self.settings.show_grid,
                 self.settings.grid_spacing,
             );
@@ -762,7 +770,10 @@ impl RcadApp {
                     }
                 }
             }
-            
+            // Runs outside the receiver borrow: tagging colours does not rebuild
+            // geometry, the next frame simply resolves them differently.
+            self.apply_pending_demo_colours();
+
             // Trigger the kernel worker only when the part tree actually
             // changed. This block used to queue a full rebuild on every frame,
             // keeping a core busy for the whole session.
@@ -1162,6 +1173,100 @@ impl RcadApp {
             ));
         }
         self.rebuild_active_part();
+    }
+
+    /// `--demo-colours`: tag two visible faces of the demo part with the first
+    /// two colour ids the project defines. It is how a screenshot shows the
+    /// colour coming from rcad.toml rather than from the component.
+    pub fn tag_demo_faces_with_project_colours(&mut self) {
+        self.pending_demo_colours = true;
+    }
+
+    fn apply_pending_demo_colours(&mut self) {
+        if !self.pending_demo_colours {
+            return;
+        }
+        let ids: Vec<String> = self.manifest.surface_colors.keys().cloned().collect();
+        if ids.len() < 2 {
+            tracing::warn!("--demo-colours needs two colours in the project rcad.toml");
+            self.pending_demo_colours = false;
+            return;
+        }
+        // Keep waiting until a tessellation with face ids has arrived.
+        let Some((top, side)) = demo_face_ids(&self.mesh) else {
+            return;
+        };
+        if let Some(part) = self.get_active_part_mut() {
+            part.set_face_colour(top, ids[0].clone());
+            part.set_face_colour(side, ids[1].clone());
+        }
+        self.pending_demo_colours = false;
+        self.status = Some(format!(
+            "Demo faces coloured from rcad.toml: {top} = {}, {side} = {}",
+            ids[0], ids[1]
+        ));
+    }
+
+    /// Tag a kernel face with a logical colour id from the project vocabulary,
+    /// or clear its tag. The viewport resolves the id to RGB on the next frame.
+    pub fn apply_face_colour(&mut self, face_id: u64, colour_id: Option<String>) {
+        let message = {
+            let Some(part) = self.get_active_part_mut() else {
+                return;
+            };
+            match colour_id {
+                Some(id) => {
+                    part.set_face_colour(face_id, id.clone());
+                    format!("Face {face_id} tagged '{id}'.")
+                }
+                None => {
+                    part.clear_face_colour(face_id);
+                    format!("Face {face_id} colour cleared.")
+                }
+            }
+        };
+        self.status = Some(message);
+    }
+
+    /// The face-colour control for the triangle selected in the viewport.
+    ///
+    /// Only ids the project actually defines are offered: the vocabulary is
+    /// installation-wide, but an id without an RGB value has nothing to show.
+    fn draw_face_colour_control(&mut self, ui: &mut egui::Ui) {
+        let Some(triangle) = self.selected_triangle else {
+            return;
+        };
+        let Some(face_id) = self.mesh.face_id(triangle) else {
+            return;
+        };
+        if face_id == rcad_geom::NO_FACE_ID {
+            return;
+        }
+
+        ui.separator();
+        ui.label(format!("Face {face_id}"));
+        let current = self
+            .get_active_part()
+            .and_then(|part| part.face_colour_id(face_id))
+            .map(str::to_string);
+        let ids: Vec<String> = self.manifest.surface_colors.keys().cloned().collect();
+        let mut choice = current.clone();
+        egui::ComboBox::from_id_salt("face_colour_id")
+            .selected_text(current.clone().unwrap_or_else(|| "not set".to_string()))
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "not set").clicked() {
+                    choice = None;
+                }
+                for id in &ids {
+                    let selected = current.as_deref() == Some(id.as_str());
+                    if ui.selectable_label(selected, id).clicked() {
+                        choice = Some(id.clone());
+                    }
+                }
+            });
+        if choice != current {
+            self.apply_face_colour(face_id, choice);
+        }
     }
 
     fn draw_shortcuts_dialog(&mut self, ui: &mut egui::Ui) {
@@ -2125,6 +2230,7 @@ impl Default for RcadApp {
             manifest: ProjectManifest::default(),
             project_error: None,
             new_colour_id: String::new(),
+            pending_demo_colours: false,
         }
     }
 }
@@ -2133,6 +2239,36 @@ impl eframe::App for RcadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui(ctx);
     }
+}
+
+/// The face ids of the top and of the right-hand face of a mesh.
+///
+/// Used by `--demo-colours` to make the colour scheme visible in a screenshot.
+/// Picked from the summed normal of each face's triangles, so the choice does
+/// not depend on tessellation order or on knowing OpenCascade ids in advance.
+fn demo_face_ids(mesh: &TriangleMesh) -> Option<(u64, u64)> {
+    let mut summed: std::collections::HashMap<u64, glam::Vec3> = std::collections::HashMap::new();
+    for (triangle, indices) in mesh.indices.chunks_exact(3).enumerate() {
+        let Some(face_id) = mesh.face_id(triangle) else {
+            continue;
+        };
+        if face_id == rcad_geom::NO_FACE_ID {
+            continue;
+        }
+        let normal = mesh
+            .normals
+            .get(indices[0] as usize)
+            .copied()
+            .unwrap_or_default();
+        *summed.entry(face_id).or_insert(glam::Vec3::ZERO) += glam::Vec3::from(normal);
+    }
+    let top = *summed.iter().max_by(|a, b| a.1.z.total_cmp(&b.1.z))?.0;
+    let side = *summed
+        .iter()
+        .filter(|(id, _)| **id != top)
+        .max_by(|a, b| a.1.x.total_cmp(&b.1.x))?
+        .0;
+    Some((top, side))
 }
 
 /// Pull a screenshot out of this frame's input events, if egui delivered one.
@@ -2428,6 +2564,98 @@ mod interaction_tests {
             (eye_direction - glam::Vec3::Z).length() < 1e-3,
             "the floating bar Top button did not move the camera: {eye_direction:?}"
         );
+    }
+
+    /// Two triangles with distinct kernel face ids: one facing +Z (id 5) and
+    /// one facing +X (id 9).
+    fn two_face_mesh() -> TriangleMesh {
+        TriangleMesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ],
+            normals: vec![
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ],
+            indices: vec![0, 1, 2, 3, 4, 5],
+            face_ids: vec![5, 9],
+        }
+    }
+
+    /// Step F: tagging the selected face stores the logical id on the part, and
+    /// clearing it removes the tag.
+    #[test]
+    fn tagging_a_face_stores_and_clears_its_colour() {
+        let mut app = RcadApp::default();
+        app.open_project_folder(temp_project_dir());
+
+        app.apply_face_colour(11, Some("fit zone".to_string()));
+        assert_eq!(
+            app.get_active_part().unwrap().face_colour_id(11),
+            Some("fit zone")
+        );
+
+        app.apply_face_colour(11, None);
+        assert!(app.get_active_part().unwrap().face_colour_id(11).is_none());
+    }
+
+    /// The demo helper picks the top and the right-hand face from the geometry,
+    /// not from the tessellation order.
+    #[test]
+    fn demo_face_ids_pick_the_top_and_the_right_face() {
+        assert_eq!(demo_face_ids(&two_face_mesh()), Some((5, 9)));
+    }
+
+    /// `--demo-colours`: the first two ids the project defines are applied once
+    /// a mesh with face ids has arrived, and the part keeps the ids so the
+    /// project still owns the RGB values.
+    #[test]
+    fn demo_colours_tag_two_faces_from_the_project() {
+        let mut app = RcadApp::default();
+        app.open_project_folder(temp_project_dir());
+        app.manifest.surface_colors.insert("fit zone".to_string(), [0, 255, 0]);
+        app.manifest.surface_colors.insert("threads".to_string(), [255, 165, 0]);
+        app.mesh = two_face_mesh();
+
+        app.tag_demo_faces_with_project_colours();
+        app.apply_pending_demo_colours();
+
+        let part = app.get_active_part().unwrap();
+        assert_eq!(part.face_colour_id(5), Some("fit zone"));
+        assert_eq!(part.face_colour_id(9), Some("threads"));
+        assert_eq!(
+            part.face_colour(5, &app.manifest),
+            Some([0, 255, 0]),
+            "the RGB value must come from the project manifest"
+        );
+    }
+
+    /// With a face selected the status bar draws the colour control; the frame
+    /// must still run (and offer only ids the project defines).
+    #[test]
+    fn a_selected_face_draws_the_colour_control() {
+        let mut session = Session::new(RcadApp::default());
+        session.app.mesh = two_face_mesh();
+        session.app.selected_triangle = Some(0);
+        session
+            .app
+            .manifest
+            .surface_colors
+            .insert("fit zone".to_string(), [0, 255, 0]);
+
+        session.frame();
+        session.frame();
+
+        assert_eq!(session.app.mesh.face_id(0), Some(5));
     }
 
     /// 0.1: a folder without a manifest becomes a project.

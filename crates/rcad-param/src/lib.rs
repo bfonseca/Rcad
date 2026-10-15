@@ -170,12 +170,12 @@ impl ShapeCache {
         if !visible_shapes.is_empty() {
             match backend.tessellate_many(&visible_shapes) {
                 Ok(construction_mesh) => {
-                    let offset = result.display_mesh.positions.len() as u32;
-                    result.display_mesh.positions.extend(construction_mesh.positions);
-                    result.display_mesh.normals.extend(construction_mesh.normals);
-                    for idx in construction_mesh.indices {
-                        result.display_mesh.indices.push(idx + offset);
-                    }
+                    // Construction geometry belongs to no solid face, so its
+                    // triangles carry the sentinel face id and can never be
+                    // matched by a face colour set on the model.
+                    result
+                        .display_mesh
+                        .append(&construction_mesh, rcad_geom::NO_FACE_ID);
                 }
                 Err(e) => result.errors.push(e.to_string()),
             }
@@ -407,6 +407,10 @@ mod tests {
         box_calls: usize,
         fillet_calls: usize,
         fail_everything: bool,
+        /// Mesh the mock kernel returns for the solid body.
+        solid_mesh: TriangleMesh,
+        /// Mesh the mock kernel returns for construction geometry.
+        construction_mesh: TriangleMesh,
     }
 
     impl MockBackend {
@@ -444,11 +448,11 @@ mod tests {
         }
 
         fn tessellate(&mut self, _shape: ShapeId) -> GeomResult<TriangleMesh> {
-            Ok(TriangleMesh::default())
+            Ok(self.solid_mesh.clone())
         }
 
         fn tessellate_many(&mut self, _shapes: &[ShapeId]) -> GeomResult<TriangleMesh> {
-            Ok(TriangleMesh::default())
+            Ok(self.construction_mesh.clone())
         }
 
         fn drop_shape(&mut self, shape: ShapeId) {
@@ -502,7 +506,7 @@ mod tests {
             unimplemented!("not needed by the rebuild tests")
         }
         fn plane(&mut self, _origin: DVec3, _normal: DVec3, _size: f64) -> GeomResult<ShapeId> {
-            unimplemented!("not needed by the rebuild tests")
+            Ok(self.insert())
         }
         fn axis(&mut self, _origin: DVec3, _direction: DVec3, _length: f64) -> GeomResult<ShapeId> {
             unimplemented!("not needed by the rebuild tests")
@@ -580,6 +584,51 @@ mod tests {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.shapes.len(), 2);
         assert_eq!(backend.fillet_calls, 1);
+    }
+
+    /// A one-triangle mesh tagged with a face id, to stand in for a kernel
+    /// tessellation.
+    fn triangle_mesh_at(x: f32, face_id: u64) -> TriangleMesh {
+        TriangleMesh {
+            positions: vec![[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+            face_ids: vec![face_id],
+        }
+    }
+
+    /// The display mesh is the solid plus construction geometry. The
+    /// construction triangles must carry the sentinel face id, otherwise a
+    /// colour set on a model face could light up a datum plane.
+    #[test]
+    fn construction_triangles_are_sentinel_tagged() {
+        let mut backend = MockBackend {
+            solid_mesh: triangle_mesh_at(0.0, 42),
+            construction_mesh: triangle_mesh_at(10.0, 7),
+            ..Default::default()
+        };
+        let part = part_with(vec![
+            Feature::new("Base", FeatureKind::Box { size: [10.0, 10.0, 10.0] }),
+            Feature::new(
+                "Plane",
+                FeatureKind::Construction {
+                    kind: ConstructionKind::Plane,
+                    origin: [0.0, 0.0, 0.0],
+                    direction: [0.0, 0.0, 1.0],
+                },
+            ),
+        ]);
+
+        let result = rebuild_part(&part, &mut backend);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.display_mesh.triangle_count(), 2);
+        assert_eq!(
+            result.display_mesh.face_ids,
+            vec![42, rcad_geom::NO_FACE_ID],
+            "construction geometry must not inherit a solid face id"
+        );
+        assert_eq!(result.display_mesh.indices, vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]

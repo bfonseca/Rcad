@@ -31,7 +31,7 @@ todos:
     status: pending
   - id: surface-color-rendering
     content: "Aplicar mapeamento de cores RGB por tipo de superficie no viewport"
-    status: pending
+    status: completed
   - id: rcad-table-integration
     content: "Conectar rcad-table a features/partes para parametrizacao por CSV/Excel"
     status: pending
@@ -40,7 +40,7 @@ todos:
     status: pending
   - id: project-color-scheme
     content: "Esquema de cores: nomes/ids definidos nas configuracoes da app (instalacao), valores RGB definidos por projeto em rcad.toml"
-    status: pending
+    status: completed
 isProject: false
 
 ---
