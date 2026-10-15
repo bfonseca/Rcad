@@ -2235,6 +2235,24 @@ impl Default for RcadApp {
     }
 }
 
+impl Drop for RcadApp {
+    /// Stop the kernel worker before the app goes away.
+    ///
+    /// The worker owns the OpenCascade backend. Left running detached, it could
+    /// still be dropping kernel objects while the process tears down its
+    /// libraries, which showed up as an intermittent SIGSEGV at the end of the
+    /// test run. Dropping the response receiver first means the worker can
+    /// never block on a full channel, and joining waits for the backend to be
+    /// released on this thread instead.
+    fn drop(&mut self) {
+        self.kernel_worker_rx.take();
+        self.kernel_worker_tx.take();
+        if let Some(handle) = self.kernel_worker_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl eframe::App for RcadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui(ctx);
