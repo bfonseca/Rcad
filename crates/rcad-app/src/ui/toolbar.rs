@@ -1,6 +1,7 @@
 //! Vertical toolbar implementation for rcad - Creo-style ribbon replacement
 
 use eframe::egui;
+use rcad_doc::FeatureKind;
 use std::collections::HashMap;
 
 /// Toolbar action types that map to app methods
@@ -220,6 +221,41 @@ fn action_to_icon_id(action: &ToolbarAction) -> Option<&'static str> {
     }
 }
 
+/// rcad-icons id for a feature kind, used by the model tree to show what each
+/// feature is at a glance.
+pub fn feature_kind_icon_id(kind: &FeatureKind) -> Option<&'static str> {
+    use rcad_doc::ConstructionKind;
+    Some(match kind {
+        FeatureKind::Box { .. } => "features-extrude",
+        FeatureKind::Cylinder { .. } => "features-hole",
+        FeatureKind::Extrude { .. } => "features-extrude",
+        FeatureKind::ExtrudeSurface { .. } => "features-extrude-surface",
+        FeatureKind::Revolve { .. } => "features-revolve",
+        FeatureKind::Boolean { op, .. } => match op {
+            rcad_geom::BooleanOp::Union => "edit-boolean-union",
+            rcad_geom::BooleanOp::Subtract => "edit-boolean-subtract",
+            rcad_geom::BooleanOp::Intersect => "edit-boolean-intersect",
+        },
+        FeatureKind::Translate { .. } => "edit-move",
+        FeatureKind::Fillet { .. } => "features-round",
+        FeatureKind::Chamfer { .. } => "features-chamfer",
+        FeatureKind::Sew { .. } => "surfaces-surface-merge",
+        FeatureKind::Loft { .. } => "features-swept-blend",
+        FeatureKind::Boundary { .. } => "surfaces-surface-boundary",
+        FeatureKind::Thicken { .. } => "surfaces-surface-thicken",
+        // The rcad-icons files are datum/datum-plane.png etc, so the id is
+        // "datum-datum-plane" - the category is part of the file name too.
+        FeatureKind::Construction { kind, .. } => match kind {
+            ConstructionKind::Plane => "datum-datum-plane",
+            ConstructionKind::Axis => "datum-datum-axis",
+            ConstructionKind::Point => "datum-datum-point",
+            ConstructionKind::CoordSystem => "datum-datum-csys",
+            ConstructionKind::Curve => "curves-curve-composite",
+            ConstructionKind::Solid => "features-extrude",
+        },
+    })
+}
+
 /// Theme mode for icons
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IconTheme {
@@ -266,7 +302,8 @@ impl IconTextures {
         self.textures.len()
     }
 
-    fn get(
+    /// Decode and cache the texture for `icon_id` in the given theme.
+    pub fn get(
         &mut self,
         ctx: &egui::Context,
         icon_id: &str,
@@ -381,6 +418,11 @@ pub struct VerticalToolbar {
     pub theme: IconTheme,  // Current theme for icons
     /// Decoded rcad-icons textures, filled lazily as buttons are drawn.
     icon_textures: IconTextures,
+    /// Screen rect of each button as drawn in the last frame.
+    ///
+    /// Used by the interaction tests to click a real button through egui's
+    /// own hit-testing, instead of poking at application state directly.
+    button_rects: HashMap<ToolbarAction, egui::Rect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,6 +442,7 @@ impl Default for VerticalToolbar {
             hover_tab: None,
             theme: IconTheme::Dark, // Refreshed from the egui visuals each frame
             icon_textures: IconTextures::default(),
+            button_rects: HashMap::new(),
         }
     }
 }
@@ -407,10 +450,15 @@ impl Default for VerticalToolbar {
 impl VerticalToolbar {
     /// Create the default Creo-style tabs with buttons
     fn create_default_tabs() -> Vec<SimpleToolbarTab> {
-        vec![
+        let tabs = vec![
             // Model Tab
             SimpleToolbarTab::new("Model", "📦")
                 .add_buttons(vec![
+                    // Sketching starts from the main palette; the sketch tools
+                    // themselves live in the floating bar while a sketch is open.
+                    ToolbarButton::new("model_sketch", "📝", "Sketch", ToolbarAction::SketchNew)
+                        .with_shortcut("K")
+                        .with_tooltip("Create a new sketch"),
                     ToolbarButton::new("model_box", "📦", "Box", ToolbarAction::ModelBox)
                         .with_shortcut("B")
                         .with_tooltip("Create a box primitive"),
@@ -607,9 +655,15 @@ impl VerticalToolbar {
                     ToolbarButton::new("tools_customize", "🎨", "Customize", ToolbarAction::ToolsCustomize)
                         .with_tooltip("Customize toolbar"),
                 ]),
-        ]
+        ];
+
+        // The left palette is the feature commands only. Sketch and Analysis
+        // tools appear on the floating bar while they are relevant, Assembly
+        // commands appear there while placing a component, and View/Tools have
+        // their own shortcuts on the floating bar and the menu bar.
+        tabs.into_iter().filter(|tab| tab.name == "Model").collect()
     }
-    
+
     /// Get the currently active tab
     pub fn active_tab(&self) -> &SimpleToolbarTab {
         &self.tabs[self.active_tab]
@@ -669,75 +723,31 @@ impl VerticalToolbar {
     pub fn show(&mut self, ui: &mut egui::Ui, on_action: &mut dyn FnMut(ToolbarAction)) {
         // Update theme based on egui context
         self.theme = self.detect_theme(ui.ctx());
-        
-        let width = self.width();
-        ui.set_min_width(width);
-        ui.set_max_width(width);
+        self.button_rects.clear();
+
+        // Collapsed: a single expand button. Drawing the header and the tab bar
+        // in a 48px column made them wrap into an unreadable stack.
+        if self.collapsed {
+            ui.vertical_centered(|ui| {
+                if ui
+                    .small_button("▶")
+                    .on_hover_text("Expand the toolbar")
+                    .clicked()
+                {
+                    self.toggle_collapsed();
+                }
+            });
+            return;
+        }
+
+        // The panel owns the width now: it is resizable and the value is
+        // persisted. Forcing set_min_width here overrode the panel, so dragging
+        // the edge did nothing and left a wide empty strip beside the commands.
         
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // Toolbar header with hamburger menu and controls
+            // Toolbar header: view toggles. The File/Edit/Help commands live in
+            // the application menu bar, so there is no hamburger menu here.
             ui.horizontal(|ui| {
-                // Hamburger menu button with simple menu
-                egui::menu::menu_button(ui, "☰ Menu", |ui| {
-                    ui.set_min_width(180.0);
-                    ui.style_mut().spacing.item_spacing = egui::vec2(8.0, 4.0);
-                    
-                    // File section
-                    ui.strong("File");
-                    ui.separator();
-                    if ui.button("New Document  Ctrl+N").clicked() {
-                        on_action(ToolbarAction::NewDocument);
-                        ui.close_menu();
-                    }
-                    if ui.button("Open Document  Ctrl+O").clicked() {
-                        on_action(ToolbarAction::OpenDocument);
-                        ui.close_menu();
-                    }
-                    if ui.button("Save  Ctrl+S").clicked() {
-                        on_action(ToolbarAction::SaveDocument);
-                        ui.close_menu();
-                    }
-                    if ui.button("Save As  Ctrl+Shift+S").clicked() {
-                        on_action(ToolbarAction::SaveDocumentAs);
-                        ui.close_menu();
-                    }
-                    if ui.button("Export STL").clicked() {
-                        on_action(ToolbarAction::ExportStl);
-                        ui.close_menu();
-                    }
-                    if ui.button("Export STEP").clicked() {
-                        on_action(ToolbarAction::ExportStep);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Undo  Ctrl+Z").clicked() {
-                        on_action(ToolbarAction::Undo);
-                        ui.close_menu();
-                    }
-                    if ui.button("Redo  Ctrl+Y").clicked() {
-                        on_action(ToolbarAction::Redo);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Quit").clicked() {
-                        on_action(ToolbarAction::NewDocument); // Will need proper quit action
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    
-                    // Help section
-                    ui.strong("Help");
-                    ui.separator();
-                    if ui.button("About").clicked() {
-                        on_action(ToolbarAction::HelpAbout);
-                        ui.close_menu();
-                    }
-                    if ui.button("Shortcuts  F1").clicked() {
-                        on_action(ToolbarAction::HelpShortcuts);
-                        ui.close_menu();
-                    }
-                });
-                
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Position toggle
                     if ui.small_button(if self.position == ToolbarPosition::Left { "◀" } else { "▶" })
@@ -761,20 +771,24 @@ impl VerticalToolbar {
             
             ui.separator();
             
-            // Tab bar
+            // Tab bar: pointless when only the Model palette exists.
+            if self.tabs.len() > 1 {
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
                 for (i, tab) in self.tabs.iter().enumerate() {
                     let is_active = i == self.active_tab;
                     let is_hovered = self.hover_tab == Some(i);
                     
+                    // 34px square: six tabs then still fit on one row, so the
+                    // tab bar does not wrap onto a second line.
                     let button = egui::Button::new(
                         egui::RichText::new(tab.icon)
-                            .size(if self.icon_only_mode || self.collapsed { 20.0 } else { 18.0 })
+                            .size(if self.icon_only_mode || self.collapsed { 18.0 } else { 16.0 })
                             .color(if is_active { egui::Color32::WHITE } else { egui::Color32::GRAY })
                     )
                     .fill(if is_active { egui::Color32::from_gray(60) } else if is_hovered { egui::Color32::from_gray(40) } else { egui::Color32::TRANSPARENT })
                     .corner_radius(4.0)
-                    .min_size(egui::vec2(40.0, 40.0));
+                    .min_size(egui::vec2(34.0, 34.0));
                     
                     let response = ui.add(button);
                     
@@ -794,9 +808,9 @@ impl VerticalToolbar {
                     }
                 }
             });
-            
             ui.separator();
-            
+            }
+
             // Active tab content
             if !self.collapsed {
                 // Clone so render_button can take &mut self for the texture cache.
@@ -809,32 +823,64 @@ impl VerticalToolbar {
         });
     }
     
-    /// Render one toolbar button, using the rcad-icons artwork when available
-    /// and the text/emoji fallback otherwise.
+    /// Screen rect of a toolbar button as drawn in the last frame.
+    pub fn button_rect(&self, action: &ToolbarAction) -> Option<egui::Rect> {
+        self.button_rects.get(action).copied()
+    }
+
+    /// Render one toolbar button: icon and label on a single line, with the
+    /// keyboard shortcut in brackets, e.g. "Box (B)".
+    ///
+    /// In compact mode only the icon is drawn.
     fn render_button(&mut self, ui: &mut egui::Ui, button: &ToolbarButton, on_action: &mut dyn FnMut(ToolbarAction)) {
         let is_compact = self.icon_only_mode || self.collapsed;
-        let theme = self.theme;
         let texture = button
             .icon_id
             .as_deref()
-            .and_then(|id| self.icon_textures.get(ui.ctx(), id, theme));
+            .and_then(|id| self.icon_textures.get(ui.ctx(), id, self.theme));
 
-        let icon_size = if is_compact { 24.0 } else { 20.0 };
-        let button_size = if is_compact {
-            egui::vec2(40.0, 40.0)
-        } else {
-            egui::vec2(36.0, 36.0)
+        let icon_size = if is_compact { 24.0 } else { 16.0 };
+        let label = match &button.shortcut {
+            Some(shortcut) => format!("{} ({shortcut})", button.label),
+            None => button.label.clone(),
         };
 
-        // Real artwork when rcad-icons ships this id, emoji otherwise.
+        // Real rcad-icons artwork when available, emoji otherwise. In full mode
+        // the image and the label live inside one button, so the text sits
+        // directly beside the icon on the same line.
         let widget = match &texture {
-            Some(texture) => egui::Button::image(
-                egui::Image::from_texture(texture)
-                    .fit_to_exact_size(egui::vec2(icon_size, icon_size)),
-            ),
-            None => egui::Button::new(egui::RichText::new(button.icon).size(icon_size)),
+            Some(texture) => {
+                let image = egui::Image::from_texture(texture)
+                    .fit_to_exact_size(egui::vec2(icon_size, icon_size));
+                if is_compact {
+                    egui::Button::image(image)
+                } else {
+                    egui::Button::image_and_text(image, egui::RichText::new(label).size(11.0))
+                }
+            }
+            None => {
+                let text = if is_compact {
+                    egui::RichText::new(button.icon).size(icon_size)
+                } else {
+                    egui::RichText::new(format!("{} {label}", button.icon)).size(11.0)
+                };
+                egui::Button::new(text)
+            }
         };
-        let widget = widget.min_size(button_size).corner_radius(4.0);
+
+        // frame(false): the commands sit directly on the panel instead of in a
+        // grey box, matching the model tree.
+        let widget = if is_compact {
+            widget
+                .frame(false)
+                .min_size(egui::vec2(40.0, 40.0))
+                .corner_radius(4.0)
+        } else {
+            widget
+                .frame(false)
+                .min_size(egui::vec2(ui.available_width(), 22.0))
+                .corner_radius(4.0)
+        };
 
         let tooltip = match (&button.tooltip, &button.shortcut) {
             (Some(tip), Some(shortcut)) => format!("{tip} ({shortcut})"),
@@ -843,32 +889,11 @@ impl VerticalToolbar {
             (None, None) => button.label.clone(),
         };
 
-        if is_compact {
-            let response = ui.add(widget).on_hover_text(tooltip);
-            if response.clicked() {
-                on_action(button.action.clone());
-            }
-            return;
+        let response = ui.add(widget).on_hover_text(tooltip);
+        self.button_rects.insert(button.action.clone(), response.rect);
+        if response.clicked() {
+            on_action(button.action.clone());
         }
-
-        // Full mode: icon + label + shortcut
-        ui.horizontal(|ui| {
-            let response = ui.add(widget).on_hover_text(tooltip.clone());
-            if response.clicked() {
-                on_action(button.action.clone());
-            }
-            ui.vertical_centered_justified(|ui| {
-                ui.label(egui::RichText::new(&button.label).size(13.0).strong());
-                if let Some(shortcut) = &button.shortcut {
-                    ui.label(
-                        egui::RichText::new(shortcut)
-                            .size(10.0)
-                            .color(egui::Color32::GRAY)
-                            .monospace(),
-                    );
-                }
-            });
-        });
     }
 }
 #[cfg(test)]
@@ -923,10 +948,76 @@ mod icon_tests {
             }
         }
 
-        assert!(checked > 20, "expected to check many icons, checked {checked}");
+        // The left palette is the Model tab only, so this is a smaller set now.
+        assert!(checked > 10, "expected to check many icons, checked {checked}");
         assert!(
             missing.is_empty(),
             "toolbar icons missing from rcad-icons: {missing:?}"
         );
+    }
+
+    /// Sketching starts from the main palette, and the Sketch and Analysis tabs
+    /// were replaced by the floating quick bar.
+    #[test]
+    fn the_model_tab_starts_with_sketch_then_box() {
+        let toolbar = VerticalToolbar::default();
+        assert!(
+            !toolbar.tabs.iter().any(|tab| tab.name == "Sketch"),
+            "the Sketch tab should have moved to the floating bar"
+        );
+        assert!(
+            !toolbar.tabs.iter().any(|tab| tab.name == "Analysis"),
+            "the Analysis tab should have moved to the floating bar"
+        );
+        let first_two: Vec<&str> = toolbar.tabs[0]
+            .buttons
+            .iter()
+            .take(2)
+            .map(|button| button.label.as_str())
+            .collect();
+        assert_eq!(first_two, vec!["Sketch", "Box"]);
+    }
+
+    /// The model tree draws a type icon per feature; every kind must resolve.
+    #[test]
+    fn every_feature_kind_has_an_icon() {
+        use rcad_doc::{ConstructionKind, FeatureKind};
+        use rcad_geom::{BooleanOp, Profile2D};
+
+        let profile = Profile2D {
+            outer: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            holes: Vec::new(),
+        };
+        let kinds = vec![
+            FeatureKind::Box { size: [1.0, 1.0, 1.0] },
+            FeatureKind::Cylinder { radius: 1.0, height: 1.0 },
+            FeatureKind::Extrude { profile: profile.clone(), height: 1.0 },
+            FeatureKind::ExtrudeSurface { profile: profile.clone(), height: 1.0 },
+            FeatureKind::Revolve { profile: profile.clone(), angle_deg: 90.0 },
+            FeatureKind::Boolean { tool_feature: uuid::Uuid::new_v4(), op: BooleanOp::Union },
+            FeatureKind::Boolean { tool_feature: uuid::Uuid::new_v4(), op: BooleanOp::Subtract },
+            FeatureKind::Boolean { tool_feature: uuid::Uuid::new_v4(), op: BooleanOp::Intersect },
+            FeatureKind::Translate { delta: [1.0, 0.0, 0.0] },
+            FeatureKind::Fillet { radius: 1.0 },
+            FeatureKind::Chamfer { distance: 1.0 },
+            FeatureKind::Sew { tolerance: 0.1 },
+            FeatureKind::Loft { profiles: vec![profile.clone()], solid: true },
+            FeatureKind::Boundary { u_curves: vec![profile.clone()], v_curves: vec![profile] },
+            FeatureKind::Thicken { surface_feature: uuid::Uuid::new_v4(), distance: 1.0, both_sides: false },
+            FeatureKind::Construction { kind: ConstructionKind::Plane, origin: [0.0; 3], direction: [0.0, 0.0, 1.0] },
+            FeatureKind::Construction { kind: ConstructionKind::Axis, origin: [0.0; 3], direction: [1.0, 0.0, 0.0] },
+            FeatureKind::Construction { kind: ConstructionKind::Point, origin: [0.0; 3], direction: [0.0, 1.0, 0.0] },
+            FeatureKind::Construction { kind: ConstructionKind::Curve, origin: [0.0; 3], direction: [0.0, 0.0, 1.0] },
+            FeatureKind::Construction { kind: ConstructionKind::Solid, origin: [0.0; 3], direction: [0.0, 0.0, 1.0] },
+            FeatureKind::Construction { kind: ConstructionKind::CoordSystem, origin: [0.0; 3], direction: [0.0, 0.0, 1.0] },
+        ];
+
+        for kind in kinds {
+            let id = feature_kind_icon_id(&kind).expect("every kind maps to an icon");
+            assert!(
+                icon_png(id, IconTheme::Light).is_some() && icon_png(id, IconTheme::Dark).is_some(),
+                "{kind:?} maps to missing icon {id}"
+            );
+        }
     }
 }

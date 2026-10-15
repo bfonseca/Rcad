@@ -7,6 +7,8 @@ use eframe::egui;
 use rcad_doc::{EntityId, Feature, Part};
 use std::collections::HashMap;
 
+use super::toolbar::{feature_kind_icon_id, IconTextures, IconTheme};
+
 /// State for a tree node (expanded/collapsed)
 #[derive(Debug, Clone, Default)]
 pub struct TreeNodeState {
@@ -35,6 +37,10 @@ pub struct HistoryOverlay {
     pub min_width: f32,
     pub max_width: f32,
     pub resizing: bool,               // Whether user is dragging resize handle
+    /// Shared rcad-icons textures for the per-feature type buttons.
+    icon_textures: IconTextures,
+    /// Screen rect of each feature type button, for the interaction tests.
+    type_button_rects: HashMap<EntityId, egui::Rect>,
 }
 
 impl Default for HistoryOverlay {
@@ -58,6 +64,8 @@ impl Default for HistoryOverlay {
             min_width: 200.0,
             max_width: 500.0,
             resizing: false,
+            icon_textures: IconTextures::default(),
+            type_button_rects: HashMap::new(),
         }
     }
 }
@@ -106,6 +114,11 @@ impl HistoryOverlay {
         self.context_menu_feature = None;
     }
     
+    /// Screen rect of a feature type button as drawn in the last frame.
+    pub fn type_button_rect(&self, feature: EntityId) -> Option<egui::Rect> {
+        self.type_button_rects.get(&feature).copied()
+    }
+
     /// Render the history overlay
     pub fn show(
         &mut self,
@@ -116,6 +129,7 @@ impl HistoryOverlay {
         if !self.visible {
             return;
         }
+        self.type_button_rects.clear();
         
         // Handle collapsed state - show only header bar at top
         if self.collapsed {
@@ -310,12 +324,7 @@ impl HistoryOverlay {
         let suppression_icon = if is_suppressed { "⛔" } else { "✅" };
         let suppression_color = if is_suppressed { egui::Color32::GRAY } else { egui::Color32::WHITE };
         
-        // Relations/parameters indicator
-        let has_relations = !feature.parameters.numeric.is_empty()
-            || !feature.parameters.string.is_empty()
-            || !feature.parameters.boolean.is_empty();
-        let relations_icon = "⚙";
-        
+
         // Indent based on depth
         let indent = depth as f32 * 16.0;
         
@@ -358,9 +367,35 @@ impl HistoryOverlay {
                on_action(HistoryOverlayAction::ToggleSuppression(feature.id));
            }
            
-           // Feature name (no icon on left)
+           // Feature type icon: opens the feature dialog (parameters and
+           // relations) - the equivalent of Creo's Edit Definition.
+           let icon_theme = if ui.visuals().dark_mode {
+               IconTheme::Dark
+           } else {
+               IconTheme::Light
+           };
+           let type_icon = feature_kind_icon_id(&feature.kind)
+               .and_then(|id| self.icon_textures.get(ui.ctx(), id, icon_theme));
+           let type_response = match &type_icon {
+               Some(texture) => ui.add(
+                   egui::Button::image(
+                       egui::Image::from_texture(texture)
+                           .fit_to_exact_size(egui::vec2(16.0, 16.0)),
+                   )
+                   .frame(false),
+               ),
+               None => ui.small_button(egui::RichText::new("⚙").size(13.0)),
+           }
+           .on_hover_text("Parameters & relations");
+           self.type_button_rects
+               .insert(feature.id, type_response.rect);
+           if type_response.clicked() {
+               on_action(HistoryOverlayAction::OpenRelationsDialog(feature.id));
+           }
+
+           // Feature name
            let mut label = egui::RichText::new(&feature.name)
-               .size(13.0)
+               .size(12.0)
                .color(label_color);
            if strikethrough {
                label = label.strikethrough();
@@ -390,15 +425,6 @@ impl HistoryOverlay {
             if response.hovered() && ui.input(|i| i.pointer.any_released()) {
                 on_action(HistoryOverlayAction::DropFeature(feature.id));
             }
-            
-            // Relations/Parameters icon (right side)
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let rel_response = ui.small_button(egui::RichText::new(relations_icon).size(14.0).color(egui::Color32::WHITE))
-                    .on_hover_text("Relations & Parameters");
-                if rel_response.clicked() {
-                    on_action(HistoryOverlayAction::OpenRelationsDialog(feature.id));
-                }
-            });
             
             // External reference indicator
             if feature.parameters.string.contains_key("is_external_ref") {

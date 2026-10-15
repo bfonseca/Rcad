@@ -239,18 +239,25 @@ pub fn draw_viewport(
      selected_triangle: Option<usize>,
      selected_construction: Option<usize>,
      part: Option<&Part>,
+    show_grid: bool,
+    grid_spacing: f32,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
-    // Middle mouse button drag = Orbit
+    // Middle mouse button drag = Orbit.
+    //
+    // drag_motion() uses the raw, unaccelerated pointer motion, which - unlike
+    // drag_delta() - is not clamped by the screen edges. With drag_delta() the
+    // rotation stopped as soon as the cursor reached the edge of the screen and
+    // the user had to let go and start a new drag to keep turning.
     if response.dragged_by(egui::PointerButton::Middle) {
-        let d = response.drag_delta();
+        let d = response.drag_motion();
         camera.orbit(glam::Vec2::new(d.x, d.y));
     }
-    
+
     // Right mouse button drag = Pan (only when dragged, not clicked)
     if response.dragged_by(egui::PointerButton::Secondary) {
-        let d = response.drag_delta();
+        let d = response.drag_motion();
         camera.pan(glam::Vec2::new(d.x, d.y));
     }
     
@@ -268,8 +275,10 @@ pub fn draw_viewport(
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_rgb(28, 30, 34));
 
-    // Ground grid
-    draw_grid(&painter, rect, camera);
+    // Ground grid (optional, spacing from the application settings)
+    if show_grid {
+        draw_grid(&painter, rect, camera, grid_spacing);
+    }
 
     if let Some(tint) = underlay_tint {
         painter.rect_filled(
@@ -321,12 +330,18 @@ fn project(vp: Mat4, rect: Rect, p: Vec3) -> Option<Pos2> {
     Some(Pos2::new(x, y))
 }
 
-fn draw_grid(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
+/// Ground grid in the XY plane (Z = 0), since Z is up.
+///
+/// The spacing is a user setting; the extent stays fixed so the grid always
+/// covers the visible area.
+fn draw_grid(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera, spacing: f32) {
+    const EXTENT: f32 = 100.0;
+    let spacing = if spacing > 0.0 { spacing } else { 10.0 };
+    let steps = (EXTENT / spacing).round().max(1.0) as i32;
     let vp = view_proj(rect, camera);
     let stroke = Stroke::new(1.0_f32, Color32::from_rgb(50, 54, 60));
-    // Ground grid in XY plane (Z=0) since Z is up
-    for i in -10..=10 {
-        let t = i as f32 * 10.0;
+    for i in -steps..=steps {
+        let t = i as f32 * spacing;
         if let (Some(a), Some(b)) = (
             project(vp, rect, Vec3::new(t, -100.0, 0.0)),
             project(vp, rect, Vec3::new(t, 100.0, 0.0)),
@@ -438,7 +453,8 @@ fn draw_mesh(painter: &egui::Painter, rect: Rect, mesh: &TriangleMesh, camera: &
              continue; // back-face
          }
          let light = Vec3::new(0.4, 0.8, 0.5).normalize();
-         let shade = (n.dot(light).clamp(0.15, 1.0) * 220.0) as u8;
+         // Ambient floor of 0.3 keeps unlit faces readable instead of near-black.
+        let shade = (n.dot(light).clamp(0.3, 1.0) * 220.0) as u8;
          let mut color = Color32::from_rgb(shade, shade.saturating_add(10), shade.saturating_add(30));
          
          // Highlight selected triangle
@@ -560,11 +576,16 @@ fn draw_datum_plane(
     if projected.len() == 4 {
         let center = (corners[0] + corners[1] + corners[2] + corners[3]) / 4.0;
         
-        // Use a distinctive color for planes - transparent solid
+        // Datum planes are a faint tint plus an outline. These used
+        // from_rgba_premultiplied() with un-premultiplied values, which
+        // saturated the fill and hid the model behind seven opaque rectangles.
         let (base_color, edge_color) = if is_selected {
-            (Color32::from_rgba_premultiplied(100, 200, 255, 180), Color32::YELLOW)
+            (Color32::from_rgba_unmultiplied(120, 200, 255, 64), Color32::YELLOW)
         } else {
-            (Color32::from_rgba_premultiplied(100, 180, 255, 100), Color32::from_rgb(100, 200, 255))
+            (
+                Color32::from_rgba_unmultiplied(110, 180, 255, 22),
+                Color32::from_rgb(90, 150, 215),
+            )
         };
         
         // Draw filled quad with transparency (transparent solid)
@@ -576,8 +597,9 @@ fn draw_datum_plane(
             painter.line_segment([projected[i], projected[(i + 1) % 4]], Stroke::new(edge_width, edge_color));
         }
         
-        // Draw center label
-        if let Some(center_pos) = project(vp, rect, center) {
+        // Label only the selected plane: naming all seven at once buried the
+        // model under overlapping text.
+        if let Some(center_pos) = project(vp, rect, center).filter(|_| is_selected) {
             painter.text(
                 center_pos + Vec2::new(0.0, -20.0),
                 egui::Align2::CENTER_CENTER,
