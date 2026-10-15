@@ -139,6 +139,31 @@ def dist(root):
     print("wrote", len(kit.REGISTRY), "icons x", len(kit.THEMES), "themes")
 
 
+def sprite(theme, out):
+    """Write every icon as an inline <symbol> in one theme sprite file.
+
+    Output format: one <symbol id="<category>-<name>"> per line, matching what
+    crates/rcad-app/src/ui/toolbar.rs parses at compile time.
+    """
+    load_icons()
+    head = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">')
+    body = []
+    for cat, name, _label, fn in kit.REGISTRY:
+        svg = render_svg(cat, name, fn, theme)
+        inner = svg[svg.index(">") + 1:svg.rindex("</svg>")]
+        body.append(f'<symbol id="{cat}-{name}" viewBox="0 0 32 32">{inner}</symbol>')
+    with open(out, "w") as f:
+        f.write(head + "\n" + "\n".join(body) + "\n</svg>\n")
+    print(out, len(kit.REGISTRY), "symbols", theme)
+
+
+def sprites(root):
+    """Write sprite-light.svg and sprite-dark.svg (used by the desktop app)."""
+    for theme in kit.THEMES:
+        sprite(theme, os.path.join(root, f"sprite-{theme}.svg"))
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "sheet":
@@ -147,3 +172,5 @@ if __name__ == "__main__":
         zoom(sys.argv[2], sys.argv[4:], sys.argv[3])
     elif cmd == "dist":
         dist(sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "..", "dist"))
+    elif cmd == "sprites":
+        sprites(sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, ".."))

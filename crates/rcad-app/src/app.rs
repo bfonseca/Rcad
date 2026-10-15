@@ -4,8 +4,8 @@ use crate::camera::OrbitCamera;
 use crate::undo::UndoStack;
 use crate::shortcuts::{Shortcuts, handle_shortcuts, shortcuts_list};
 use crate::ui::{VerticalToolbar, ToolbarAction, HistoryOverlay, HistoryOverlayAction};
-use rcad_geom::TriangleMesh;
-use rcad_doc::{self, Project, Feature, FeatureKind, ConstructionKind, Part, RebuildResult};
+use rcad_geom::{GeometryBackend, TriangleMesh};
+use rcad_doc::{Project, Feature, FeatureKind, ConstructionKind, Part};
 use rcad_features;
 use rcad_occt::OcctBackend;
 use rcad_param::{ShapeCache};
@@ -72,6 +72,9 @@ pub struct RcadApp {
     kernel_worker_rx: Option<Receiver<RebuildResponse>>,
     kernel_version: Arc<AtomicU64>,
     kernel_worker_handle: Option<thread::JoinHandle<()>>,
+    /// Set whenever the part tree changes. The kernel worker only rebuilds
+    /// when this is set; previously a job was queued on *every frame*.
+    needs_rebuild: bool,
 }
 
 impl RcadApp {
@@ -88,6 +91,9 @@ impl RcadApp {
                 let mut cache = ShapeCache::new();
                 while let Ok(job) = job_rx.recv() {
                     // Check if a newer job was already queued; skip stale frames
+                    // Versions are 1-based: a queued job is stale only when a
+                    // strictly newer one has been requested. The old check used
+                    // the pre-increment value, so it discarded every job.
                     if job.version < version_worker.load(Ordering::Relaxed) {
                         continue;
                     }
@@ -134,6 +140,7 @@ impl RcadApp {
             kernel_worker_rx: Some(res_rx),
             kernel_version: version_counter,
             kernel_worker_handle: Some(kernel_worker_handle),
+            needs_rebuild: true,
         };
         
         // Create default datum geometry (coordinate system + datum planes) for new part
@@ -248,17 +255,48 @@ impl RcadApp {
         Ok(())
     }
 
-    fn export_stl_internal(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        // For now, we'll just export a placeholder - in a real implementation,
-        // we would use OCCT to write STL from the current solid
-        std::fs::write(path, "solid rcad_export\n  facet normal 0.0 0.0 0.0\n    outer loop\n      vertex 0.0 0.0 0.0\n      vertex 0.0 0.0 0.0\n      vertex 0.0 0.0 0.0\n    endloop\n  endfacet\nendsolid rcad_export\n")?;
+    /// Rebuild the active part in the app-owned kernel and return the shape ids
+    /// of the resulting body chain (last entry = active body).
+    fn export_shape_ids(&mut self) -> Result<Vec<rcad_geom::ShapeId>, String> {
+        let part = self
+            .get_active_part()
+            .cloned()
+            .ok_or_else(|| "no active part".to_string())?;
+        let result = rcad_param::rebuild_part(&part, &mut self.occt_backend);
+        let ids: Vec<rcad_geom::ShapeId> = result.shapes.iter().map(|(_, id)| *id).collect();
+        if ids.is_empty() {
+            let detail = if result.errors.is_empty() {
+                "the part contains no solid body".to_string()
+            } else {
+                result.errors.join("; ")
+            };
+            return Err(format!("nothing to export: {detail}"));
+        }
+        if !result.errors.is_empty() {
+            self.last_error = Some(format!(
+                "Exported with warnings, some features failed: {}",
+                result.errors.join("; ")
+            ));
+        }
+        Ok(ids)
+    }
+
+    /// Write the active body as binary/ASCII STL through the OCCT kernel.
+    ///
+    /// This used to write a hard-coded single-degenerate-triangle file, so
+    /// "Export STL" silently produced a useless document.
+    fn export_stl_internal(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let ids = self.export_shape_ids()?;
+        let body = *ids.last().expect("export_shape_ids checked non-empty");
+        self.occt_backend.write_stl(&[body], path)?;
         Ok(())
     }
 
-    fn export_step_internal(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        // For now, we'll just export a placeholder - in a real implementation,
-        // we would use OCCT to write STEP from the current solid
-        std::fs::write(path, "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('rcad STEP export'),'1');\nFILE_NAME('rcad_export.step','2023-01-01T00:00:00',(''),(''),'rcad','rcad');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN')); \nENDSEC;\nDATA;\nENDSEC;\nENDSEC;\nEND-ISO-10303-21;")?;
+    /// Write the active body as STEP through the OCCT kernel.
+    fn export_step_internal(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let ids = self.export_shape_ids()?;
+        let body = *ids.last().expect("export_shape_ids checked non-empty");
+        self.occt_backend.write_step(&[body], path)?;
         Ok(())
     }
 
@@ -568,17 +606,24 @@ impl RcadApp {
                 }
             }
             
-            // Trigger async rebuild if needed (e.g., when project changes)
-            // For now, we'll trigger on every frame if there's a pending rebuild
-            // In a real app, you'd track dirty state
-            if let Some(tx) = &self.kernel_worker_tx {
-                let version = self.kernel_version.fetch_add(1, Ordering::Relaxed);
-                let part_clone_for_rebuild = self.get_active_part().cloned();
-                if let Some(part) = part_clone_for_rebuild {
-                    let _ = tx.try_send(RebuildJob {
-                        version,
-                        part,
-                    });
+            // Trigger the kernel worker only when the part tree actually
+            // changed. This block used to queue a full rebuild on every frame,
+            // keeping a core busy for the whole session.
+            if self.needs_rebuild {
+                let tx = self.kernel_worker_tx.clone();
+                if let Some(tx) = tx {
+                    match self.get_active_part().cloned() {
+                        Some(part) => {
+                            // Versions are 1-based so the worker can tell the
+                            // newest queued job from a superseded one.
+                            let version =
+                                self.kernel_version.fetch_add(1, Ordering::Relaxed) + 1;
+                            if tx.try_send(RebuildJob { version, part }).is_ok() {
+                                self.needs_rebuild = false;
+                            }
+                        }
+                        None => self.needs_rebuild = false,
+                    }
                 }
             }
         });
@@ -1098,15 +1143,13 @@ impl RcadApp {
         self.project.parts.get(0)
     }
 
+    /// Request a rebuild of the active part.
+    ///
+    /// The rebuild runs on the kernel worker thread, which owns the geometry
+    /// backend and the incremental `ShapeCache`. Marking the part dirty keeps
+    /// this cheap enough to call from every mutation site.
     fn rebuild_active_part(&mut self) {
-        if let Some(part) = self.get_active_part() {
-            let mut backend = rcad_occt::OcctBackend::default();
-            let result = rcad_param::rebuild_part(part, &mut backend);
-            self.mesh = result.display_mesh;
-            if !result.errors.is_empty() {
-                self.last_error = Some(result.errors.join("\n"));
-            }
-        }
+        self.needs_rebuild = true;
     }
 
     fn file_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1400,14 +1443,17 @@ impl RcadApp {
     }
     
     // Internal methods (renamed from original private methods)
-    fn extrude_sketch_internal(&mut self, _profile: rcad_geom::Profile2D, height: f64) -> Result<(), Box<dyn std::error::Error>> {
-        // Save state before modifying
+    fn extrude_sketch_internal(&mut self, profile: rcad_geom::Profile2D, height: f64) -> Result<(), Box<dyn std::error::Error>> {
+        if profile.outer.len() < 3 {
+            return Err("extrude needs a closed profile with at least 3 points".into());
+        }
         self.undo_stack.push(self.project.clone());
         if let Some(part) = self.get_active_part_mut() {
-            rcad_features::add_extrude_from_sketch(part, "Extrude", &Sketch::new(""), height);
-            // TODO: Actually use the profile from sketch - this is a placeholder
-            // For now, we'll just add a box to demonstrate
-            rcad_features::add_extrude_rect(part, "Extrude", 10.0, 10.0, height);
+            // Extrude the profile that was passed in. The previous version
+            // discarded it and appended a hard-coded 10 x 10 x height box, so
+            // every sketch produced the same prism.
+            let name = rcad_features::unique_feature_name(part, "Extrude");
+            rcad_features::add_extrude(part, &name, profile, height);
             self.rebuild_active_part();
         }
         Ok(())
@@ -1417,7 +1463,8 @@ impl RcadApp {
         // Save state before modifying
         self.undo_stack.push(self.project.clone());
         if let Some(part) = self.get_active_part_mut() {
-            rcad_features::add_revolve(part, "Revolve", profile, angle_deg);
+            let name = rcad_features::unique_feature_name(part, "Revolve");
+            rcad_features::add_revolve(part, &name, profile, angle_deg);
             self.rebuild_active_part();
         }
         Ok(())
@@ -1427,7 +1474,8 @@ impl RcadApp {
         // Save state before modifying
         self.undo_stack.push(self.project.clone());
         if let Some(part) = self.get_active_part_mut() {
-            rcad_features::add_box(part, "Box", [10.0, 10.0, 10.0]);
+            let name = rcad_features::unique_feature_name(part, "Box");
+            rcad_features::add_box(part, &name, [10.0, 10.0, 10.0]);
             self.rebuild_active_part();
         }
         Ok(())
@@ -1833,6 +1881,9 @@ impl Default for RcadApp {
                 let mut backend = rcad_occt::OcctBackend::default();
                 let mut cache = ShapeCache::new();
                 while let Ok(job) = job_rx.recv() {
+                    // Versions are 1-based: a queued job is stale only when a
+                    // strictly newer one has been requested. The old check used
+                    // the pre-increment value, so it discarded every job.
                     if job.version < version_worker.load(Ordering::Relaxed) {
                         continue;
                     }
@@ -1879,6 +1930,7 @@ impl Default for RcadApp {
             kernel_worker_rx: Some(res_rx),
             kernel_version: version_counter,
             kernel_worker_handle: Some(kernel_worker_handle),
+            needs_rebuild: true,
         }
     }
 }

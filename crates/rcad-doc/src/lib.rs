@@ -478,11 +478,45 @@ pub enum MateKind {
 /// Runtime rebuild output (not persisted).
 #[derive(Debug, Clone, Default)]
 pub struct RebuildResult {
+    /// Shapes produced by the body features, in evaluation order. The last
+    /// entry is the active body, which is what STEP/STL export should use.
+    /// Construction geometry (planes, axes, points) is excluded.
     pub shapes: Vec<(EntityId, ShapeId)>,
+    /// Tessellated mesh of the active body plus any visible construction
+    /// geometry, ready for the viewport.
     pub display_mesh: rcad_geom::TriangleMesh,
+    /// Human-readable errors, one per feature that failed to evaluate.
     pub errors: Vec<String>,
 }
 
 pub fn dvec3_from(a: [f64; 3]) -> DVec3 {
     DVec3::new(a[0], a[1], a[2])
+}
+
+#[cfg(test)]
+mod project_io_tests {
+    use super::*;
+
+    #[test]
+    fn project_round_trips_through_the_native_format() {
+        let mut project = Project::new("RoundTrip");
+        let mut part = Part::new_solid("Bracket");
+        part.features.push(Feature::new(
+            "Base",
+            FeatureKind::Box {
+                size: [10.0, 20.0, 30.0],
+            },
+        ));
+        project.parts = vec![part];
+
+        let path = std::env::temp_dir().join("rcad_project_roundtrip.rcad");
+        project.save(&path).expect("save");
+        let loaded = Project::load(&path).expect("load");
+
+        assert_eq!(loaded.name, "RoundTrip");
+        assert_eq!(loaded.parts.len(), 1);
+        assert_eq!(loaded.parts[0].name, "Bracket");
+        assert_eq!(loaded.parts[0].features.len(), 1);
+        assert_eq!(loaded.parts[0].features[0].name, "Base");
+    }
 }

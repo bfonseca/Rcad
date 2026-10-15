@@ -41,11 +41,6 @@ impl OcctBackend {
             .ok_or(GeomError::UnknownShape(id))
     }
 
-    fn take(&mut self, id: ShapeId) -> GeomResult<Solid> {
-        self.solids
-            .remove(&id.0)
-            .ok_or(GeomError::UnknownShape(id))
-    }
 
     fn profile_edges(profile: &Profile2D) -> GeomResult<Vec<Edge>> {
         if profile.outer.len() < 3 {
@@ -206,8 +201,9 @@ impl GeometryBackend for OcctBackend {
     }
 
     fn write_stl(&mut self, shapes: &[ShapeId], path: &Path) -> GeomResult<()> {
-        let mesh = self.mesh_of(shapes)?;
-        // Rebuild cadrum mesh path via tessellation of solids for proper STL writer
+        // Tessellate once. The previous version built a TriangleMesh via
+        // mesh_of() and then immediately discarded it, tessellating a second
+        // time for the writer.
         let solids: GeomResult<Vec<Solid>> =
             shapes.iter().map(|id| self.get(*id).cloned()).collect();
         let solids = solids?;
@@ -217,7 +213,6 @@ impl GeometryBackend for OcctBackend {
         cmesh
             .write_stl(&mut file)
             .map_err(|e| GeomError::Backend(e.to_string()))?;
-        let _ = mesh;
         Ok(())
     }
 
@@ -329,5 +324,24 @@ mod tests {
         let mesh = backend.tessellate(id).unwrap();
         assert!(!mesh.is_empty());
         assert!(mesh.triangle_count() > 0);
+    }
+
+    #[test]
+    fn box_exports_real_step_and_stl_files() {
+        let mut backend = OcctBackend::new();
+        let id = backend.box_solid(dvec3(10.0, 20.0, 30.0)).unwrap();
+        let dir = std::env::temp_dir();
+        let step_path = dir.join("rcad_box_export.step");
+        let stl_path = dir.join("rcad_box_export.stl");
+
+        backend.write_step(&[id], &step_path).unwrap();
+        backend.write_stl(&[id], &stl_path).unwrap();
+
+        let step = std::fs::read_to_string(&step_path).unwrap();
+        assert!(step.contains("ISO-10303-21"), "not a STEP file");
+        assert!(
+            std::fs::metadata(&stl_path).unwrap().len() > 100,
+            "the STL file is empty"
+        );
     }
 }

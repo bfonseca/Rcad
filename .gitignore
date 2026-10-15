@@ -1,9 +1,23 @@
+# Rust build output
 /target/
 **/*.rs.bk
 .cargo/
+
+# Generated CAD / mesh exports
 *.step
 *.stl
 *.glb
 *.brep
+
+# Editor / OS noise
 .DS_Store
 *.swp
+
+# Tooling virtualenvs and caches
+.venv/
+__pycache__/
+
+# NOTE: rcad-icons ships real source assets (*.svg / *.png). The desktop app
+# embeds rcad-icons/png/64/<theme>/<category>/<name>.png at compile time (see
+# crates/rcad-app/build.rs), so those must stay tracked. Do not add a global
+# "*.svg" / "*.png" ignore here: doing so makes a fresh clone fail to build.

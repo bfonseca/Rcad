@@ -195,13 +195,23 @@ The project manifest `rcad.toml` controls:
 - **File extensions** and OS association
 - **MCP Server** (enabled, TCP port, allow write, timeout)
 
-## MCP Server (AI Integration) - Planned
+## MCP Server (AI Integration)
 
-The `rcad-mcp` crate will provide a separate binary implementing the Model Context Protocol:
-- **Resources**: Project, parts, sketches, features, assemblies
-- **Tools**: create_part, add_sketch, add_extrude, add_revolve, add_boolean, create_assembly, add_mate, export_step, export_stl, get_project_state
-- **Prompts**: Common workflows (new_part_from_sketch, create_assembly_from_parts, etc.)
-- **Transport**: stdio (default) or TCP for headless/CI use
+`rcad-mcp` is a self-contained Model Context Protocol server (JSON-RPC 2.0 over
+stdio, one message per line). It lets an AI assistant build and export models
+without the GUI:
+
+```bash
+cargo run --package rcad-mcp -- --allow-write true --project my_part.rcad
+```
+
+- **Tools**: `get_project_state`, `new_project`, `create_part`, `save_project`,
+  `load_project`, `add_box`, `add_cylinder`, `add_extrude`, `add_revolve`,
+  `add_boolean`, `rebuild`, `export_step`, `export_stl`
+- **Resources**: `rcad://project`, `rcad://project/parts`, `rcad://project/features`
+- **Transport**: stdio. `--allow-write false` exposes a read-only server.
+
+Still to come: assembly tools and MCP prompts.
 
 ## Project Structure
 
@@ -242,7 +252,10 @@ MIT License - see [LICENSE](LICENSE) for details.
 - [egui](https://github.com/emilk/egui) - Immediate mode GUI
 - [glam](https://github.com/bitshifter/glam-rs) - Linear algebra
 - [calamine](https://github.com/tafia/calamine) - Excel/CSV parsing
-- [mcp-rs](https://github.com/modelcontextprotocol/rust-sdk) - MCP SDK
+
+The MCP server is implemented directly on `serde_json`, and the toolbar renders the
+committed rcad-icons PNGs (decoded with `image` and cached as egui textures), so no
+extra SDK or SVG rasteriser is needed.
 
 ## Roadmap
 
@@ -254,12 +267,15 @@ See [instructions.md](instructions.md) for detailed plan and milestones.
 - [x] Standard view shortcuts (1-7, Home)
 - [x] Core modeling (sketch, features, skeletons, underlay)
 - [x] Project manifest (rcad.toml)
+- [x] STEP/STL export through OCCT (wired to the real kernel)
+- [x] MCP server (`rcad-mcp`) with modelling tools and resources
+- [x] CI workflow (`ci/ci.yml`; move it into `.github/workflows/` to enable it)
+- [x] Committed icon sprites so a fresh clone builds
 - [ ] Assembly mates (Phase D)
 - [ ] UI polish: vertical toolbar + adaptive history overlay
 - [ ] rcad.toml integration in app
 - [ ] Trail logging (JSON Lines)
 - [ ] File extension registration
-- [ ] MCP Server crate
 - [ ] Documentation and example models
 - [ ] `good first issue` labels per crate
 
@@ -277,175 +293,26 @@ See [instructions.md](instructions.md) for detailed plan and milestones.
 **Repository**: https://github.com/bfonseca/Rcad
 **License**: MIT
 
-## Quick Start
+---
 
-### Prerequisites
-
-- Rust 1.75+ (install via [rustup](https://rustup.rs/))
-- System dependencies for OCCT:
-  - **Ubuntu/Debian**: `sudo apt-get install libocct-dev libglib2.0-dev`
-  - **Fedora**: `sudo dnf install occt-devel glib2-devel`
-  - **Arch**: `sudo pacman -S opencascade glib2`
-  - **macOS**: `brew install opencascade glib`
-  - **Windows**: Use vcpkg or download OCCT binaries
-
-### Building
+## Running the app
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/rcad.git
-cd rcad
+# Debug build (default member)
+cargo run --package rcad-app
 
-# Build release version
-cargo build --release
-
-# Run the application
+# Release build
 cargo run --release --package rcad-app
+
+# Headless MCP server on stdio
+cargo run --package rcad-mcp -- --allow-write true
 ```
 
-### Development
+The toolbar embeds `rcad-icons/sprite-light.svg` and `rcad-icons/sprite-dark.svg`
+at compile time. Both files are committed; if you change the icon generator,
+regenerate them with:
 
 ```bash
-# Run with debug logging
-RUST_LOG=rcad=debug cargo run --package rcad-app
-
-# Run tests
-cargo test --workspace
-
-# Check formatting
-cargo fmt --check
-
-# Run clippy
-cargo clippy --workspace
+cd rcad-icons/source
+python3 build.py sprites ..
 ```
-
-## Features
-
-### Sketching
-- Points, lines, circles, arcs, rectangles
-- Constraints: coincident, horizontal, vertical, parallel, perpendicular, tangent, equal, distance, angle
-- Dof (degrees of freedom) visualization
-- Constraint solving with Newton-Raphson
-
-### Part Design
-- Extrude (with draft, offset, symmetric)
-- Revolve
-- Fillet/Chamfer
-- Shell
-- Boolean operations (union, cut, intersect)
-- Patterns (linear, circular)
-- Mirror
-
-### Assembly
-- Mate constraints (coincident, parallel, perpendicular, tangent, distance, angle)
-- Sub-assemblies
-- Motion simulation
-- BOM generation
-
-### Import/Export
-- STEP (AP203/AP214/AP242)
-- STL (ASCII/Binary)
-- DXF (2D sketches)
-- OBJ (meshes)
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| 1 | Front view |
-| 2 | Back view |
-| 3 | Left view |
-| 4 | Right view |
-| 5 | Top view |
-| 6 | Bottom view |
-| 7 | Isometric view |
-| Home | Reset view |
-| Middle Mouse + Drag | Orbit |
-| Shift + Middle Mouse + Drag | Pan |
-| Scroll Wheel | Zoom |
-| Ctrl+N | New document |
-| Ctrl+O | Open document |
-| Ctrl+S | Save document |
-| Ctrl+Shift+S | Save As |
-| Ctrl+Shift+E | Export STL |
-| Ctrl+Shift+P | Export STEP |
-| Ctrl+Z | Undo |
-| Ctrl+Y / Ctrl+Shift+Z | Redo |
-| Delete | Delete selected |
-| K | New sketch |
-| Enter | Solve constraints |
-| P | Add point |
-| L | Add line |
-| R | Add rectangle |
-| E | Extrude sketch |
-| V | Revolve sketch |
-| B | Add box |
-| H | Suppress feature |
-| Ctrl+A | Select all |
-| Escape | Deselect |
-| F1 | Show shortcuts dialog |
-
-## Project Structure
-
-Each crate follows a consistent structure:
-```
-crate-name/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs          # Public API
-│   ├── [module].rs     # Implementation modules
-│   └── ...
-├── tests/              # Integration tests
-└── benches/            # Benchmarks (optional)
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Code Style
-- Follow Rust conventions (run `cargo fmt`)
-- Run `cargo clippy` before submitting
-- Write tests for new functionality
-- Update documentation for public APIs
-
-## License
-
-MIT License - see [LICENSE](LICENSE) for details.
-
-## Acknowledgments
-
-- [Open CASCADE Technology](https://www.opencascade.com/) - 3D modeling kernel
-- [egui](https://github.com/emilk/egui) - Immediate mode GUI
-- [glam](https://github.com/bitshifter/glam-rs) - Linear algebra
-- [nalgebra](https://nalgebra.org/) - Advanced math (in some crates)
-
-## Roadmap
-
-See [ROADMAP.md](ROADMAP.md) for planned features and milestones.
-
-### Phase E (Current)
-- [x] Keyboard shortcuts system
-- [x] Shortcuts dialog (F1)
-- [x] Standard view shortcuts (1-7, Home)
-- [ ] UI polish and theming
-- [ ] Documentation
-- [ ] Example models
-
-### Post-MVP
-- [ ] Mechanisms and motion
-- [ ] Collision detection
-- [ ] Animation timeline
-- [ ] CAE/FEA adapters
-
-### Infrastructure
-- [ ] CI/CD pipeline
-- [ ] WASM/web build
-- [ ] Automated releases
-
-### Starting the app
-- [ ] cd /home/bruno/Projectos/Rcad && cargo run --release --package rcad-app
