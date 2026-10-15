@@ -3,7 +3,10 @@ use crate::viewport::{draw_viewport, handle_picking, SelectionState};
 use crate::camera::{OrbitCamera, Projection};
 use crate::undo::UndoStack;
 use crate::shortcuts::{Shortcuts, handle_shortcuts, shortcuts_list};
-use crate::ui::{VerticalToolbar, ToolbarAction, HistoryOverlay, HistoryOverlayAction};
+use crate::ui::{
+    DatumKind, FloatingAction, FloatingBar, HistoryOverlay, HistoryOverlayAction, ToolbarAction,
+    VerticalToolbar,
+};
 use rcad_geom::{GeometryBackend, TriangleMesh};
 use rcad_doc::{Project, Feature, FeatureKind, ConstructionKind, Part};
 use rcad_features;
@@ -107,6 +110,10 @@ pub struct RcadApp {
     feature_dialog_tab: usize,
     /// Draft values for the feature dialog's "add parameter" row.
     new_parameter: NewParameterDraft,
+    /// Quick-action strip floating over the viewport.
+    floating_bar: FloatingBar,
+    /// Informational message for the status bar (measurement results etc).
+    status: Option<String>,
 }
 
 /// Transient state for the feature dialog's "add parameter" row.
@@ -186,6 +193,8 @@ impl RcadApp {
             needs_fit: true,
             feature_dialog_tab: 0,
             new_parameter: NewParameterDraft::default(),
+            floating_bar: FloatingBar::default(),
+            status: None,
         };
         
         // Create default datum geometry (coordinate system + datum planes) for new part
@@ -369,6 +378,7 @@ impl RcadApp {
         // Toolbar action handler
         let mut toolbar_action: Option<ToolbarAction> = None;
         let mut history_action: Option<HistoryOverlayAction> = None;
+        let mut floating_action: Option<FloatingAction> = None;
         
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -606,7 +616,10 @@ impl RcadApp {
                 ui.separator();
                 match &self.last_error {
                     Some(e) => ui.colored_label(egui::Color32::LIGHT_RED, e),
-                    None => ui.label("rcad - Open Source CAD in Rust"),
+                    None => match &self.status {
+                        Some(status) => ui.label(status),
+                        None => ui.label("rcad - Open Source CAD in Rust"),
+                    },
                 };
             });
         });
@@ -622,6 +635,13 @@ impl RcadApp {
             selection_state.selected_triangle = self.selected_triangle;
             
             let response = draw_viewport(ui, &self.mesh, &mut self.camera, None, self.selected_triangle, self.selected_construction_feature, part_clone.as_ref());
+
+            // Quick actions floating over the top of the viewport.
+            let sketching = self.sketch.is_some();
+            self.floating_bar
+                .show(ui, part_clone.as_ref(), sketching, &mut |action| {
+                    floating_action = Some(action);
+                });
             
             // Handle viewport picking
             if let Some(part) = part_clone.as_ref() {
@@ -716,6 +736,11 @@ impl RcadApp {
         // Process history overlay actions
         if let Some(action) = history_action {
             self.handle_history_action(action);
+        }
+
+        // Process floating quick-bar actions
+        if let Some(action) = floating_action {
+            self.handle_floating_action(action);
         }
         
         // Show relations dialog if requested
@@ -1273,41 +1298,40 @@ impl RcadApp {
     
     // ===== Public methods for keyboard shortcuts =====
     
+    // The camera stores an orientation, so a standard view is just the
+    // direction to look from. Straight up and straight down are exact, which a
+    // yaw/pitch camera could not represent.
     pub fn set_view_front(&mut self) {
-        self.camera.yaw = 0.0;
-        self.camera.pitch = 0.0;
+        self.camera.look_from(glam::Vec3::X);
     }
-    
+
     pub fn set_view_back(&mut self) {
-        self.camera.yaw = std::f32::consts::PI;
-        self.camera.pitch = 0.0;
+        self.camera.look_from(-glam::Vec3::X);
     }
-    
+
     pub fn set_view_left(&mut self) {
-        self.camera.yaw = -std::f32::consts::PI / 2.0;
-        self.camera.pitch = 0.0;
+        self.camera.look_from(-glam::Vec3::Z);
     }
-    
+
     pub fn set_view_right(&mut self) {
-        self.camera.yaw = std::f32::consts::PI / 2.0;
-        self.camera.pitch = 0.0;
+        self.camera.look_from(glam::Vec3::Z);
     }
-    
-    // Exact poles: the camera picks a fallback up vector there, so the views no
-    // longer need the 0.01 radian fudge that made them visually unstable.
+
     pub fn set_view_top(&mut self) {
-        self.camera.yaw = 0.0;
-        self.camera.pitch = std::f32::consts::FRAC_PI_2;
+        self.camera.look_from(glam::Vec3::Y);
     }
 
     pub fn set_view_bottom(&mut self) {
-        self.camera.yaw = 0.0;
-        self.camera.pitch = -std::f32::consts::FRAC_PI_2;
+        self.camera.look_from(-glam::Vec3::Y);
     }
-    
+
     pub fn set_view_iso(&mut self) {
-        self.camera.yaw = 0.7;
-        self.camera.pitch = 0.5;
+        let (yaw, pitch) = (0.7_f32, 0.5_f32);
+        self.camera.look_from(glam::Vec3::new(
+            pitch.cos() * yaw.cos(),
+            pitch.sin(),
+            pitch.cos() * yaw.sin(),
+        ));
     }
     
     pub fn reset_view(&mut self) {
@@ -1704,9 +1728,7 @@ impl RcadApp {
                 // TODO: Sub-assembly
             }
             
-            ToolbarAction::AnalysisMeasure => {
-                // TODO: Measure
-            }
+            ToolbarAction::AnalysisMeasure => self.measure_model(),
             ToolbarAction::AnalysisMassProperties => {
                 // TODO: Mass properties
             }
@@ -1754,6 +1776,72 @@ impl RcadApp {
     
     // ===== History Overlay Action Handlers =====
     
+    /// Handle a floating quick-bar action.
+    fn handle_floating_action(&mut self, action: FloatingAction) {
+        match action {
+            FloatingAction::ToggleDatums(kind) => self.toggle_datums(kind),
+            FloatingAction::Toolbar(action) => self.handle_toolbar_action(action),
+        }
+    }
+
+    /// Show or hide the datum features of one kind, or every kind.
+    pub fn set_datums_visible(&mut self, kind: Option<DatumKind>, visible: bool) {
+        if let Some(part) = self.get_active_part_mut() {
+            for feature in &mut part.features {
+                if let FeatureKind::Construction {
+                    kind: construction,
+                    ..
+                } = &feature.kind
+                {
+                    let selected = match kind {
+                        Some(wanted) => wanted.matches_construction(*construction),
+                        None => true,
+                    };
+                    if selected {
+                        feature.visible = visible;
+                    }
+                }
+            }
+        }
+        self.needs_rebuild = true;
+    }
+
+    /// Toggle a datum family: hide it when anything of that family is showing.
+    pub fn toggle_datums(&mut self, kind: Option<DatumKind>) {
+        let showing = match kind {
+            Some(kind) => self.datum_kind_shown(kind),
+            None => DatumKind::ALL.iter().any(|k| self.datum_kind_shown(*k)),
+        };
+        self.set_datums_visible(kind, !showing);
+    }
+
+    fn datum_kind_shown(&self, kind: DatumKind) -> bool {
+        let Some(part) = self.get_active_part() else {
+            return false;
+        };
+        part.features.iter().any(|feature| {
+            feature.visible
+                && matches!(&feature.kind, FeatureKind::Construction { kind: c, .. } if kind.matches_construction(*c))
+        })
+    }
+
+    /// Measure the model and report it in the status bar.
+    pub fn measure_model(&mut self) {
+        self.status = match self.mesh.bounds() {
+            Some((min, max)) => {
+                let size = max - min;
+                Some(format!(
+                    "Measure: bounding box {:.2} x {:.2} x {:.2}, {} triangles",
+                    size.x,
+                    size.y,
+                    size.z,
+                    self.mesh.triangle_count()
+                ))
+            }
+            None => Some("Measure: the part has no geometry yet".to_string()),
+        };
+    }
+
     fn handle_history_action(&mut self, action: HistoryOverlayAction) {
         use crate::ui::HistoryOverlayAction;
         
@@ -1979,6 +2067,8 @@ impl Default for RcadApp {
             needs_fit: true,
             feature_dialog_tab: 0,
             new_parameter: NewParameterDraft::default(),
+            floating_bar: FloatingBar::default(),
+            status: None,
         }
     }
 }
@@ -2197,19 +2287,68 @@ mod interaction_tests {
         );
     }
 
+    /// The floating bar toggles datum families one at a time or all together.
+    #[test]
+    fn toggling_datums_hides_and_shows_construction_geometry() {
+        let mut app = RcadApp::default();
+        let part = &mut app.project.parts[0];
+        part.features.push(Feature::new(
+            "FRONT_PLANE",
+            FeatureKind::Construction {
+                kind: ConstructionKind::Plane,
+                origin: [0.0; 3],
+                direction: [0.0, 0.0, 1.0],
+            },
+        ));
+        part.features.push(Feature::new(
+            "X_AXIS",
+            FeatureKind::Construction {
+                kind: ConstructionKind::Axis,
+                origin: [0.0; 3],
+                direction: [1.0, 0.0, 0.0],
+            },
+        ));
+
+        assert!(app.datum_kind_shown(DatumKind::Plane));
+        assert!(app.datum_kind_shown(DatumKind::Axis));
+
+        // One family at a time.
+        app.toggle_datums(Some(DatumKind::Plane));
+        assert!(!app.datum_kind_shown(DatumKind::Plane));
+        assert!(app.datum_kind_shown(DatumKind::Axis), "axes should be untouched");
+
+        // Every family at once: something was showing, so everything hides.
+        app.toggle_datums(None);
+        assert!(!app.datum_kind_shown(DatumKind::Plane));
+        assert!(!app.datum_kind_shown(DatumKind::Axis));
+
+        // And back on again.
+        app.toggle_datums(None);
+        assert!(app.datum_kind_shown(DatumKind::Plane));
+        assert!(app.datum_kind_shown(DatumKind::Axis));
+    }
+
     #[test]
     fn clicking_a_view_button_moves_the_camera() {
         let mut session = Session::new(RcadApp::default());
-        session.app.toolbar.set_active_tab(4);
+        let view_tab = session
+            .app
+            .toolbar
+            .tabs
+            .iter()
+            .position(|tab| tab.name == "View")
+            .expect("the View tab exists");
+        session.app.toolbar.set_active_tab(view_tab);
         session.frame();
 
-        session.app.camera.pitch = 0.0;
+        session.app.set_view_front();
         session.click_toolbar(ToolbarAction::ViewTop);
 
+        // The Top view looks straight down, so the eye sits above the target.
+        let eye_direction = (session.app.camera.eye() - session.app.camera.target).normalize();
         assert!(
-            (session.app.camera.pitch - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
-            "the Top view button did not move the camera: pitch = {}",
-            session.app.camera.pitch
+            (eye_direction - glam::Vec3::Y).length() < 1e-3,
+            "the Top view button did not move the camera: eye direction = {eye_direction:?}"
         );
     }
 }

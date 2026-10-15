@@ -450,10 +450,15 @@ impl Default for VerticalToolbar {
 impl VerticalToolbar {
     /// Create the default Creo-style tabs with buttons
     fn create_default_tabs() -> Vec<SimpleToolbarTab> {
-        vec![
+        let tabs = vec![
             // Model Tab
             SimpleToolbarTab::new("Model", "📦")
                 .add_buttons(vec![
+                    // Sketching starts from the main palette; the sketch tools
+                    // themselves live in the floating bar while a sketch is open.
+                    ToolbarButton::new("model_sketch", "📝", "Sketch", ToolbarAction::SketchNew)
+                        .with_shortcut("K")
+                        .with_tooltip("Create a new sketch"),
                     ToolbarButton::new("model_box", "📦", "Box", ToolbarAction::ModelBox)
                         .with_shortcut("B")
                         .with_tooltip("Create a box primitive"),
@@ -650,9 +655,15 @@ impl VerticalToolbar {
                     ToolbarButton::new("tools_customize", "🎨", "Customize", ToolbarAction::ToolsCustomize)
                         .with_tooltip("Customize toolbar"),
                 ]),
-        ]
+        ];
+
+        // The sketch tools and the analysis tools now live in the floating quick
+        // bar over the viewport, so those two tabs are not built here.
+        tabs.into_iter()
+            .filter(|tab| tab.name != "Sketch" && tab.name != "Analysis")
+            .collect()
     }
-    
+
     /// Get the currently active tab
     pub fn active_tab(&self) -> &SimpleToolbarTab {
         &self.tabs[self.active_tab]
@@ -920,6 +931,28 @@ mod icon_tests {
             missing.is_empty(),
             "toolbar icons missing from rcad-icons: {missing:?}"
         );
+    }
+
+    /// Sketching starts from the main palette, and the Sketch and Analysis tabs
+    /// were replaced by the floating quick bar.
+    #[test]
+    fn the_model_tab_starts_with_sketch_then_box() {
+        let toolbar = VerticalToolbar::default();
+        assert!(
+            !toolbar.tabs.iter().any(|tab| tab.name == "Sketch"),
+            "the Sketch tab should have moved to the floating bar"
+        );
+        assert!(
+            !toolbar.tabs.iter().any(|tab| tab.name == "Analysis"),
+            "the Analysis tab should have moved to the floating bar"
+        );
+        let first_two: Vec<&str> = toolbar.tabs[0]
+            .buttons
+            .iter()
+            .take(2)
+            .map(|button| button.label.as_str())
+            .collect();
+        assert_eq!(first_two, vec!["Sketch", "Box"]);
     }
 
     /// The model tree draws a type icon per feature; every kind must resolve.
