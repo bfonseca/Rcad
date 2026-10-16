@@ -412,6 +412,12 @@ pub fn face_colour(
     part?.face_colour(face_name?, manifest)
 }
 
+/// Mix `a` towards `b` by `t`, for highlights that do not hide the base colour.
+fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
+    let mix = |x: u8, y: u8| (x as f32 * (1.0 - t) + y as f32 * t).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
 /// Apply the viewport lighting to a project colour, so a coloured face still
 /// reads as a solid rather than a flat sticker.
 pub fn shaded_colour(rgb: [u8; 3], brightness: f32) -> Color32 {
@@ -477,10 +483,12 @@ fn draw_mesh(
          if let Some(name) = mesh.face_name(triangle_index) {
              let hovered = matches!(hover, Some(Selected::Face { reference, .. }) if reference == name);
              if hovered {
-                 color = HOVER_COLOUR;
+                 color = blend(color, HOVER_COLOUR, 0.35);
              }
              if selection.has_face(name) {
-                 color = SELECTED_COLOUR;
+                 // Tint, do not replace: a selected face must still show the
+                 // colour the project gave it.
+                 color = blend(color, SELECTED_COLOUR, 0.55);
              }
          }
          

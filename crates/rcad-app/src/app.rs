@@ -142,6 +142,9 @@ pub struct RcadApp {
     /// Set by `--demo-colours`: tag two visible demo faces with the project's
     /// first two colour ids once the mesh has been tessellated.
     pending_demo_colours: bool,
+    /// Set by `--select-demo-face`: after the demo colours are applied, select
+    /// the tagged face so a screenshot documents the selection bar.
+    pending_demo_select: bool,
     /// Set by `--save`: write the document once the model is built and the
     /// demo colours (if any) have been applied.
     pending_save: Option<PathBuf>,
@@ -240,6 +243,7 @@ impl RcadApp {
             project_error: None,
             new_colour_id: String::new(),
             pending_demo_colours: false,
+            pending_demo_select: false,
             pending_save: None,
             mesh_ready: false,
         };
@@ -1213,6 +1217,12 @@ impl RcadApp {
         self.pending_demo_colours = true;
     }
 
+    /// `--select-demo-face`: select the tagged face, for a screenshot that shows
+    /// the selection bar and the highlight.
+    pub fn select_demo_face_for_screenshot(&mut self) {
+        self.pending_demo_select = true;
+    }
+
     fn apply_pending_demo_colours(&mut self) {
         if !self.pending_demo_colours {
             return;
@@ -1230,6 +1240,17 @@ impl RcadApp {
         if let Some(part) = self.get_active_part_mut() {
             part.set_face_colour(top.clone(), ids[0].clone());
             part.set_face_colour(side.clone(), ids[1].clone());
+        }
+        // `--select-demo-face` (screenshots only): show the selection bar and
+        // the highlight on the face that was just tagged.
+        if self.pending_demo_select {
+            if let Some((triangle, label)) = first_triangle_of_face(&self.mesh, &top) {
+                self.selection.replace(Selected::Face {
+                    reference: top.clone(),
+                    label,
+                    triangle,
+                });
+            }
         }
         self.pending_demo_colours = false;
         self.status = Some(format!(
@@ -2452,6 +2473,7 @@ impl Default for RcadApp {
             project_error: None,
             new_colour_id: String::new(),
             pending_demo_colours: false,
+            pending_demo_select: false,
             pending_save: None,
             mesh_ready: false,
         }
@@ -2494,6 +2516,18 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
+}
+
+/// The first triangle of the face with this stable name, and its label.
+fn first_triangle_of_face(mesh: &TriangleMesh, name: &str) -> Option<(usize, String)> {
+    (0..mesh.triangle_count())
+        .find(|triangle| mesh.face_name(*triangle) == Some(name))
+        .map(|triangle| {
+            (
+                triangle,
+                mesh.face_label(triangle).unwrap_or(name).to_string(),
+            )
+        })
 }
 
 /// The stable names of the top and of the right-hand face of a mesh.

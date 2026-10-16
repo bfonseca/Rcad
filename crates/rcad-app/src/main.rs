@@ -33,6 +33,8 @@ struct Cli {
     demo: bool,
     /// Tag two demo faces with the project colours (screenshots, docs).
     demo_colours: bool,
+    /// Select the tagged demo face (screenshots, docs).
+    demo_select: bool,
     /// Hide datum planes, axes and points (screenshots, docs).
     hide_datums: bool,
     renderer: RendererChoice,
@@ -57,9 +59,11 @@ Usage: rcad [options]
 
 Options:
   --screenshot <path>   Render the UI, write a PNG to <path>, then exit
+                        (uses X11 on a Wayland session, so it works headless)
   --frames <n>          Frames to render before capturing (default 30)
   --demo                Start with a sample bracket instead of an empty part
   --demo-colours        Tag two demo faces with the first two project colours
+  --select-demo-face    Select the tagged demo face (with --demo-colours)
   --hide-datums         Do not draw datum planes, axes and points
   --renderer <backend>  default | glow | wgpu
   --view <name>         iso | front | back | left | right | top | bottom
@@ -93,6 +97,7 @@ fn parse_args() -> Result<Cli, String> {
             }
             "--demo" => cli.demo = true,
             "--demo-colours" => cli.demo_colours = true,
+            "--select-demo-face" => cli.demo_select = true,
             "--hide-datums" => cli.hide_datums = true,
             "--dialog" => cli.dialog = true,
             "--options" => cli.options = true,
@@ -127,6 +132,18 @@ fn parse_args() -> Result<Cli, String> {
     Ok(cli)
 }
 
+/// Whether a headless capture should go through X11 instead of Wayland.
+///
+/// On Wayland the compositor drives frame callbacks: a window that is not being
+/// presented - screen locked, another workspace, a headless runner - never
+/// redraws, so `--screenshot` waits for a frame that never comes and the run
+/// hangs without a PNG. XWayland delivers redraws to the client, so forcing the
+/// X11 backend makes captures reliable. Captures only: an interactive run keeps
+/// Wayland.
+fn force_x11_for_capture(screenshot: bool, wayland: Option<&str>, x11: Option<&str>) -> bool {
+    screenshot && wayland.is_some() && x11.is_some()
+}
+
 /// Window icon, decoded from the committed artwork in `Images/`.
 ///
 /// Downscaled to 256px: the 512px asset is 56 KB on disk but a full RGBA
@@ -156,6 +173,20 @@ fn main() -> eframe::Result<()> {
         }
     };
 
+    if force_x11_for_capture(
+        cli.screenshot.is_some(),
+        std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+        std::env::var("DISPLAY").ok().as_deref(),
+    ) {
+        // SAFETY: this runs before the event loop exists and nothing else is
+        // touching the environment; winit reads the variable when the event
+        // loop is built, further down this function.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+        tracing::info!(
+            "capturing through X11: Wayland needs a presented window to send frame callbacks"
+        );
+    }
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1400.0, 900.0])
         .with_title("rcad");
@@ -179,6 +210,7 @@ fn main() -> eframe::Result<()> {
         .map(|path| CaptureRequest::new(path, cli.frames));
     let demo = cli.demo;
     let demo_colours = cli.demo_colours;
+    let demo_select = cli.demo_select;
     let hide_datums = cli.hide_datums;
     let view = cli.view.clone();
     let dialog = cli.dialog;
@@ -221,6 +253,9 @@ fn main() -> eframe::Result<()> {
             if demo_colours {
                 app.tag_demo_faces_with_project_colours();
             }
+            if demo_select {
+                app.select_demo_face_for_screenshot();
+            }
             if hide_datums {
                 app.set_datums_visible(None, false);
             }
@@ -234,4 +269,32 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app))
         }),
     )
+}
+#[cfg(test)]
+mod tests {
+    use super::force_x11_for_capture;
+
+    /// The bug this fixes: on Wayland the compositor drives frame callbacks, so
+    /// an unpresented window never redraws and the capture hangs. XWayland
+    /// delivers redraws to the client, so a capture must switch to X11.
+    #[test]
+    fn a_capture_on_a_wayland_session_goes_through_x11() {
+        assert!(force_x11_for_capture(true, Some("wayland-0"), Some(":0")));
+    }
+
+    #[test]
+    fn an_interactive_run_keeps_wayland() {
+        assert!(!force_x11_for_capture(false, Some("wayland-0"), Some(":0")));
+    }
+
+    /// A pure Wayland machine has no X11 to switch to; leave it alone.
+    #[test]
+    fn a_wayland_session_without_x11_is_left_alone() {
+        assert!(!force_x11_for_capture(true, Some("wayland-0"), None));
+    }
+
+    #[test]
+    fn a_plain_x11_session_needs_no_change() {
+        assert!(!force_x11_for_capture(true, None, Some(":0")));
+    }
 }

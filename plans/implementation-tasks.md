@@ -552,3 +552,23 @@ order is kept.
 Next, step 2: tangents and the incident face references on `NamedEdge`, then the
 queries (boundary, tangent chain, surface ring), then fillet and chamfer by the
 selected edges.
+
+### Screenshots on a Wayland session (fixed)
+
+`--screenshot` on a Wayland session used to hang after a couple of frames with no
+PNG: the compositor drives frame callbacks, so a window that is not being
+presented - locked screen, another workspace, a headless runner - never redraws,
+and the capture waits for a frame that never arrives. The app now drops
+`WAYLAND_DISPLAY` for a capture when XWayland is present, so winit uses the X11
+backend, which delivers redraws to the client. Interactive runs keep Wayland.
+`force_x11_for_capture` is unit tested, and a capture logs "capturing through
+X11".
+
+`--select-demo-face` selects the tagged demo face, so a screenshot documents the
+selection bar and the highlight. A selected face is *tinted* - the project colour
+still shows through - rather than replaced.
+
+Screenshot comparison with the fixed capture: face-colours-a.png against
+face-colours-reloaded.png (saved, then reopened by a fresh process) differ in 0
+model pixels; against face-colours-b.png they differ only in the two tagged
+faces (115 924 px); face-colours-selection.png shows the selection bar.
