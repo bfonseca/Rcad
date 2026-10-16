@@ -377,15 +377,16 @@ already computed by OpenCascade on every rebuild; no new kernel work is needed.
 - [x] **C.** In `rcad-param`, when the construction mesh is appended to the
       display mesh, extend `face_ids` with a sentinel (`u64::MAX`) so
       construction geometry is never colour-matched to a solid face.
-- [x] **D.** The document maps `face_id -> colour_id`: `Part::face_colours`,
+- [x] **D.** The document maps a face to its colour id: `Part::face_colours`,
       with `set_face_colour` / `clear_face_colour` / `face_colour_id` /
-      `face_colour(face_id, manifest)`. It survives rebuilds because the face
-      ids come from the same body, and it takes part in serde round trips.
-- [x] **E.** The viewport resolves each triangle: `face_ids[i]` -> colour id ->
-      `manifest.colour(id)` -> RGB, falling back to the current shading when
-      the face is untagged or the project does not define the id. The project
-      colour is lit by the same `n·light` factor, so a coloured face still
-      reads as a solid.
+      `face_colour(name, manifest)`. It takes part in serde round trips. The key
+      started as the kernel face id, which only survived cache-reused rebuilds;
+      it is now the stable geometry-derived name (see the resolution below).
+- [x] **E.** The viewport resolves each triangle: `face_ids[i]` -> its stable
+      name through `face_names` -> colour id -> `manifest.colour(id)` -> RGB,
+      falling back to the current shading when the face is untagged or the
+      project does not define the id. The project colour is lit by the same
+      `n·light` factor, so a coloured face still reads as a solid.
 - [x] **F.** A way to tag a face in the UI: pick a triangle in the viewport and
       choose an id from the list of colours the project defines, in the status
       bar. `--demo-colours` (with `--hide-datums`) is the headless path for
