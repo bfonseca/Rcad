@@ -174,6 +174,22 @@ pub trait GeometryBackend: Send {
     fn sphere(&mut self, radius: f64) -> GeomResult<ShapeId>;
 
     fn extrude_profile(&mut self, profile: &Profile2D, height: f64) -> GeomResult<ShapeId>;
+
+    /// Sweep a profile that lies on the plane given by an origin, an in-plane x
+    /// and a normal, along that normal. A backend that cannot place a profile
+    /// sweeps it along Z from the XY plane instead, which is right for a sketch
+    /// that was drawn there.
+    fn extrude_profile_placed(
+        &mut self,
+        profile: &Profile2D,
+        height: f64,
+        origin: DVec3,
+        x_direction: DVec3,
+        normal: DVec3,
+    ) -> GeomResult<ShapeId> {
+        let _ = (origin, x_direction, normal);
+        self.extrude_profile(profile, height)
+    }
     fn revolve_profile(
         &mut self,
         profile: &Profile2D,

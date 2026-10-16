@@ -231,7 +231,7 @@ impl Server {
                 let part = self.active_part_mut().map_err(tool_failure)?;
                 let feature_name = arg_str(&args, "name")
                     .unwrap_or_else(|| rcad_features::unique_feature_name(part, "Extrude"));
-                let id = rcad_features::add_extrude(part, &feature_name, profile, height);
+                let id = rcad_features::add_extrude(part, &feature_name, profile, height, None);
                 Ok(format!(
                     "Added extrude '{feature_name}' ({id}) of height {height}."
                 ))

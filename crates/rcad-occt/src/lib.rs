@@ -65,21 +65,31 @@ impl OcctBackend {
 
 
     fn profile_edges(profile: &Profile2D) -> GeomResult<Vec<Edge>> {
+        Self::profile_edges_on(profile, DVec3::ZERO, DVec3::X, DVec3::Y)
+    }
+
+    /// The profile boundary, placed on the plane an origin, an in-plane x and a
+    /// normal describe.
+    fn profile_edges_on(
+        profile: &Profile2D,
+        origin: DVec3,
+        u: DVec3,
+        v: DVec3,
+    ) -> GeomResult<Vec<Edge>> {
         if profile.outer.len() < 3 {
             return Err(GeomError::InvalidProfile(
                 "outer loop needs at least 3 points".into(),
             ));
         }
         let mut edges = Vec::new();
-        let outer = polygon_from_xy(&profile.outer)?;
-        edges.extend(outer);
+        edges.extend(polygon_on_plane(&profile.outer, origin, u, v)?);
         for hole in &profile.holes {
             if hole.len() < 3 {
                 return Err(GeomError::InvalidProfile(
                     "hole loop needs at least 3 points".into(),
                 ));
             }
-            edges.extend(polygon_from_xy(hole)?);
+            edges.extend(polygon_on_plane(hole, origin, u, v)?);
         }
         Ok(edges)
     }
@@ -118,10 +128,17 @@ fn cvec(v: DVec3) -> CVec3 {
     CVec3::new(v.x, v.y, v.z)
 }
 
-fn polygon_from_xy(pts: &[[f64; 2]]) -> GeomResult<Vec<Edge>> {
+/// A closed polygon of a profile, placed on the plane an origin, an in-plane x
+/// and a normal describe.
+fn polygon_on_plane(
+    pts: &[[f64; 2]],
+    origin: DVec3,
+    u: DVec3,
+    v: DVec3,
+) -> GeomResult<Vec<Edge>> {
     let pts3: Vec<CVec3> = pts
         .iter()
-        .map(|p| CVec3::new(p[0], p[1], 0.0))
+        .map(|p| cvec(origin + u * p[0] + v * p[1]))
         .collect();
     Edge::polygon(&pts3).map_err(|e| GeomError::Backend(e.to_string()))
 }
@@ -469,6 +486,36 @@ impl GeometryBackend for OcctBackend {
     fn extrude_profile(&mut self, profile: &Profile2D, height: f64) -> GeomResult<ShapeId> {
         let edges = Self::profile_edges(profile)?;
         let solid = Solid::extrude(&edges, CVec3::Z * height)
+            .map_err(|e| GeomError::Backend(e.to_string()))?;
+        Ok(self.insert(solid))
+    }
+
+    /// Sweep the profile along the normal of the plane it lies on. The profile is
+    /// 2D, so the placement is what puts it in space: without it every sketch,
+    /// wherever it was drawn, came out on the XY plane swept along Z.
+    fn extrude_profile_placed(
+        &mut self,
+        profile: &Profile2D,
+        height: f64,
+        origin: DVec3,
+        x_direction: DVec3,
+        normal: DVec3,
+    ) -> GeomResult<ShapeId> {
+        let normal = normal.normalize_or_zero();
+        if normal.length() == 0.0 {
+            return Err(GeomError::InvalidProfile("plane normal is zero".into()));
+        }
+        // The in-plane x has to be perpendicular to the normal, or the profile
+        // would be sheared on its way into space.
+        let u = (x_direction - normal * x_direction.dot(normal)).normalize_or_zero();
+        if u.length() == 0.0 {
+            return Err(GeomError::InvalidProfile(
+                "plane x direction is along the normal".into(),
+            ));
+        }
+        let v = normal.cross(u);
+        let edges = Self::profile_edges_on(profile, origin, u, v)?;
+        let solid = Solid::extrude(&edges, cvec(normal * height))
             .map_err(|e| GeomError::Backend(e.to_string()))?;
         Ok(self.insert(solid))
     }

@@ -957,7 +957,11 @@ mod icon_tests {
         let kinds = vec![
             FeatureKind::Box { size: [1.0, 1.0, 1.0] },
             FeatureKind::Cylinder { radius: 1.0, height: 1.0 },
-            FeatureKind::Extrude { profile: profile.clone(), height: 1.0 },
+            FeatureKind::Extrude {
+                profile: profile.clone(),
+                height: 1.0,
+                placement: None,
+            },
             FeatureKind::ExtrudeSurface { profile: profile.clone(), height: 1.0 },
             FeatureKind::Revolve { profile: profile.clone(), angle_deg: 90.0 },
             FeatureKind::Boolean { tool_feature: uuid::Uuid::new_v4(), op: BooleanOp::Union },

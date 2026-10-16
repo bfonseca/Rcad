@@ -10,7 +10,10 @@ use crate::ui::{
     VerticalToolbar,
 };
 use rcad_geom::{GeometryBackend, TriangleMesh};
-use rcad_doc::{Project, EdgeSet, Feature, FeatureKind, ConstructionKind, Part, ProjectManifest};
+use rcad_doc::{
+    ConstructionKind, EdgeSet, Feature, FeatureKind, Part, Project, ProjectManifest,
+    SketchPlacement,
+};
 use rcad_features;
 use rcad_occt::OcctBackend;
 use rcad_param::{ShapeCache};
@@ -2086,20 +2089,18 @@ impl RcadApp {
     }
     
     pub fn extrude_sketch(&mut self) {
-        // The kernel extrudes a profile along its own axis, so a sketch drawn on
-        // any other plane would come out in the wrong place. Say so instead.
-        if let Some((_, normal, _)) = self.sketch_plane {
-            if normal[2].abs() < 0.999 {
-                self.last_error = Some(
-                    "Extruding a sketch that is not on the XY plane is not supported yet: the profile would be swept along Z, not along the sketch normal. Draw on TOP_PLANE, or use a solid face parallel to it for now."
-                        .to_string(),
-                );
-                return;
-            }
-        }
+        // The sketch plane travels with the profile, so the sweep follows the
+        // normal of the plane the sketch was drawn on.
+        let placement = self
+            .sketch_plane
+            .map(|(origin, normal, x_direction)| SketchPlacement {
+                origin,
+                normal,
+                x_direction,
+            });
         if let Some(sketch) = &self.sketch {
             if let Some(profile) = sketch.to_profile() {
-                if let Err(e) = self.extrude_sketch_internal(profile, 10.0) {
+                if let Err(e) = self.extrude_sketch_internal(profile, 10.0, placement) {
                     self.last_error = Some(format!("Extrude failed: {e}"));
                 }
             }
@@ -2139,7 +2140,12 @@ impl RcadApp {
     }
     
     // Internal methods (renamed from original private methods)
-    fn extrude_sketch_internal(&mut self, profile: rcad_geom::Profile2D, height: f64) -> Result<(), Box<dyn std::error::Error>> {
+    fn extrude_sketch_internal(
+        &mut self,
+        profile: rcad_geom::Profile2D,
+        height: f64,
+        placement: Option<SketchPlacement>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if profile.outer.len() < 3 {
             return Err("extrude needs a closed profile with at least 3 points".into());
         }
@@ -2149,7 +2155,7 @@ impl RcadApp {
             // discarded it and appended a hard-coded 10 x 10 x height box, so
             // every sketch produced the same prism.
             let name = rcad_features::unique_feature_name(part, "Extrude");
-            rcad_features::add_extrude(part, &name, profile, height);
+            rcad_features::add_extrude(part, &name, profile, height, placement);
             self.rebuild_active_part();
         }
         Ok(())
@@ -3526,10 +3532,10 @@ mod interaction_tests {
         );
     }
 
-    /// Off the XY plane the kernel would sweep the profile along Z, in the wrong
-    /// place. Report it instead of producing silent nonsense.
+    /// Off the XY plane the profile now carries its plane, so the sweep follows
+    /// the sketch normal instead of always running along Z.
     #[test]
-    fn extruding_a_sketch_off_the_xy_plane_is_reported() {
+    fn a_sketch_off_the_xy_plane_extrudes_along_its_own_normal() {
         let mut app = RcadApp::default();
         let _ = app.create_default_datum_geometry();
         app.new_sketch();
@@ -3539,13 +3545,14 @@ mod interaction_tests {
 
         app.extrude_sketch();
 
-        let message = app.last_error.clone().unwrap_or_default();
-        assert!(message.contains("not supported yet"), "{message}");
         let part = app.project.parts.first().unwrap();
-        assert!(part
-            .features
-            .iter()
-            .all(|feature| !matches!(feature.kind, FeatureKind::Extrude { .. })));
+        let placement = part.features.iter().find_map(|feature| match &feature.kind {
+            FeatureKind::Extrude { placement, .. } => Some(placement.clone()),
+            _ => None,
+        });
+        let placement = placement.expect("the sketch should have extruded").expect("a placement");
+        assert_eq!(placement.normal, [0.0, 1.0, 0.0]);
+        assert_eq!(placement.x_direction, [1.0, 0.0, 0.0]);
     }
 
     /// A tag whose face is gone (edited or deleted) is reported, not silently

@@ -693,3 +693,23 @@ Still missing in the sketch, and not pretended otherwise:
 
 See the section above: found/lost resolution instead of failure, the last known
 geometry of each reference, and substitution from the selection in one list.
+
+### The profile carries its plane (step 3, the extruding part)
+
+`Solid::extrude(&edges, Z * height)` sweeps from the XY plane along +Z, and
+`FeatureKind::Extrude` had nowhere to say where the profile lay. So a sketch was
+only *drawn* anywhere: it extruded from the XY plane. Now:
+
+- `SketchPlacement { origin, normal, x_direction }` on the Extrude feature,
+  serde-defaulted so old documents still read as "on the XY plane".
+- `extrude_profile_placed` on the backend: the profile is built on the plane
+  (`profile_edges_on`, `polygon_on_plane`) and swept along that plane normal,
+  with the in-plane x re-orthogonalised against the normal so a sloppy placement
+  cannot shear the profile.
+- The app passes the sketch plane of the open sketch, and the "not supported yet"
+  guard is gone.
+
+Tests: an extrude placed on the XZ plane (normal +Y) produces geometry bounded by
+the profile in X and Z and by the height along Y; a sketch off the XY plane
+extrudes and the feature records its normal; and a round on the outer edges of a
+box is the same feature as a round on all twelve references of it.

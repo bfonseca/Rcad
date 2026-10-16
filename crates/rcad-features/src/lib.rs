@@ -1,6 +1,6 @@
 //! Helpers to append common modelling features onto a [`Part`].
 
-use rcad_doc::{EdgeSet, EntityId, Feature, FeatureKind, Part};
+use rcad_doc::{EdgeSet, EntityId, Feature, FeatureKind, Part, SketchPlacement};
 use rcad_geom::Profile2D;
 use rcad_param::rect_profile;
 use rcad_sketch::Sketch;
@@ -39,7 +39,14 @@ pub fn add_extrude_from_sketch(
     let profile = sketch.to_profile()?;
     Some(push_feature(
         part,
-        Feature::new(name, FeatureKind::Extrude { profile, height }),
+        Feature::new(
+            name,
+            FeatureKind::Extrude {
+                profile,
+                height,
+                placement: None,
+            },
+        ),
     ))
 }
 
@@ -54,15 +61,35 @@ pub fn add_extrude_rect(
     let profile = rect_profile(width, depth);
     push_feature(
         part,
-        Feature::new(name, FeatureKind::Extrude { profile, height }),
+        Feature::new(
+            name,
+            FeatureKind::Extrude {
+                profile,
+                height,
+                placement: None,
+            },
+        ),
     )
 }
 
 /// Append an extrusion of an arbitrary profile.
-pub fn add_extrude(part: &mut Part, name: &str, profile: Profile2D, height: f64) -> EntityId {
+pub fn add_extrude(
+    part: &mut Part,
+    name: &str,
+    profile: Profile2D,
+    height: f64,
+    placement: Option<SketchPlacement>,
+) -> EntityId {
     push_feature(
         part,
-        Feature::new(name, FeatureKind::Extrude { profile, height }),
+        Feature::new(
+            name,
+            FeatureKind::Extrude {
+                profile,
+                height,
+                placement,
+            },
+        ),
     )
 }
 
@@ -256,7 +283,9 @@ mod helper_tests {
         assert_eq!(part.features.len(), 1);
         assert_eq!(part.features[0].id, id);
         match &part.features[0].kind {
-            FeatureKind::Extrude { profile, height } => {
+            FeatureKind::Extrude {
+                profile, height, ..
+            } => {
                 assert_eq!(*height, 5.0);
                 assert_eq!(profile.outer.len(), 4, "the sketch profile was not used");
             }

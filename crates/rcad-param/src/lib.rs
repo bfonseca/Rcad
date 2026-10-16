@@ -339,10 +339,29 @@ fn eval_feature(
             .cylinder(*radius, *height)
             .map(Some)
             .map_err(|e| e.to_string()),
-        FeatureKind::Extrude { profile, height } => backend
-            .extrude_profile(profile, *height)
-            .map(Some)
-            .map_err(|e| e.to_string()),
+        FeatureKind::Extrude {
+            profile,
+            height,
+            placement,
+        } => {
+            // A profile that knows where it lies is swept along its own normal;
+            // one that does not is taken to be on the XY plane, as before.
+            let shape = match placement {
+                Some(plane) => backend.extrude_profile_placed(
+                    profile,
+                    *height,
+                    dvec3(plane.origin[0], plane.origin[1], plane.origin[2]),
+                    dvec3(
+                        plane.x_direction[0],
+                        plane.x_direction[1],
+                        plane.x_direction[2],
+                    ),
+                    dvec3(plane.normal[0], plane.normal[1], plane.normal[2]),
+                ),
+                None => backend.extrude_profile(profile, *height),
+            };
+            shape.map(Some).map_err(|e| e.to_string())
+        }
         FeatureKind::ExtrudeSurface { profile, height } => {
             // Until a dedicated surface type exists, extrude a thin solid as proxy.
             backend
@@ -688,11 +707,13 @@ mod tests {
         let mut hole_profile = profile.clone();
         hole_profile.holes.push(vec![[0.1, 0.1], [0.2, 0.1], [0.1, 0.2]]);
         with_hole.kind = FeatureKind::Extrude {
+            placement: None,
             profile: hole_profile,
             height: 5.0,
         };
         let mut without_hole = base.clone();
         without_hole.kind = FeatureKind::Extrude {
+            placement: None,
             profile,
             height: 5.0,
         };

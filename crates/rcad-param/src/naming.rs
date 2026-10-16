@@ -759,6 +759,74 @@ mod tests {
         );
     }
 
+    /// An extrude that carries its plane is swept along that plane normal, so a
+    /// sketch drawn off the XY plane lands where it was drawn.
+    #[test]
+    fn an_extrude_with_a_placement_sweeps_along_its_own_normal() {
+        let profile = crate::rect_profile(20.0, 10.0);
+        let mut part = Part::new_solid("P");
+        part.features.push(Feature::new(
+            "E",
+            FeatureKind::Extrude {
+                profile,
+                height: 5.0,
+                placement: Some(rcad_doc::SketchPlacement {
+                    origin: [0.0, 0.0, 0.0],
+                    normal: [0.0, 1.0, 0.0],
+                    x_direction: [1.0, 0.0, 0.0],
+                }),
+            },
+        ));
+
+        let result = rebuild(&part);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let positions = &result.display_mesh.positions;
+        assert!(!positions.is_empty(), "the extrude produced no geometry");
+        for position in positions {
+            assert!(
+                position[1] >= -1e-4 && position[1] <= 5.0 + 1e-4,
+                "y {} is outside the sweep along the normal",
+                position[1]
+            );
+            assert!(position[0].abs() <= 10.0 + 1e-4, "x {} outside the profile", position[0]);
+            assert!(position[2].abs() <= 5.0 + 1e-4, "z {} outside the profile", position[2]);
+        }
+    }
+
+    /// A round on the edges a rule names: the outer ones are the twelve of a box.
+    #[test]
+    fn a_round_on_the_outer_edges_matches_the_whole_box() {
+        let mut by_rule = Part::new_solid("P");
+        by_rule.features.push(box_feature([40.0, 30.0, 8.0]));
+        by_rule.features.push(plane_feature(FeatureKind::Fillet {
+            radius: 1.0,
+            edges: EdgeSet::Outer,
+        }));
+        let by_rule = rebuild(&by_rule);
+        assert!(by_rule.errors.is_empty(), "{:?}", by_rule.errors);
+
+        let mut explicit = Part::new_solid("P");
+        explicit.features.push(box_feature([40.0, 30.0, 8.0]));
+        let all = rebuild(&explicit);
+        let references: Vec<String> = all
+            .display_mesh
+            .edges
+            .iter()
+            .map(|edge| edge.name.clone())
+            .collect();
+        explicit.features.push(plane_feature(FeatureKind::Fillet {
+            radius: 1.0,
+            edges: EdgeSet::References(references),
+        }));
+        let explicit = rebuild(&explicit);
+
+        assert_eq!(
+            by_rule.display_mesh.face_names.len(),
+            explicit.display_mesh.face_names.len(),
+            "the outer set of a box is every edge of it"
+        );
+    }
+
     fn test_edge(
         kernel_id: u64,
         signature: &str,

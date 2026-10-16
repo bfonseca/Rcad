@@ -459,6 +459,16 @@ impl Feature {
     }
 }
 
+/// Where a sketch profile lies in space: the sketch origin, its normal and the
+/// x direction inside the plane. The profile itself is 2D, so without this it
+/// would be taken to be on the XY plane.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SketchPlacement {
+    pub origin: [f64; 3],
+    pub normal: [f64; 3],
+    pub x_direction: [f64; 3],
+}
+
 /// Which edges a fillet or a chamfer applies to.
 ///
 /// Creo calls this an edge set: a list of picked edges, or a rule that is
@@ -516,6 +526,10 @@ pub enum FeatureKind {
     Extrude {
         profile: Profile2D,
         height: f64,
+        /// Where the profile lies. Without it the profile is on the XY plane and
+        /// is swept along +Z, which is what every extrude did before placements.
+        #[serde(default)]
+        placement: Option<SketchPlacement>,
     },
     Revolve {
         profile: Profile2D,
