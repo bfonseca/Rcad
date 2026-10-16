@@ -59,12 +59,24 @@ pub struct NamedEdge {
     /// matching against the live kernel shape.
     #[serde(default)]
     pub kernel_id: u64,
-    /// Exact curve endpoints (canonicalised, so the order does not matter).
+    /// Exact curve endpoints, in the curve's native direction. The name
+    /// canonicalises them itself, so the order here only matters for pairing
+    /// with the tangents below.
     pub start: [f64; 3],
     pub end: [f64; 3],
+    /// Tangent at `start`, pointing from start towards end.
+    #[serde(default)]
+    pub start_tangent: [f64; 3],
+    /// Tangent at `end`, pointing from start towards end.
+    #[serde(default)]
+    pub end_tangent: [f64; 3],
     pub midpoint: [f64; 3],
     pub length: f64,
     pub closed: bool,
+    /// Stable references of the faces this edge bounds: two for a normal edge,
+    /// one for a seam. Filled by the rebuild; empty on construction geometry.
+    #[serde(default)]
+    pub faces: Vec<String>,
     /// Polyline approximation, for drawing and picking.
     #[serde(default)]
     pub points: Vec<[f32; 3]>,

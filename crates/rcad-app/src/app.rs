@@ -153,6 +153,17 @@ pub struct RcadApp {
     mesh_ready: bool,
 }
 
+/// A Creo-style smart-selection query, offered on a selected edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionQuery {
+    /// The boundary loop of every face the seed edge bounds.
+    Boundary,
+    /// Every edge that continues the seed edge tangentially.
+    TangentChain,
+    /// Every edge of the surfaces the seed edge bounds.
+    SurfaceRing,
+}
+
 /// Transient state for the feature dialog's "add parameter" row.
 #[derive(Debug, Clone, Default)]
 pub struct NewParameterDraft {
@@ -1369,6 +1380,7 @@ impl RcadApp {
         }
         let mut remove_index: Option<usize> = None;
         let mut clear = false;
+        let mut query: Option<SelectionQuery> = None;
         egui::TopBottomPanel::bottom("selection_bar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let seed = self
@@ -1383,12 +1395,32 @@ impl RcadApp {
                     ));
                 for (index, item) in self.selection.items().iter().enumerate() {
                     let text = format!("{} {}  ✕", item.kind(), item.label());
-                    let response = ui.small_button(text);
                     let response = match item.reference() {
-                        Some(reference) => response.on_hover_text(reference),
-                        None => response,
+                        Some(reference) => ui.small_button(text).on_hover_text(reference),
+                        None => ui.small_button(text),
                     };
-                    if response.clicked() {
+                    let clicked = response.clicked();
+                    // Creo puts the smart-selection queries on the item itself.
+                    let mut chosen: Option<SelectionQuery> = None;
+                    response.context_menu(|ui| {
+                        ui.label("Select more from the seed edge:");
+                        if ui.button("Boundary").clicked() {
+                            chosen = Some(SelectionQuery::Boundary);
+                            ui.close();
+                        }
+                        if ui.button("Tangent chain").clicked() {
+                            chosen = Some(SelectionQuery::TangentChain);
+                            ui.close();
+                        }
+                        if ui.button("Surface (all its edges)").clicked() {
+                            chosen = Some(SelectionQuery::SurfaceRing);
+                            ui.close();
+                        }
+                    });
+                    if chosen.is_some() {
+                        query = chosen;
+                    }
+                    if clicked {
                         remove_index = Some(index);
                     }
                 }
@@ -1404,6 +1436,65 @@ impl RcadApp {
         if clear {
             self.selection.clear();
         }
+        if let Some(query) = query {
+            self.apply_selection_query(query);
+        }
+    }
+
+    /// Expand the selection with a Creo-style query on the seed edge.
+    pub fn apply_selection_query(&mut self, query: SelectionQuery) {
+        let seed = self.selection.items().iter().rev().find_map(|item| match item {
+            Selected::Edge { reference, .. } => Some(reference.clone()),
+            _ => None,
+        });
+        let Some(seed) = seed else {
+            self.status = Some("Pick an edge first, then use a query on it.".to_string());
+            return;
+        };
+        let Some(index) = self.mesh.edges.iter().position(|edge| edge.name == seed) else {
+            return;
+        };
+
+        let indices: Vec<usize> = match query {
+            SelectionQuery::TangentChain => rcad_geom::query::tangent_chain(
+                &self.mesh,
+                index,
+                rcad_geom::query::TANGENT_TOLERANCE,
+            ),
+            SelectionQuery::SurfaceRing => rcad_geom::query::surface_ring(&self.mesh, index),
+            SelectionQuery::Boundary => {
+                // The boundary loop of every surface the seed edge bounds.
+                let faces = self.mesh.edges[index].faces.clone();
+                faces
+                    .iter()
+                    .filter_map(|face| {
+                        rcad_geom::query::boundary_loops(&self.mesh, face)
+                            .into_iter()
+                            .next()
+                    })
+                    .flatten()
+                    .collect()
+            }
+        };
+
+        let before = self.selection.len();
+        for edge_index in indices {
+            let (reference, label) = {
+                let edge = &self.mesh.edges[edge_index];
+                (edge.name.clone(), edge.label.clone())
+            };
+            self.selection.extend(Selected::Edge { reference, label });
+        }
+        let added = self.selection.len() - before;
+        let name = match query {
+            SelectionQuery::Boundary => "boundary",
+            SelectionQuery::TangentChain => "tangent chain",
+            SelectionQuery::SurfaceRing => "surface",
+        };
+        self.status = Some(format!(
+            "{name}: {added} edge(s) added, {} selected.",
+            self.selection.len()
+        ));
     }
 
     fn draw_shortcuts_dialog(&mut self, ui: &mut egui::Ui) {
@@ -3061,6 +3152,59 @@ mod interaction_tests {
             !sketch.in_placement_mode,
             "the sketch should be placed on the selected plane"
         );
+    }
+
+    fn test_edge(
+        name: &str,
+        start: [f64; 3],
+        end: [f64; 3],
+        tangent: [f64; 3],
+    ) -> rcad_geom::NamedEdge {
+        rcad_geom::NamedEdge {
+            name: name.to_string(),
+            signature: name.to_string(),
+            label: name.to_string(),
+            start,
+            end,
+            start_tangent: tangent,
+            end_tangent: tangent,
+            length: ((end[0] - start[0]).powi(2)
+                + (end[1] - start[1]).powi(2)
+                + (end[2] - start[2]).powi(2))
+                .sqrt(),
+            ..Default::default()
+        }
+    }
+
+    /// A tangent chain extends the selection from the seed edge, in order, and
+    /// the result is references, ready for a fillet to store.
+    #[test]
+    fn a_tangent_chain_query_extends_the_selection() {
+        let mut app = RcadApp::default();
+        app.mesh.edges = vec![
+            test_edge("a", [0.0, 0.0, 0.0], [5.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            test_edge("b", [5.0, 0.0, 0.0], [10.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            test_edge("c", [10.0, 0.0, 0.0], [10.0, 5.0, 0.0], [0.0, 1.0, 0.0]),
+        ];
+        app.selection.replace(Selected::Edge {
+            reference: "a".to_string(),
+            label: "a".to_string(),
+        });
+
+        app.apply_selection_query(SelectionQuery::TangentChain);
+
+        assert_eq!(app.selection.len(), 2, "the collinear neighbour joins");
+        assert_eq!(app.selection.edge_references(), vec!["a", "b"]);
+    }
+
+    /// Without an edge in the selection the query says so instead of guessing.
+    #[test]
+    fn a_query_without_an_edge_seed_explains_itself() {
+        let mut app = RcadApp::default();
+        app.apply_selection_query(SelectionQuery::TangentChain);
+
+        let status = app.status.clone().unwrap_or_default();
+        assert!(status.contains("Pick an edge"), "{status}");
     }
 
     /// A tag whose face is gone (edited or deleted) is reported, not silently

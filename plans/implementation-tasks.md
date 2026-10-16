@@ -572,3 +572,28 @@ Screenshot comparison with the fixed capture: face-colours-a.png against
 face-colours-reloaded.png (saved, then reopened by a fresh process) differ in 0
 model pixels; against face-colours-b.png they differ only in the two tagged
 faces (115 924 px); face-colours-selection.png shows the selection bar.
+
+### Smart selection queries (step 2, in progress)
+
+`rcad_geom::query` holds the Creo queries as pure functions over the mesh
+topology: edge geometry plus the face references the rebuild writes on every
+edge.
+
+- `boundary_loops(face)` chains a face edges into loops by shared endpoints and
+  puts the longest first: the outer boundary, then inner wires.
+- `tangent_chain(edge, tolerance)` walks both ways while the next edge continues
+  the direction (1 degree by default), which selects the run of edges around a
+  boss and stops at a corner.
+- `surface_ring(edge)` is every edge of the surfaces the seed bounds.
+- `references(edges)` turns the result into the references a feature stores.
+
+`NamedEdge` gained the start and end tangents and the references of the faces it
+bounds, filled by the rebuild. The selection bar offers the three queries on the
+context menu of a selected edge, and the result is appended to the selection in
+order, ready for a fillet.
+
+Kernel-backed tests: every edge of a box knows its two faces, and the boundary of
+the top face is its four edges, named as references.
+
+Still to do for step 2: fillet and chamfer by the selected edges - store them in
+`FeatureReferences.fillet_edges` and rebuild from them - and the From-To chain.

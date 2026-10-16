@@ -332,6 +332,8 @@ fn topology_of(solids: &[Solid]) -> ShapeTopology {
                 kernel_id: edge.id(),
                 start: start.to_array(),
                 end: end.to_array(),
+                start_tangent: edge.start_tangent().to_array(),
+                end_tangent: edge.end_tangent().to_array(),
                 midpoint: midpoint.to_array(),
                 length,
                 closed,
@@ -339,6 +341,8 @@ fn topology_of(solids: &[Solid]) -> ShapeTopology {
                     .iter()
                     .map(|point| [point.x as f32, point.y as f32, point.z as f32])
                     .collect(),
+                // Filled by the rebuild, which knows the face references.
+                faces: Vec::new(),
             });
         }
     }

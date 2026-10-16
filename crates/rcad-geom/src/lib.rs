@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod naming;
+pub mod query;
 pub mod topology;
 
 pub use naming::{EdgeFacts, FaceFacts, NamedEdge, NamedFace};

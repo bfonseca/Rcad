@@ -175,6 +175,28 @@ pub fn apply_references(mesh: &mut TriangleMesh, topology: &ShapeTopology, refs:
                 .map(|reference| (edge.signature.as_str(), reference.as_str()))
         })
         .collect();
+    // The faces each edge bounds, by signature for the same reason: the
+    // selection queries (boundary, tangent chain, surface ring) work from these
+    // references, never from kernel ids.
+    let mut incident: BTreeMap<u64, Vec<&str>> = BTreeMap::new();
+    for (face_id, face) in &topology.faces {
+        if let Some(reference) = refs.by_id.get(face_id) {
+            for edge_id in &face.edges {
+                incident.entry(*edge_id).or_default().push(reference.as_str());
+            }
+        }
+    }
+    let mut faces_by_signature: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (edge_id, edge) in &topology.edges {
+        let mut faces: Vec<String> = incident
+            .get(edge_id)
+            .map(|references| references.iter().map(|r| r.to_string()).collect())
+            .unwrap_or_default();
+        faces.sort();
+        faces.dedup();
+        faces_by_signature.insert(edge.signature.as_str(), faces);
+    }
+
     for edge in mesh.edges.iter_mut() {
         let reference = edge_by_signature
             .get(edge.signature.as_str())
@@ -182,6 +204,9 @@ pub fn apply_references(mesh: &mut TriangleMesh, topology: &ShapeTopology, refs:
             .or_else(|| edge_refs.get(&edge.kernel_id).map(String::as_str));
         if let Some(reference) = reference {
             edge.name = reference.to_string();
+        }
+        if let Some(faces) = faces_by_signature.get(edge.signature.as_str()) {
+            edge.faces = faces.clone();
         }
     }
 }
@@ -605,5 +630,51 @@ mod tests {
             .collect();
 
         assert_eq!(box_refs, box_refs_after, "a height change lost the box faces");
+    }
+
+    /// Every edge of a rebuilt box knows the two faces it bounds, which is what
+    /// the selection queries work from.
+    #[test]
+    fn every_edge_knows_the_faces_it_bounds() {
+        let mut part = Part::new_solid("P");
+        part.features.push(box_feature([40.0, 30.0, 8.0]));
+        let result = rebuild(&part);
+        let mesh = &result.display_mesh;
+
+        assert_eq!(mesh.edges.len(), 12);
+        for edge in &mesh.edges {
+            assert_eq!(edge.faces.len(), 2, "a box edge bounds two faces");
+            assert!(edge.faces.iter().all(|face| face.contains("/box/")));
+            assert!(
+                edge.start_tangent.iter().any(|value| value.abs() > 0.5),
+                "the tangents must come from the kernel"
+            );
+        }
+    }
+
+    /// The whole way round: kernel, references, query. The boundary of the top
+    /// face is its four edges, and they are named as references.
+    #[test]
+    fn the_boundary_of_the_top_face_is_its_four_edges() {
+        let mut part = Part::new_solid("P");
+        part.features.push(box_feature([40.0, 30.0, 8.0]));
+        let result = rebuild(&part);
+        let mesh = &result.display_mesh;
+        let top = mesh
+            .face_names
+            .values()
+            .find(|face| face.name.contains("/box/z+"))
+            .expect("the top face")
+            .name
+            .clone();
+
+        let loops = rcad_geom::query::boundary_loops(mesh, &top);
+        assert_eq!(loops.len(), 1, "a box face has one boundary loop");
+        assert_eq!(loops[0].len(), 4);
+        let references = rcad_geom::query::references(mesh, &loops[0]);
+        assert!(
+            references.iter().all(|reference| reference.starts_with("edge(")),
+            "{references:?}"
+        );
     }
 }
