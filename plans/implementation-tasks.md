@@ -4,6 +4,17 @@
 
 ## ESTADO E PRÓXIMOS PASSOS (handover - ler primeiro)
 
+**Arranque sugerido numa sessão nova (basta colar isto):**
+
+> No repositório /home/bruno/Documentos/deepseek-harness/default-workspace/rcad,
+> lê o bloco de handover no topo de plans/implementation-tasks.md e continua o
+> trabalho: avança com o ponto 1 do sketch (desenhar com o rato - dois cliques
+> para um retângulo, com snap à grelha) e depois o ponto 2 (restrições, dimensões
+> e graus de liberdade no ecrã). No fim corre cargo test --workspace e
+> cargo check --workspace --all-targets (zero avisos), e faz commit em main e
+> push. Vai dizendo o que fizeste e o que ficou por fazer.
+
+
 **Onde estamos (última sessão):** o sketch está a meio. Os pontos 1 e 2 abaixo
 ficaram por fazer; tudo o resto descrito neste ficheiro, até essa data, está
 feito, commitado e verde.
