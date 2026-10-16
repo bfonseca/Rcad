@@ -733,3 +733,25 @@ a fully lost set is skipped with an explanation and the body stays a plain box.
 Still to do here: the app does not yet keep the memory across rebuilds, fill
 `last_location`/`last_description`, or offer substitution (replace the lost
 reference in the feature with one the user has just selected).
+
+### Reference repair: memory and substitution (second layer, done)
+
+- The app keeps `reference_memory`: `rcad_geom::remember(mesh)` is merged into it
+  on every rebuild, so a reference that disappears keeps the last place it was
+  seen.
+- `describe_lost` fills `last_location` and `last_description` of every lost
+  reference from that memory, which is what the repair list shows on hover.
+- A repair list (bottom panel, above the selection bar) names each feature and
+  reference, and offers `Substitute <lost> with <the selected edge>`. With no
+  edge selected the button is disabled and says so.
+- `substitute_reference` rewrites the `EdgeSet` of that feature in place, pushes
+  one undo state, drops the entry from the list and rebuilds.
+
+Tests: the list holds only what is missing, named by feature; the description
+carries the position and the length from the last build that had it; substitution
+rewrites the feature and refuses a reference it never had.
+
+Known limit: the memory covers edges (what fillets and chamfers reference today);
+lost *face* references, such as a sketch plane, are not listed yet. The list is
+also derived in the app from the part and the mesh, while the kernel derives its
+own copy to decide whether to skip a feature: same rule in two places.

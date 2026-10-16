@@ -109,6 +109,12 @@ pub struct RcadApp {
     /// The plane the open sketch is drawn on: origin, normal and sketch x. None
     /// until a sketch is started.
     sketch_plane: Option<([f64; 3], [f64; 3], [f64; 3])>,
+    /// Where every reference was the last time a build still had it, so a repair
+    /// list can say where a lost one used to be. Merged, never replaced: a
+    /// reference that disappears keeps its last known entry.
+    reference_memory: std::collections::BTreeMap<String, rcad_geom::ReferenceMemory>,
+    /// The references the part asks for that the body no longer has.
+    lost_references: Vec<rcad_doc::LostReference>,
     
     // Async kernel worker
     kernel_worker_tx: Option<Sender<RebuildJob>>,
@@ -259,6 +265,8 @@ impl RcadApp {
             selection_mode: SelectionMode::Object,
             edge_feature_size: 1.0,
             sketch_plane: None,
+            reference_memory: std::collections::BTreeMap::new(),
+            lost_references: Vec::new(),
             
             // Async kernel worker
             kernel_worker_tx: Some(job_tx),
@@ -726,6 +734,10 @@ impl RcadApp {
             });
         });
         
+        // 2a) Repair list, above the selection bar, when a feature lost a
+        // reference and is waiting for another one.
+        self.draw_lost_references(ctx);
+
         // 2b) Selection bar: the ordered selection, the way Creo shows it.
         self.draw_selection_bar(ctx);
 
@@ -838,6 +850,13 @@ impl RcadApp {
                     if response.version >= self.kernel_version.load(Ordering::Relaxed) {
                         self.mesh = response.mesh;
                         self.mesh_ready = true;
+                        // Remember where the references are now, keeping the last
+                        // known entry of any that has already gone.
+                        self.reference_memory.extend(rcad_geom::remember(&self.mesh));
+                        if let Some(part) = self.get_active_part() {
+                            self.lost_references = lost_references(part, &self.mesh);
+                        }
+                        describe_lost(&mut self.lost_references, &self.reference_memory);
                         // Frame the model the first time it appears: the app
                         // previously opened at a fixed camera distance.
                         if self.needs_fit {
@@ -1405,6 +1424,107 @@ impl RcadApp {
         if choice != current {
             self.apply_face_colour(face_name, face_label, choice);
         }
+    }
+
+    /// The repair list: every reference a feature lost, where it used to be, and
+    /// a way to put another one in its place.
+    ///
+    /// This is the Creo behaviour the user asked for: show the lost reference,
+    /// say where it was, and let a substitution fix the feature.
+    fn draw_lost_references(&mut self, ctx: &egui::Context) {
+        if self.lost_references.is_empty() {
+            return;
+        }
+        let replacement = self
+            .selection
+            .edge_references()
+            .first()
+            .map(|reference| reference.to_string());
+        let mut substitute: Option<(Uuid, String, String)> = None;
+        let mut dismiss = false;
+        egui::TopBottomPanel::bottom("lost_references").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} lost reference(s) - pick an edge and substitute",
+                        self.lost_references.len()
+                    ))
+                    .strong()
+                    .color(egui::Color32::from_rgb(235, 150, 90)),
+                );
+                for entry in &self.lost_references {
+                    let where_it_was = entry
+                        .last_description
+                        .clone()
+                        .unwrap_or_else(|| "no location was ever recorded for it".to_string());
+                    let hover = format!("{}: {where_it_was}", entry.feature_name);
+                    let clicked = match &replacement {
+                        Some(reference) => ui
+                            .button(format!("Substitute {} with {reference}", entry.reference))
+                            .on_hover_text(hover)
+                            .clicked(),
+                        None => ui
+                            .add_enabled(
+                                false,
+                                egui::Button::new(format!("Substitute {}", entry.reference)),
+                            )
+                            .on_hover_text(format!("{hover}\nSelect an edge in the viewport first"))
+                            .clicked(),
+                    };
+                    if clicked {
+                        if let Some(reference) = &replacement {
+                            substitute =
+                                Some((entry.feature, entry.reference.clone(), reference.clone()));
+                        }
+                    }
+                }
+                if ui.small_button("Dismiss").clicked() {
+                    dismiss = true;
+                }
+            });
+        });
+        if let Some((feature, lost, replacement)) = substitute {
+            self.substitute_reference(feature, &lost, &replacement);
+        }
+        if dismiss {
+            self.lost_references.clear();
+        }
+    }
+
+    /// Replace a lost reference with another one, in the feature that used it,
+    /// and rebuild. Returns false when there is nothing to replace.
+    pub fn substitute_reference(&mut self, feature_id: Uuid, lost: &str, replacement: &str) -> bool {
+        let snapshot = self.project.clone();
+        {
+            let Some(part) = self.get_active_part_mut() else {
+                return false;
+            };
+            let Some(target) = part
+                .features
+                .iter_mut()
+                .find(|candidate| candidate.id == feature_id)
+            else {
+                return false;
+            };
+            match &mut target.kind {
+                FeatureKind::Fillet { edges, .. } | FeatureKind::Chamfer { edges, .. } => {
+                    let EdgeSet::References(references) = edges else {
+                        return false;
+                    };
+                    let Some(slot) = references.iter_mut().find(|reference| *reference == lost) else {
+                        return false;
+                    };
+                    *slot = replacement.to_string();
+                }
+                _ => return false,
+            }
+        }
+        self.undo_stack.push(snapshot);
+        self.lost_references
+            .retain(|entry| !(entry.feature == feature_id && entry.reference == lost));
+        self.status = Some(format!("{lost} substituted with {replacement}."));
+        self.rebuild_active_part();
+        true
     }
 
     /// The selection strip: what is selected, in the order it was selected.
@@ -2706,6 +2826,8 @@ impl Default for RcadApp {
             selection_mode: SelectionMode::Object,
             edge_feature_size: 1.0,
             sketch_plane: None,
+            reference_memory: std::collections::BTreeMap::new(),
+            lost_references: Vec::new(),
             
             // Async kernel worker
             kernel_worker_tx: Some(job_tx),
@@ -2771,6 +2893,51 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
+}
+
+/// The references the part asks for that the body no longer has.
+///
+/// The kernel does the same test to decide whether to skip a feature; this one is
+/// what the repair list shows, and it names the feature the user has to fix.
+fn lost_references(part: &Part, mesh: &TriangleMesh) -> Vec<rcad_doc::LostReference> {
+    let present: std::collections::BTreeSet<&str> =
+        mesh.edges.iter().map(|edge| edge.name.as_str()).collect();
+    let mut lost = Vec::new();
+    for feature in &part.features {
+        let edges = match &feature.kind {
+            FeatureKind::Fillet { edges, .. } | FeatureKind::Chamfer { edges, .. } => edges,
+            _ => continue,
+        };
+        let EdgeSet::References(references) = edges else {
+            continue;
+        };
+        for reference in references {
+            if !present.contains(reference.as_str()) {
+                lost.push(rcad_doc::LostReference {
+                    feature: feature.id,
+                    feature_name: feature.name.clone(),
+                    reference: reference.clone(),
+                    last_location: None,
+                    last_description: None,
+                });
+            }
+        }
+    }
+    lost
+}
+
+/// Attach what is known about each lost reference from the last build that had
+/// it: the location and the sentence the repair list shows.
+fn describe_lost(
+    lost: &mut [rcad_doc::LostReference],
+    memory: &std::collections::BTreeMap<String, rcad_geom::ReferenceMemory>,
+) {
+    for entry in lost.iter_mut() {
+        if let Some(remembered) = memory.get(&entry.reference) {
+            entry.last_location = Some(remembered.location);
+            entry.last_description = Some(remembered.describe());
+        }
+    }
 }
 
 /// The plane of a mesh triangle: its centre, its normal and an x direction in
@@ -3553,6 +3720,94 @@ mod interaction_tests {
         let placement = placement.expect("the sketch should have extruded").expect("a placement");
         assert_eq!(placement.normal, [0.0, 1.0, 0.0]);
         assert_eq!(placement.x_direction, [1.0, 0.0, 0.0]);
+    }
+
+    /// The references a feature asks for that the body no longer has are what the
+    /// repair list shows, named by feature and reference.
+    #[test]
+    fn a_reference_the_body_lost_is_listed_for_repair() {
+        let mut part = Part::new_solid("P");
+        part.features.push(Feature::new(
+            "Round1",
+            FeatureKind::Fillet {
+                radius: 1.0,
+                edges: EdgeSet::References(vec!["gone".to_string(), "here".to_string()]),
+            },
+        ));
+        let mut mesh = TriangleMesh::default();
+        mesh.edges.push(test_edge(
+            "here",
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ));
+
+        let lost = lost_references(&part, &mesh);
+
+        assert_eq!(lost.len(), 1, "only the missing one is listed");
+        assert_eq!(lost[0].reference, "gone");
+        assert_eq!(lost[0].feature_name, "Round1");
+        assert!(lost[0].last_description.is_none(), "nothing is invented");
+    }
+
+    /// The repair list says where the reference was, from the last build that
+    /// still had it.
+    #[test]
+    fn the_repair_list_says_where_the_reference_was() {
+        let mut lost = vec![rcad_doc::LostReference {
+            reference: "gone".to_string(),
+            ..Default::default()
+        }];
+        let mut memory = std::collections::BTreeMap::new();
+        memory.insert(
+            "gone".to_string(),
+            rcad_geom::ReferenceMemory {
+                reference: "gone".to_string(),
+                kind: "edge".to_string(),
+                location: [20.0, 15.0, 8.0],
+                size: 40.0,
+                neighbours: vec!["face".to_string()],
+                label: "edge".to_string(),
+            },
+        );
+
+        describe_lost(&mut lost, &memory);
+
+        assert_eq!(lost[0].last_location, Some([20.0, 15.0, 8.0]));
+        let description = lost[0].last_description.clone().unwrap_or_default();
+        assert!(description.contains("40"), "{description}");
+        assert!(description.contains("20"), "{description}");
+    }
+
+    /// Substituting a lost reference rewrites the feature edge set in place, and
+    /// refuses when there is nothing to replace.
+    #[test]
+    fn substituting_a_lost_reference_rewrites_the_feature() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        let feature = Feature::new(
+            "Round1",
+            FeatureKind::Fillet {
+                radius: 1.0,
+                edges: EdgeSet::References(vec!["gone".to_string()]),
+            },
+        );
+        let id = feature.id;
+        app.get_active_part_mut().unwrap().features.push(feature);
+
+        assert!(app.substitute_reference(id, "gone", "edge(now|here)"));
+        let part = app.project.parts.first().unwrap();
+        match &part.features.last().unwrap().kind {
+            FeatureKind::Fillet { edges, .. } => assert_eq!(
+                *edges,
+                EdgeSet::References(vec!["edge(now|here)".to_string()])
+            ),
+            _ => unreachable!(),
+        }
+        assert!(
+            !app.substitute_reference(id, "not-there", "x"),
+            "a reference the feature never had cannot be substituted"
+        );
     }
 
     /// A tag whose face is gone (edited or deleted) is reported, not silently
