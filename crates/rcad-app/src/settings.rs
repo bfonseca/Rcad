@@ -18,6 +18,8 @@ pub struct AppSettings {
     pub show_grid: bool,
     /// Distance between grid lines, in model units.
     pub grid_spacing: f32,
+    /// Whether a click in a sketch snaps to the sketch grid.
+    pub sketch_snap: bool,
     /// Project folders, most recent first.
     pub recent_projects: Vec<String>,
     /// Folder of the last project opened, restored on start when
@@ -50,6 +52,7 @@ impl Default for AppSettings {
             history_width: 260.0,
             show_grid: true,
             grid_spacing: 10.0,
+            sketch_snap: true,
             recent_projects: Vec::new(),
             last_project: None,
             colour_ids: vec![
@@ -131,6 +134,7 @@ impl AppSettings {
                     }
                 }
                 "show_grid" => settings.show_grid = value.eq_ignore_ascii_case("true"),
+                "sketch_snap" => settings.sketch_snap = value.eq_ignore_ascii_case("true"),
                 "grid_spacing" => {
                     if let Ok(parsed) = value.parse::<f32>() {
                         settings.grid_spacing = parsed;
@@ -170,6 +174,7 @@ impl AppSettings {
              history_width = {:.1}\n\
              show_grid = {}\n\
              grid_spacing = {:.1}\n\
+             sketch_snap = {}\n\
              recent_projects = {}\n\
              last_project = {}\n\
              colour_ids = {}\n",
@@ -177,6 +182,7 @@ impl AppSettings {
             self.history_width,
             self.show_grid,
             self.grid_spacing,
+            self.sketch_snap,
             encode_list(&self.recent_projects),
             self.last_project.clone().unwrap_or_default(),
             encode_list(&self.colour_ids),
@@ -195,6 +201,7 @@ mod tests {
             history_width: 300.0,
             show_grid: false,
             grid_spacing: 25.0,
+            sketch_snap: false,
             recent_projects: vec!["/a".to_string(), "/b".to_string()],
             last_project: Some("/b".to_string()),
             colour_ids: vec!["fit zone".to_string()],

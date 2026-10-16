@@ -1,5 +1,7 @@
 use eframe::egui;
 
+use crate::sketch_ui::SketchTool;
+
 /// Keyboard shortcuts configuration
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // picker keys are reserved for selection modes
@@ -194,14 +196,16 @@ pub fn handle_shortcuts(app: &mut crate::app::RcadApp, ctx: &egui::Context, shor
     if shortcuts.plain_pressed(ctx, shortcuts.sketch_solve) {
         app.solve_sketch();
     }
+    // The sketch keys arm a tool; the shape arrives with the clicks, so the
+    // key and the toolbar button do the same thing.
     if shortcuts.plain_pressed(ctx, shortcuts.sketch_add_point) {
-        app.add_sketch_point();
+        app.set_sketch_tool(SketchTool::Point);
     }
     if shortcuts.plain_pressed(ctx, shortcuts.sketch_add_line) {
-        app.add_sketch_line();
+        app.set_sketch_tool(SketchTool::Line);
     }
     if shortcuts.plain_pressed(ctx, shortcuts.sketch_add_rect) {
-        app.add_sketch_rectangle();
+        app.set_sketch_tool(SketchTool::Rectangle);
     }
     
     // Feature operations
@@ -223,7 +227,9 @@ pub fn handle_shortcuts(app: &mut crate::app::RcadApp, ctx: &egui::Context, shor
         app.select_all();
     }
     if shortcuts.plain_pressed(ctx, shortcuts.deselect) {
-        app.deselect();
+        // Escape steps back through the sketch first: the pending click, then
+        // the tool, and only then the selection.
+        app.escape();
     }
     
     // Help - show shortcuts dialog
@@ -269,9 +275,9 @@ pub fn shortcuts_list() -> Vec<(&'static str, &'static str)> {
         ("Sketch Operations", ""),
         ("K", "New sketch"),
         ("Enter", "Solve constraints"),
-        ("P", "Add point"),
-        ("L", "Add line"),
-        ("R", "Add rectangle"),
+        ("P", "Point tool (click to place)"),
+        ("L", "Line tool (click two ends)"),
+        ("R", "Rectangle tool (click two corners)"),
         ("", ""),
         // Feature Operations
         ("Feature Operations", ""),
@@ -283,7 +289,7 @@ pub fn shortcuts_list() -> Vec<(&'static str, &'static str)> {
         // Selection
         ("Selection", ""),
         ("Ctrl+A", "Select all"),
-        ("Escape", "Deselect"),
+        ("Escape", "Cancel the pending click, then the tool, then the selection"),
         ("", ""),
         // Help
         ("Help", ""),

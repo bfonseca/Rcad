@@ -8,26 +8,62 @@
 
 > No repositório /home/bruno/Documentos/deepseek-harness/default-workspace/rcad,
 > lê o bloco de handover no topo de plans/implementation-tasks.md e continua o
-> trabalho: avança com o ponto 1 do sketch (desenhar com o rato - dois cliques
-> para um retângulo, com snap à grelha) e depois o ponto 2 (restrições, dimensões
-> e graus de liberdade no ecrã). No fim corre cargo test --workspace e
-> cargo check --workspace --all-targets (zero avisos), e faz commit em main e
-> push. Vai dizendo o que fizeste e o que ficou por fazer.
+> trabalho a partir dos "Próximo, por esta ordem". No fim corre
+> cargo test --workspace e cargo check --workspace --all-targets (zero avisos),
+> e faz commit em main e push. Vai dizendo o que fizeste e o que ficou por fazer.
 
+**Onde estamos (última sessão):** o sketch desenha-se com o rato e mostra o seu
+estado. Os pontos 1 e 2 do sketch ficaram feitos, commitados e verdes; tudo o
+resto descrito neste ficheiro, até essa data, continua feito.
 
-**Onde estamos (última sessão):** o sketch está a meio. Os pontos 1 e 2 abaixo
-ficaram por fazer; tudo o resto descrito neste ficheiro, até essa data, está
-feito, commitado e verde.
+**Feito nesta sessão (não repetir):**
 
-**Próximo, por esta ordem (instrução do utilizador):**
+1. **Desenhar com o rato.** Novo `crates/rcad-app/src/sketch_ui.rs`: ferramentas
+   de clique (Point, Line, Rectangle, Circle), snap à grelha do sketch (5 mm,
+   ligado por omissão e desligável no painel), e conversão ecrã <-> coordenadas
+   do sketch através do plano. Um retângulo são dois cliques (cantos opostos),
+   com pré-visualização elástica, coordenada sob o cursor à vista e `Esc` a
+   recuar um nível de cada vez (primeiro o clique pendente, depois a ferramenta,
+   só depois a seleção). `new_sketch` passa a olhar para o plano: de outra
+   direção o plano fica de perfil, o raio do ecrã nunca o encontra e desenhar
+   seria impossível sem se perceber porquê. Os botões e shortcuts do sketch
+   (`R`, `L`, `P`) passam a armar a ferramenta em vez de inserirem geometria
+   fixa.
+2. **Restrições, dimensões e graus de liberdade no ecrã.** O viewport desenha a
+   geometria do sketch, os glifos das restrições (H, V, `||`, perp, `=`, T, M,
+   F, coincidente, simétrico, concêntrico), as dimensões como linhas com setas e
+   valor (forte a verde, fraca a cinzento, de referência entre parênteses) e
+   marca os pontos que nada ancora (um ponto `Fixed`, um coincidente com um
+   ponto ancorado, ou o ponto médio de uma linha com as duas pontas ancoradas;
+   Horizontal/Vertical/Distance tiram liberdade mas não prendem o ponto). Por
+   baixo do viewport há uma faixa do sketch com
+   `analyze_dof()`/`constraint_status()` (presos vs restantes, contagens), a
+   ferramenta ativa com o próximo passo, o `Solve` e o snap. A
+   seleção de entidades do sketch (clique; Ctrl alterna) alimenta os botões de
+   restrição: Horizontal/Vertical, Paralelo/Perpendicular, Tangente, Igual,
+   Simétrico, Concêntrico, Ponto médio, Coincidente e Dimensão (mede a linha ou
+   os dois pontos escolhidos, e recusa repetir a mesma distância).
 
-1. **Desenhar com o rato**: dois cliques para um retângulo no viewport, com snap
-   à grelha, em coordenadas do sketch. Hoje a geometria entra só pelos
-   botões/shortcuts do sketch (`add_sketch_rectangle` etc.).
-2. **Restrições, dimensões e graus de liberdade no ecrã**: o crate `rcad-sketch`
-   já tem `analyze_dof()` e `constraint_status()`; nada é mostrado.
+**Próximo, por esta ordem:**
 
-**Feito até aqui (não repetir):** nomes estáveis de faces e arestas; referências
+1. **Editar dimensões**: duplo-clique para escrever outro valor, alternar
+   driving/driven e promover fraca a forte — a API existe em `rcad-sketch`
+   (`promote_to_strong`, `weak_constraints`, `driven_dimensions`) e ainda não
+   tem interface.
+2. **Os restantes comandos do sketch**: arco de 3 pontos, spline, `trim`,
+   `extend`, `offset`, `mirror` e `pattern`. Os botões existem e continuam
+   TODO; os métodos existem no crate (`trim_entity`, `extend_entity`,
+   `offset_entity`, `mirror_entities`, `linear_pattern`, `circular_pattern`).
+3. **Arrastar geometria do sketch** com o rato, para o utilizador poder testar os
+   graus de liberdade que a faixa mostra.
+4. **Projetar referências** para o sketch (`add_reference_geometry` já existe) e
+   desenhá-las.
+5. **Undo do sketch**: o `undo_stack` guarda só o `Project`; o desenho no sketch
+   não é reversível com Ctrl+Z.
+6. `analyze_dof` é uma contagem simples, não um cálculo de posto: deteção de
+   sobre/sub-restrição é aproximada e a redundância pode não ser exata.
+
+**Feito antes (não repetir):** nomes estáveis de faces e arestas; referências
 persistentes por feature; seleção ordenada partilhada (viewport + árvore) com
 consultas `boundary` / `tangent chain` / `surface ring`; fillet e chamfro por
 `EdgeSet` (References / All / Outer / Inner / Vertical / Horizontal) com ângulo
@@ -742,6 +778,10 @@ Still missing in the sketch, and not pretended otherwise:
 - Extruding along the sketch normal: needs the plane on the feature and a
   backend that extrudes along a direction.
 
+The first two bullets were done in the following session (drawing with the
+mouse, and constraints/dimensions/DOF on screen): see the handover block and the
+section "Drawing in the sketch, and reading it on screen" at the end.
+
 ### Lost references (next)
 
 See the section above: found/lost resolution instead of failure, the last known
@@ -826,10 +866,13 @@ test that a sketch off the XY plane records the plane on the Revolve.
 Still missing in the sketch, in order:
 
 1. Drawing with the mouse: two clicks for a rectangle, snapping to the grid.
+   (Done in the next session.)
 2. Constraints and dimensions on screen, and the degrees of freedom
    (`Sketch::analyze_dof` / `constraint_status` exist but are not shown).
+   (Done in the next session.)
 3. The sketch plane as a persistent reference, not three numbers: today a sketch
-   does not follow the face it was drawn on when that face moves.
+   does not follow the face it was drawn on when that face moves. (Done in the
+   section that follows.)
 
 ### The sketch plane is a reference now (step 3, point 3 of 3)
 
@@ -846,5 +889,72 @@ in the repair list, reusing the machinery the rounds and breaks use.
 Tests: a profile placed by reference sits on the top face of a box and is swept
 from it; a reference that is gone is reported and the stored plane is used.
 
-Remaining in the sketch: drawing with the mouse (two clicks, grid snap) and
-constraints/dimensions plus degrees of freedom on screen.
+Remaining in the sketch at that point: drawing with the mouse (two clicks, grid
+snap) and constraints/dimensions plus degrees of freedom on screen. Both were
+done in the following session, below.
+
+### Drawing in the sketch, and reading it on screen (steps 1 and 2)
+
+A new module, `crates/rcad-app/src/sketch_ui.rs`, is the part that talks
+between the viewport and `rcad-sketch`. Everything except the drawing
+functions is pure, so the rules are tested without a UI:
+
+- The tools are two-click shapes. `Point` places on one click; `Line`,
+  `Rectangle` and `Circle` take a first click and commit on the second,
+  with a rubber-band preview of what the second click would make. A zero-sized
+  shape is refused and the first click kept, instead of adding a degenerate
+  line.
+- The snap rounds to the sketch grid (5 mm) in sketch coordinates; the
+  "Snap to grid" checkbox in the sketch strip turns it off and the choice is
+  saved as `sketch_snap` in the settings file.
+- Screen <-> sketch conversion goes through the plane: the ray from the screen
+  point meets the sketch plane and the hit is expressed in the plane basis
+  (`sketch_basis`). A round-trip test pins the two directions together.
+- `SketchDraft` holds the tool and the pending first click. Escape drops
+  the pending click first, then the tool, and only then the model selection, so a
+  half-drawn rectangle is never lost by clearing something else.
+- `new_sketch` now looks at the plane it placed the sketch on: from the
+  default orbit direction most planes are edge-on, a screen ray never meets
+  them, and drawing did nothing with no explanation. The first automatic frame
+  of a rebuild no longer steals that view either, and a mesh with no size (a
+  lone construction point) no longer frames the camera at nothing.
+
+On screen the same module draws what a Creo user expects while sketching:
+
+- the geometry: lines, circles, arcs, splines as control polygons, points;
+- one glyph per constraint, at the geometry it holds (H, V, `||`, perp, `=`,
+  `R=`, T, sym, concentric, M, F, coincident), staggered when several
+  share a place;
+- dimensions as measured lines with arrowheads and the value: strong driving in
+  green, weak (Intent Manager) in grey, driven (reference) in blue between
+  parentheses;
+- a ring on every point nothing anchors - a `Fixed` point, a point
+  coincident with an anchored one, or the midpoint of a line whose two ends are
+  anchored. Horizontal/Vertical/Distance take freedom away without saying where
+  a point goes, so they do not anchor it.
+
+Under the viewport a sketch strip shows `constraint_status()` and
+`analyze_dof()` (constrained vs left, redundant), the entity counts, the
+active tool with its next step, Solve and the snap. With the Select tool a click
+picks a sketch entity (Ctrl toggles); the constraint buttons then apply to that
+selection - Horizontal, Vertical, Parallel, Perpendicular, Tangent, Equal
+(length or radius), Symmetric, Concentric, Midpoint, Coincident - and Dimension,
+which measures the selected line or the two selected points and adds a strong
+driving dimension. An action that does not fit the selection is refused with the
+sentence that says what to select, and the selection is given back. The sketch
+keys and buttons (R, L, P) arm a tool now instead of inserting fixed geometry.
+
+Tests: the snap and the two-click state machine; the screen/sketch round trip
+and a hit test on a line; the glyphs of a rectangle; strong, weak and driven
+dimensions; free points and that Horizontal alone does not anchor one; the
+validation of every constraint action; and app-level tests that draw a snapped
+rectangle through viewport clicks, step back with Escape, apply a constraint to
+the sketch selection, dimension a clicked line, and leave a click on empty
+sketch space to the model picker.
+
+Still missing in the sketch, in order: editing a dimension (double-click, or
+toggle driving/driven, promote weak to strong), the remaining commands (3-point
+arc, spline, trim, extend, offset, mirror, pattern), dragging geometry,
+projecting reference geometry, and undo for the sketch (the undo stack holds the
+project, not the sketch). `analyze_dof` is a count, not a rank, so the
+redundancy number is approximate.

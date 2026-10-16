@@ -301,6 +301,12 @@ fn view_proj(rect: Rect, camera: &OrbitCamera) -> Mat4 {
     camera.view_proj(aspect)
 }
 
+/// Where a world point lands on screen, or `None` when it is behind the camera
+/// or outside the clip range.
+pub fn project_world(rect: Rect, camera: &OrbitCamera, point: Vec3) -> Option<Pos2> {
+    project(view_proj(rect, camera), rect, point)
+}
+
 fn project(vp: Mat4, rect: Rect, p: Vec3) -> Option<Pos2> {
     let clip = vp * Vec4::new(p.x, p.y, p.z, 1.0);
     if clip.w.abs() < 1e-6 {

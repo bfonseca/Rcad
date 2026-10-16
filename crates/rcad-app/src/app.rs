@@ -5,6 +5,10 @@ use crate::camera::{OrbitCamera, Projection};
 use crate::settings::AppSettings;
 use crate::undo::UndoStack;
 use crate::shortcuts::{Shortcuts, handle_shortcuts, shortcuts_list};
+use crate::sketch_ui::{
+    self, ConstraintAction, OverlayState, SketchDraft, SketchEdit, SketchTool, GRID_EXTENT,
+    GRID_SPACING, HIT_RADIUS,
+};
 use crate::ui::{
     DatumKind, FloatingAction, FloatingBar, HistoryOverlay, HistoryOverlayAction, ToolbarAction,
     VerticalToolbar,
@@ -119,6 +123,12 @@ pub struct RcadApp {
     /// selection named one: a datum plane feature or a model face. With it, a
     /// feature the sketch feeds follows the plane instead of a snapshot of it.
     sketch_plane_reference: Option<String>,
+    /// The sketch mouse tool and the first click of a two-click shape.
+    sketch_draft: SketchDraft,
+    /// Sketch entities picked in the viewport: points, lines, circles, arcs.
+    sketch_selection: Vec<Uuid>,
+    /// The sketch entity the cursor is over.
+    sketch_hover: Option<Uuid>,
     
     // Async kernel worker
     kernel_worker_tx: Option<Sender<RebuildJob>>,
@@ -272,6 +282,9 @@ impl RcadApp {
             reference_memory: std::collections::BTreeMap::new(),
             lost_references: Vec::new(),
             sketch_plane_reference: None,
+            sketch_draft: SketchDraft::default(),
+            sketch_selection: Vec::new(),
+            sketch_hover: None,
             
             // Async kernel worker
             kernel_worker_tx: Some(job_tx),
@@ -743,6 +756,10 @@ impl RcadApp {
         // reference and is waiting for another one.
         self.draw_lost_references(ctx);
 
+        // 2a-bis) The sketch strip: status, degrees of freedom and the active
+        // tool, shown only while a sketch is open.
+        self.draw_sketch_panel(ctx);
+
         // 2b) Selection bar: the ordered selection, the way Creo shows it.
         self.draw_selection_bar(ctx);
 
@@ -765,14 +782,43 @@ impl RcadApp {
                 self.settings.grid_spacing,
             );
 
-            // The plane the open sketch is being drawn on: seeing it is the
-            // difference between drawing and guessing.
+            // The open sketch takes the mouse before the model picker: its
+            // tools turn clicks into geometry and read the cursor in sketch
+            // coordinates, so the grid snap is visible while drawing.
+            let (sketch_handled, sketch_cursor) = self.sketch_interaction(ui, &response);
+
+            // The plane the open sketch is being drawn on, and the sketch on
+            // it: seeing both is the difference between drawing and guessing.
             if let (Some((origin, normal, x_direction)), Some(sketch)) =
                 (self.sketch_plane, self.sketch.as_ref())
             {
                 if !sketch.in_placement_mode {
                     let (u, v) = sketch_basis(normal, x_direction);
-                    draw_sketch_plane(ui, response.rect, &self.camera, origin, u, v, 50.0, 5.0);
+                    draw_sketch_plane(
+                        ui,
+                        response.rect,
+                        &self.camera,
+                        origin,
+                        u,
+                        v,
+                        GRID_EXTENT,
+                        GRID_SPACING as f32,
+                    );
+                    // Geometry, constraints, dimensions and the points that
+                    // are still free, all in sketch coordinates.
+                    sketch_ui::draw_sketch_overlay(
+                        ui,
+                        response.rect,
+                        &self.camera,
+                        &OverlayState {
+                            sketch,
+                            plane: (origin, normal, x_direction),
+                            selection: &self.sketch_selection,
+                            hovered: self.sketch_hover,
+                            draft: &self.sketch_draft,
+                            cursor: sketch_cursor,
+                        },
+                    );
                 }
             }
 
@@ -796,7 +842,12 @@ impl RcadApp {
             // specific first. A right-click cycles through it; a left-click
             // selects the highlighted candidate, Ctrl toggles and Shift extends,
             // keeping the order the user selected in.
-            if response.hovered() {
+            if sketch_handled {
+                // The sketch consumed the click: no model selection this frame.
+                self.hover = None;
+                self.hover_candidates.clear();
+                self.hover_cycle = 0;
+            } else if response.hovered() {
                 let pos = ui
                     .input(|i| i.pointer.hover_pos())
                     .unwrap_or(response.rect.center());
@@ -866,7 +917,12 @@ impl RcadApp {
                         // previously opened at a fixed camera distance.
                         if self.needs_fit {
                             if let Some((min, max)) = self.mesh.bounds() {
-                                self.camera.fit_to_bounds(min, max);
+                                // A box with no size - a lone construction
+                                // point - would frame the camera at nothing
+                                // (distance 1.7) and hide the whole document.
+                                if (max - min).length() > 1e-3 {
+                                    self.camera.fit_to_bounds(min, max);
+                                }
                                 self.needs_fit = false;
                             }
                         }
@@ -2126,6 +2182,17 @@ impl RcadApp {
                 sketch.set_sketch_plane(origin, normal, x_direction);
                 self.sketch_plane = Some((origin, normal, x_direction));
                 self.sketch_plane_reference = self.selection_plane_reference();
+                // A sketch is drawn face-on. From the default orbit direction
+                // most planes are edge-on, a screen ray never meets the sketch
+                // and drawing would silently do nothing.
+                self.camera.look_from(glam::Vec3::new(
+                    normal[0] as f32,
+                    normal[1] as f32,
+                    normal[2] as f32,
+                ));
+                // The sketch view is deliberate: the automatic frame of the
+                // first rebuild must not take it away.
+                self.needs_fit = false;
                 self.status = Some("Sketch placed on the selected reference.".to_string());
             }
             None => {
@@ -2141,6 +2208,11 @@ impl RcadApp {
             }
         }
 
+        // A fresh sketch starts with no tool, no sketch selection and no
+        // half-finished shape.
+        self.sketch_draft.begin(SketchTool::Select);
+        self.sketch_selection.clear();
+        self.sketch_hover = None;
         self.sketch = Some(sketch);
     }
 
@@ -2202,29 +2274,348 @@ impl RcadApp {
         }
     }
     
-    pub fn add_sketch_point(&mut self) {
+    /// Draw a rectangle straight away, with the corners given. Used by the
+    /// tests that need a profile; the interface draws through `sketch_click`.
+    #[cfg(test)]
+    fn add_sketch_rectangle(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
         if let Some(sketch) = &mut self.sketch {
-            self.undo_stack.push(self.project.clone());
-            sketch.add_point(0.0, 0.0);
+            sketch.add_rectangle(x0, y0, x1, y1);
         }
     }
-    
-    pub fn add_sketch_line(&mut self) {
-        if let Some(sketch) = &mut self.sketch {
-            if sketch.points.len() >= 2 {
-                self.undo_stack.push(self.project.clone());
-                let n = sketch.points.len();
-                let (a, b) = (sketch.points[n - 2].id, sketch.points[n - 1].id);
-                sketch.add_line(a, b);
+
+    /// Choose the tool the next viewport click uses.
+    pub fn set_sketch_tool(&mut self, tool: SketchTool) {
+        if self.sketch.is_none() {
+            self.last_error = Some("Start a sketch (K) before drawing in one.".to_string());
+            return;
+        }
+        self.sketch_draft.begin(tool);
+        self.status = Some(format!("{}: {}", tool.label(), tool.hint()));
+    }
+
+    /// Escape: drop the half-finished shape, then the tool, then the selection.
+    ///
+    /// Creo steps back one level at a time; clearing the model selection while
+    /// a rectangle was half drawn would lose the shape without saying so.
+    pub fn escape(&mut self) {
+        if self.sketch_draft.cancel() {
+            let tool = self.sketch_draft.tool();
+            self.status = Some(format!("{}: {}", tool.label(), tool.hint()));
+            return;
+        }
+        self.deselect();
+    }
+
+    /// Apply a constraint action to the current sketch selection, then solve.
+    ///
+    /// A refused action gives the selection back, so the user can add what was
+    /// missing instead of selecting everything again.
+    pub fn apply_sketch_constraint(&mut self, action: ConstraintAction) {
+        let Some(sketch) = self.sketch.as_mut() else {
+            self.last_error = Some("No sketch is open.".to_string());
+            return;
+        };
+        let selection = std::mem::take(&mut self.sketch_selection);
+        match sketch_ui::apply_constraint(sketch, &selection, action) {
+            Ok(message) => {
+                self.last_error = None;
+                self.status = Some(message);
+                if let Err(error) = sketch.solve() {
+                    self.last_error = Some(format!("Constraints: {error}"));
+                }
+            }
+            Err(message) => {
+                self.last_error = Some(message);
+                self.sketch_selection = selection;
             }
         }
     }
-    
-    pub fn add_sketch_rectangle(&mut self) {
-        if let Some(sketch) = &mut self.sketch {
-            self.undo_stack.push(self.project.clone());
-            sketch.add_rectangle(-25.0, -25.0, 25.0, 25.0);
+
+    /// The cursor in sketch coordinates, snapped to the grid when the snap is
+    /// on. None without a sketch plane, or when the view is edge-on to it.
+    pub fn sketch_cursor(&self, rect: egui::Rect, pos: egui::Pos2) -> Option<[f64; 2]> {
+        let plane = self.sketch_plane?;
+        let raw = sketch_ui::screen_to_sketch(pos, rect, &self.camera, plane)?;
+        Some(if self.settings.sketch_snap {
+            sketch_ui::snap_to_grid(raw, GRID_SPACING)
+        } else {
+            raw
+        })
+    }
+
+    /// One click inside the viewport while a sketch is open.
+    ///
+    /// Returns true when the sketch consumed the click, so the model picker
+    /// stays out of the way. `mode` is the Ctrl/Shift combination of the click.
+    pub fn sketch_click(&mut self, rect: egui::Rect, pos: egui::Pos2, mode: ClickMode) -> bool {
+        let Some(plane) = self.sketch_plane else {
+            return false;
+        };
+        let Some(cursor) = self.sketch_cursor(rect, pos) else {
+            return false;
+        };
+        // Take the sketch out while the handlers run: the click also touches
+        // the selection, the status and the solver, and holding a borrow of
+        // one field while writing another is needless trouble.
+        let Some(mut sketch) = self.sketch.take() else {
+            return false;
+        };
+        if sketch.in_placement_mode {
+            self.sketch = Some(sketch);
+            return false;
         }
+
+        let mut consumed = false;
+        match self.sketch_draft.tool() {
+            // The select tool picks a sketch entity. A click on empty space is
+            // left to the model selection below.
+            SketchTool::Select => {
+                if let Some(hit) =
+                    sketch_ui::hit_test(&sketch, rect, &self.camera, plane, pos, HIT_RADIUS)
+                {
+                    if mode.toggle && self.sketch_selection.contains(&hit.id) {
+                        self.sketch_selection.retain(|id| *id != hit.id);
+                    } else {
+                        if !mode.toggle && !mode.extend {
+                            self.sketch_selection.clear();
+                        }
+                        if !self.sketch_selection.contains(&hit.id) {
+                            self.sketch_selection.push(hit.id);
+                        }
+                    }
+                    self.sketch_hover = Some(hit.id);
+                    let label = sketch_ui::entity_label(&sketch, hit.id);
+                    self.status = Some(format!(
+                        "{label} selected ({} in the sketch selection).",
+                        self.sketch_selection.len()
+                    ));
+                    consumed = true;
+                }
+            }
+            // The dimension tool takes the entity under the cursor and
+            // dimensions it at the size it has now.
+            SketchTool::Dimension => {
+                if let Some(hit) =
+                    sketch_ui::hit_test(&sketch, rect, &self.camera, plane, pos, HIT_RADIUS)
+                {
+                    let selection = vec![hit.id];
+                    match sketch_ui::apply_constraint(
+                        &mut sketch,
+                        &selection,
+                        ConstraintAction::Dimension,
+                    ) {
+                        Ok(message) => {
+                            self.last_error = None;
+                            self.status = Some(message);
+                            let _ = sketch.solve();
+                            self.sketch_selection = selection;
+                        }
+                        Err(message) => self.last_error = Some(message),
+                    }
+                    consumed = true;
+                }
+            }
+            // The drawing tools: the click is the corner, end or centre the
+            // tool was waiting for.
+            _ => {
+                let edit = self.sketch_draft.click(&mut sketch, cursor);
+                self.report_sketch_edit(&edit);
+                if edit.added_geometry() {
+                    if let Err(error) = sketch.solve() {
+                        self.last_error = Some(format!("Constraints: {error}"));
+                    }
+                }
+                consumed = true;
+            }
+        }
+        self.sketch = Some(sketch);
+        consumed
+    }
+
+    /// Say what a drawing click did.
+    fn report_sketch_edit(&mut self, edit: &SketchEdit) {
+        self.last_error = None;
+        match edit {
+            SketchEdit::Pending => {
+                self.status = Some("First point set: click again to finish.".to_string())
+            }
+            SketchEdit::Point(_) => self.status = Some("Point placed.".to_string()),
+            SketchEdit::Line(_) => self.status = Some("Line drawn.".to_string()),
+            SketchEdit::Rectangle(_) => self.status = Some("Rectangle drawn.".to_string()),
+            SketchEdit::Circle(_) => self.status = Some("Circle drawn.".to_string()),
+            SketchEdit::TooSmall => {
+                self.last_error =
+                    Some("That shape has no size: click further from the first point.".to_string())
+            }
+            SketchEdit::NotDrawing => {}
+        }
+    }
+
+    /// Sketch input for this frame: the snapped cursor, the entity under it and
+    /// what a click did. Returns (click consumed, cursor in sketch coordinates).
+    fn sketch_interaction(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+    ) -> (bool, Option<[f64; 2]>) {
+        let Some(plane) = self.sketch_plane else {
+            self.sketch_hover = None;
+            return (false, None);
+        };
+        let pos = if response.hovered() {
+            ui.input(|i| i.pointer.hover_pos())
+        } else {
+            None
+        };
+        let cursor = pos.and_then(|pos| self.sketch_cursor(response.rect, pos));
+        let placed = self
+            .sketch
+            .as_ref()
+            .map(|sketch| !sketch.in_placement_mode)
+            .unwrap_or(false);
+        if !placed {
+            self.sketch_hover = None;
+            return (false, cursor);
+        }
+
+        // An edge-on view has no sketch coordinates for the cursor: the ray is
+        // parallel to the plane. Drawing clicks would do nothing, so say why.
+        if response.hovered() && cursor.is_none() && self.sketch_draft.tool().creates_geometry() {
+            self.status = Some(
+                "The view is edge-on to the sketch plane: rotate the view to draw.".to_string(),
+            );
+        }
+
+        self.sketch_hover = pos.and_then(|pos| {
+            let sketch = self.sketch.as_ref()?;
+            sketch_ui::hit_test(sketch, response.rect, &self.camera, plane, pos, HIT_RADIUS)
+                .map(|hit| hit.id)
+        });
+
+        let mut consumed = false;
+        if ui.input(|i| i.pointer.primary_clicked()) {
+            if let Some(pos) = pos {
+                let mode = ui.input(|i| ClickMode::from_modifiers(&i.modifiers));
+                consumed = self.sketch_click(response.rect, pos, mode);
+            }
+        }
+        (consumed, cursor)
+    }
+
+    /// The sketch strip, above the status bar: what the sketch is, how
+    /// constrained it is, which tool is active and how to leave it.
+    ///
+    /// Shown only while a sketch is open, so the viewport keeps its room the
+    /// rest of the time.
+    fn draw_sketch_panel(&mut self, ctx: &egui::Context) {
+        let Some(sketch) = self.sketch.as_ref() else {
+            return;
+        };
+        let name = sketch.name.clone();
+        let status = sketch.constraint_status();
+        let (total, constrained, redundant) = sketch.analyze_dof();
+        let free = total.saturating_sub(constrained);
+        let weak = sketch.weak_constraints().len();
+        let driven = sketch.driven_dimensions().len();
+        let (points, lines, circles, arcs) = (
+            sketch.points.len(),
+            sketch.lines.len(),
+            sketch.circles.len(),
+            sketch.arcs.len(),
+        );
+        let constraints = sketch.constraints.len();
+        let dimensions = sketch_ui::dimensions(sketch).len();
+        let (colour, verdict) = match status {
+            "fully-constrained" => (egui::Color32::from_rgb(120, 220, 120), "fully constrained"),
+            "over-constrained" => (egui::Color32::LIGHT_RED, "over-constrained"),
+            _ => (egui::Color32::from_rgb(240, 200, 90), "under-constrained"),
+        };
+        let placing = sketch.in_placement_mode;
+        let tool = self.sketch_draft.tool();
+        let pending = self.sketch_draft.pending().is_some();
+        let selected = self.sketch_selection.len();
+
+        egui::TopBottomPanel::bottom("sketch_panel").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("Sketch {name}")).strong());
+                if placing {
+                    ui.label("waiting for a plane: select a planar face or datum plane");
+                } else {
+                    ui.colored_label(colour, verdict);
+                    ui.separator();
+                    ui.label(format!("DOF {constrained}/{total} constrained — {free} left"));
+                    if redundant > 0 {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_RED,
+                            format!("{redundant} redundant"),
+                        );
+                    }
+                    ui.separator();
+                    ui.label(format!(
+                        "{points} points · {lines} lines · {circles} circles · {arcs} arcs"
+                    ));
+                    ui.separator();
+                    ui.label(format!(
+                        "{constraints} constraints · {dimensions} dimensions"
+                    ));
+                    if weak > 0 {
+                        ui.label(format!("· {weak} weak"));
+                    }
+                    if driven > 0 {
+                        ui.label(format!("· {driven} driven"));
+                    }
+                }
+                ui.separator();
+                ui.checkbox(&mut self.settings.sketch_snap, "Snap to grid");
+                if ui.button("Solve").clicked() {
+                    self.solve_sketch();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Tool: {} — {}", tool.label(), tool.hint()))
+                        .size(11.0),
+                );
+                if pending {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 210, 90),
+                        "first point set (Esc cancels)",
+                    );
+                }
+                if selected > 0 {
+                    ui.label(format!("· {selected} sketch entities selected"));
+                }
+                ui.separator();
+                ui.label(egui::RichText::new("Esc: cancel, then Select").size(11.0));
+            });
+        });
+    }
+
+    /// A sketch with geometry, constraints and dimensions, for screenshots.
+    pub fn open_sketch_demo(&mut self) {
+        self.sketch_plane = Some(([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]));
+        self.sketch_plane_reference = None;
+        let mut sketch = rcad_sketch::Sketch::new("Sketch1");
+        sketch.set_standard_plane(rcad_sketch::StandardPlane::XY);
+        let corners = sketch.add_rectangle(-30.0, -20.0, 30.0, 20.0);
+        sketch.add_circle(0.0, 0.0, 8.0);
+        // One strong driving dimension and one weak driving one, so the two
+        // colours the viewport uses are both visible.
+        sketch.add_dimension(corners[0], corners[1], 60.0, true, true);
+        sketch.add_dimension(corners[1], corners[2], 40.0, true, false);
+        sketch.constraints.push(rcad_sketch::Constraint::Fixed {
+            point: corners[0],
+        });
+        let mut camera = self.camera.clone();
+        camera.look_from(glam::Vec3::Z);
+        self.camera = camera;
+        // The sketch view is what the screenshot is about: keep it.
+        self.needs_fit = false;
+        self.sketch_draft.begin(SketchTool::Rectangle);
+        self.sketch_selection.clear();
+        self.sketch_hover = None;
+        self.sketch = Some(sketch);
+        self.status = Some("Sketch demo: rectangle, circle, dimensions, DOF.".to_string());
     }
     
     pub fn extrude_sketch(&mut self) {
@@ -2423,51 +2814,51 @@ impl RcadApp {
             }
             
             ToolbarAction::SketchNew => self.new_sketch(),
-            ToolbarAction::SketchLine => self.add_sketch_line(),
-            ToolbarAction::SketchRectangle => self.add_sketch_rectangle(),
-            ToolbarAction::SketchCircle => {
-                // TODO: Add circle
-            }
+            // The drawing tools are two-click tools now: pressing one arms it,
+            // the clicks in the viewport draw. Nothing enters the sketch from a
+            // button on its own.
+            ToolbarAction::SketchLine => self.set_sketch_tool(SketchTool::Line),
+            ToolbarAction::SketchRectangle => self.set_sketch_tool(SketchTool::Rectangle),
+            ToolbarAction::SketchCircle => self.set_sketch_tool(SketchTool::Circle),
             ToolbarAction::SketchArc => {
-                // TODO: Add arc
+                // TODO: 3-point arc tool
             }
             ToolbarAction::SketchSpline => {
-                // TODO: Add spline
+                // TODO: spline tool
             }
-            ToolbarAction::SketchPoint => self.add_sketch_point(),
+            ToolbarAction::SketchPoint => self.set_sketch_tool(SketchTool::Point),
+            // Constraints apply to the current sketch selection.
             ToolbarAction::SketchConstraintHorizontal => {
-                // TODO: Add horizontal constraint
+                self.apply_sketch_constraint(ConstraintAction::Horizontal)
             }
             ToolbarAction::SketchConstraintVertical => {
-                // TODO: Add vertical constraint
+                self.apply_sketch_constraint(ConstraintAction::Vertical)
             }
             ToolbarAction::SketchConstraintParallel => {
-                // TODO: Add parallel constraint
+                self.apply_sketch_constraint(ConstraintAction::Parallel)
             }
             ToolbarAction::SketchConstraintPerpendicular => {
-                // TODO: Add perpendicular constraint
+                self.apply_sketch_constraint(ConstraintAction::Perpendicular)
             }
             ToolbarAction::SketchConstraintTangent => {
-                // TODO: Add tangent constraint
+                self.apply_sketch_constraint(ConstraintAction::Tangent)
             }
             ToolbarAction::SketchConstraintEqual => {
-                // TODO: Add equal constraint
+                self.apply_sketch_constraint(ConstraintAction::Equal)
             }
             ToolbarAction::SketchConstraintSymmetric => {
-                // TODO: Add symmetric constraint
+                self.apply_sketch_constraint(ConstraintAction::Symmetric)
             }
             ToolbarAction::SketchConstraintConcentric => {
-                // TODO: Add concentric constraint
+                self.apply_sketch_constraint(ConstraintAction::Concentric)
             }
             ToolbarAction::SketchConstraintMidpoint => {
-                // TODO: Add midpoint constraint
+                self.apply_sketch_constraint(ConstraintAction::Midpoint)
             }
             ToolbarAction::SketchConstraintCoincident => {
-                // TODO: Add coincident constraint
+                self.apply_sketch_constraint(ConstraintAction::Coincident)
             }
-            ToolbarAction::SketchDimension => {
-                // TODO: Add dimension
-            }
+            ToolbarAction::SketchDimension => self.set_sketch_tool(SketchTool::Dimension),
             ToolbarAction::SketchTrim => {
                 // TODO: Trim
             }
@@ -2862,6 +3253,9 @@ impl Default for RcadApp {
             reference_memory: std::collections::BTreeMap::new(),
             lost_references: Vec::new(),
             sketch_plane_reference: None,
+            sketch_draft: SketchDraft::default(),
+            sketch_selection: Vec::new(),
+            sketch_hover: None,
             
             // Async kernel worker
             kernel_worker_tx: Some(job_tx),
@@ -3718,7 +4112,7 @@ mod interaction_tests {
         let mut app = RcadApp::default();
         let _ = app.create_default_datum_geometry();
         app.new_sketch();
-        app.add_sketch_rectangle();
+        app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
         app.solve_sketch();
 
         app.extrude_sketch();
@@ -3741,7 +4135,7 @@ mod interaction_tests {
         let _ = app.create_default_datum_geometry();
         app.new_sketch();
         app.sketch_plane = Some(([0.0; 3], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]));
-        app.add_sketch_rectangle();
+        app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
         app.solve_sketch();
 
         app.extrude_sketch();
@@ -3852,7 +4246,7 @@ mod interaction_tests {
         let _ = app.create_default_datum_geometry();
         app.new_sketch();
         app.sketch_plane = Some(([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
-        app.add_sketch_rectangle();
+        app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
         app.solve_sketch();
 
         app.revolve_sketch();
@@ -4088,6 +4482,204 @@ mod interaction_tests {
         assert_eq!(app.manifest.general_tolerance.linear, 0.002);
         assert_eq!(app.manifest.colour("fit zone"), Some([10, 20, 30]));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A sketch open on the XY plane. The camera looks straight down at it:
+    /// from the default direction the plane is edge-on and a screen ray never
+    /// meets it, so drawing would be impossible.
+    fn open_xy_sketch(app: &mut RcadApp) {
+        app.sketch_plane = Some(([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]));
+        app.sketch_plane_reference = None;
+        app.camera.look_from(glam::Vec3::Z);
+        app.sketch = Some(Sketch::new("Sketch1"));
+        app.sketch_draft.begin(SketchTool::Select);
+        app.sketch_selection.clear();
+    }
+
+    /// The viewport rectangle the sketch tests click in.
+    fn viewport_rect() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))
+    }
+
+    /// The screen position of a sketch point in that rectangle.
+    fn screen_of(app: &RcadApp, point: [f64; 2]) -> egui::Pos2 {
+        sketch_ui::sketch_to_screen(
+            viewport_rect(),
+            &app.camera,
+            app.sketch_plane.expect("a sketch plane"),
+            point,
+        )
+        .expect("the point is in view")
+    }
+
+    /// Point 1 of the sketch: two clicks in the viewport draw a rectangle, and
+    /// its corners land on the grid.
+    #[test]
+    fn two_viewport_clicks_draw_a_snapped_rectangle() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.set_sketch_tool(SketchTool::Rectangle);
+
+        // 12, 7 is not on the 5 mm grid; the snap moves it to 10, 5.
+        let first = screen_of(&app, [12.0, 7.0]);
+        assert!(app.sketch_click(viewport_rect(), first, ClickMode::PLAIN));
+        assert!(
+            app.sketch.as_ref().unwrap().lines.is_empty(),
+            "one click is half a rectangle"
+        );
+        assert_eq!(app.sketch_draft.pending(), Some([10.0, 5.0]));
+
+        let second = screen_of(&app, [38.0, 26.0]);
+        assert!(app.sketch_click(viewport_rect(), second, ClickMode::PLAIN));
+
+        let sketch = app.sketch.as_ref().unwrap();
+        assert_eq!(sketch.lines.len(), 4, "four sides of the rectangle");
+        let corners: Vec<[f64; 2]> = sketch.points.iter().map(|point| [point.x, point.y]).collect();
+        for expected in [[10.0, 5.0], [40.0, 5.0], [40.0, 25.0], [10.0, 25.0]] {
+            assert!(
+                corners.contains(&expected),
+                "{expected:?} is missing from {corners:?}"
+            );
+        }
+    }
+
+    /// Turning the snap off keeps the coordinates the user clicked.
+    #[test]
+    fn turning_the_snap_off_keeps_the_clicked_coordinates() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.settings.sketch_snap = false;
+        app.set_sketch_tool(SketchTool::Rectangle);
+
+        let corner = screen_of(&app, [12.0, 7.0]);
+        app.sketch_click(viewport_rect(), corner, ClickMode::PLAIN);
+
+        let pending = app.sketch_draft.pending().expect("a first corner");
+        assert!(
+            (pending[0] - 12.0).abs() < 1e-3 && (pending[1] - 7.0).abs() < 1e-3,
+            "{pending:?}"
+        );
+    }
+
+    /// Escape steps back one level at a time instead of throwing the tool away.
+    #[test]
+    fn escape_steps_back_through_the_sketch_tool() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.set_sketch_tool(SketchTool::Rectangle);
+        let origin = screen_of(&app, [0.0, 0.0]);
+        app.sketch_click(viewport_rect(), origin, ClickMode::PLAIN);
+        assert!(app.sketch_draft.pending().is_some());
+
+        app.escape();
+        assert!(
+            app.sketch_draft.pending().is_none(),
+            "the pending corner goes first"
+        );
+        assert_eq!(
+            app.sketch_draft.tool(),
+            SketchTool::Rectangle,
+            "the tool stays"
+        );
+
+        app.escape();
+        assert_eq!(app.sketch_draft.tool(), SketchTool::Select);
+        assert!(
+            app.sketch.as_ref().unwrap().lines.is_empty(),
+            "nothing was drawn"
+        );
+    }
+
+    /// Point 2: a constraint applies to the sketch selection, and the sketch is
+    /// solved straight away.
+    #[test]
+    fn a_constraint_applies_to_the_sketch_selection() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
+        let line = app.sketch.as_ref().unwrap().lines[0].id;
+        app.sketch_selection = vec![line];
+
+        let before = app.sketch.as_ref().unwrap().constraints.len();
+        app.apply_sketch_constraint(ConstraintAction::Horizontal);
+
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+        assert_eq!(app.sketch.as_ref().unwrap().constraints.len(), before + 1);
+    }
+
+    /// A constraint that does not fit says what to select and gives the
+    /// selection back.
+    #[test]
+    fn a_constraint_that_does_not_fit_explains_itself() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
+        let line = app.sketch.as_ref().unwrap().lines[0].id;
+        app.sketch_selection = vec![line];
+
+        app.apply_sketch_constraint(ConstraintAction::Parallel);
+
+        let error = app.last_error.clone().expect("parallel needs two lines");
+        assert!(error.contains("select two lines"), "{error}");
+        assert_eq!(app.sketch_selection, vec![line], "the selection comes back");
+    }
+
+    /// The dimension tool measures what it was clicked on.
+    #[test]
+    fn the_dimension_tool_dimensions_a_clicked_line() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
+        app.set_sketch_tool(SketchTool::Dimension);
+
+        // The bottom side runs from (-25, -25) to (25, -25): 50 mm.
+        let midpoint = screen_of(&app, [0.0, -25.0]);
+        assert!(app.sketch_click(viewport_rect(), midpoint, ClickMode::PLAIN));
+
+        let sketch = app.sketch.as_ref().unwrap();
+        let dimensions = sketch_ui::dimensions(sketch);
+        assert_eq!(dimensions.len(), 1);
+        assert!(
+            (dimensions[0].value - 50.0).abs() < 1e-6,
+            "{:?}",
+            dimensions[0]
+        );
+        assert!(dimensions[0].driving);
+    }
+
+    /// The select tool only consumes a click that lands on sketch geometry, so
+    /// a click on empty space still picks the model.
+    #[test]
+    fn a_click_on_empty_sketch_space_is_left_to_the_model() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.sketch_draft.begin(SketchTool::Select);
+
+        let empty = screen_of(&app, [0.0, 0.0]);
+        assert!(!app.sketch_click(viewport_rect(), empty, ClickMode::PLAIN));
+
+        app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
+        let line = app.sketch.as_ref().unwrap().lines[1].id;
+        let on_the_line = screen_of(&app, [25.0, 0.0]);
+        assert!(app.sketch_click(viewport_rect(), on_the_line, ClickMode::PLAIN));
+        assert_eq!(app.sketch_selection, vec![line]);
+    }
+
+    /// With a sketch open the whole frame runs: plane, geometry, constraints,
+    /// dimensions and the sketch strip, with no panic on the way.
+    #[test]
+    fn a_sketch_frame_draws_the_overlay_and_the_panel() {
+        let mut session = Session::new(RcadApp::default());
+        open_xy_sketch(&mut session.app);
+        session.app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
+        session.app.sketch_draft.begin(SketchTool::Rectangle);
+
+        session.frame();
+        session.frame();
+
+        let sketch = session.app.sketch.as_ref().expect("the sketch is open");
+        assert_eq!(sketch.lines.len(), 4);
+        assert_eq!(sketch.constraint_status(), "under-constrained");
     }
 
     /// Opening projects remembers them, most recent first and without repeats.

@@ -4,6 +4,7 @@ mod app;
 mod camera;
 mod selection;
 mod settings;
+mod sketch_ui;
 mod shortcuts;
 mod undo;
 mod viewport;
@@ -46,6 +47,8 @@ struct Cli {
     project: Option<PathBuf>,
     /// Open the Options dialog on startup.
     options: bool,
+    /// Open a sketch with geometry, constraints and dimensions (screenshots).
+    sketch_demo: bool,
     /// Open this document directly (headless, for docs and tests).
     open: Option<PathBuf>,
     /// Write the document to this path once the model is built.
@@ -67,6 +70,7 @@ Options:
   --hide-datums         Do not draw datum planes, axes and points
   --renderer <backend>  default | glow | wgpu
   --view <name>         iso | front | back | left | right | top | bottom
+  --sketch-demo         Open a sketch with geometry, dimensions and DOF
   --dialog              Open the feature dialog for the first feature
   --open <file>         Open a .rcad document directly
   --save <file>         Write the .rcad document once the model is built
@@ -101,6 +105,7 @@ fn parse_args() -> Result<Cli, String> {
             "--hide-datums" => cli.hide_datums = true,
             "--dialog" => cli.dialog = true,
             "--options" => cli.options = true,
+            "--sketch-demo" => cli.sketch_demo = true,
             "--project" => {
                 cli.project = Some(PathBuf::from(args.next().ok_or("--project needs a folder")?));
             }
@@ -218,6 +223,7 @@ fn main() -> eframe::Result<()> {
     let open_document = cli.open.clone();
     let save_document = cli.save.clone();
     let open_options = cli.options;
+    let sketch_demo = cli.sketch_demo;
 
     eframe::run_native(
         "rcad",
@@ -246,6 +252,9 @@ fn main() -> eframe::Result<()> {
                 Some("bottom") => app.set_view_bottom(),
                 Some(other) => tracing::warn!("unknown --view value: {other}"),
                 None => {}
+            }
+            if sketch_demo {
+                app.open_sketch_demo();
             }
             if demo {
                 app.load_demo_part();
