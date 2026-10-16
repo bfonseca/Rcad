@@ -28,8 +28,13 @@ pub const DIRECTION_QUANTUM: f64 = 1e-3;
 /// A topology face with its stable key and a label for the interface.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedFace {
-    /// Stable key, safe to persist in a document.
+    /// Key used to look the face up. The rebuild replaces it with the
+    /// feature-anchored reference; on its own it is the geometric signature.
     pub name: String,
+    /// Geometry-derived signature. Always present, and the fallback the
+    /// rebuild falls back to when no feature can claim the face.
+    #[serde(default)]
+    pub signature: String,
     /// Human-readable description, for menus and the status bar.
     #[serde(default)]
     pub label: String,
@@ -41,8 +46,12 @@ pub struct NamedFace {
 /// length are what the name is built from.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NamedEdge {
-    /// Stable key, safe to persist in a document.
+    /// Key used to look the edge up. The rebuild replaces it with the
+    /// feature-anchored reference; on its own it is the geometric signature.
     pub name: String,
+    /// Geometry-derived signature, kept as the fallback name.
+    #[serde(default)]
+    pub signature: String,
     /// Human-readable description, for menus and the status bar.
     #[serde(default)]
     pub label: String,
@@ -345,9 +354,9 @@ mod tests {
     fn duplicate_names_get_a_unique_suffix() {
         let base = face_signature(&face(50.0, [0.0, 0.0, 0.0]));
         let mut faces = vec![
-            NamedFace { name: base.clone(), label: "hole".to_string() },
-            NamedFace { name: base.clone(), label: "hole".to_string() },
-            NamedFace { name: "F:unique".to_string(), label: "other".to_string() },
+            NamedFace { name: base.clone(), label: "hole".to_string(), ..Default::default() },
+            NamedFace { name: base.clone(), label: "hole".to_string(), ..Default::default() },
+            NamedFace { name: "F:unique".to_string(), label: "other".to_string(), ..Default::default() },
         ];
         disambiguate_faces(&mut faces);
         assert_eq!(faces[0].name, format!("{base}#1"));

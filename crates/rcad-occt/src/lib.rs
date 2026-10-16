@@ -6,13 +6,22 @@ use std::path::Path;
 use cadrum::{DVec3 as CVec3, Edge, Solid, Surface, SurfaceKind, Tessellation};
 use glam::DVec3;
 use rcad_geom::{
-    naming, BooleanOp, EdgeFacts, FaceFacts, GeomError, GeomResult, GeometryBackend, NamedEdge,
-    NamedFace, Profile2D, ShapeId, TriangleMesh,
+    naming, BooleanOp, EdgeFacts, FaceFacts, FaceInfo, FaceSource, GeomError, GeomResult,
+    GeometryBackend, NamedEdge, NamedFace, Profile2D, ShapeId, ShapeTopology, TriangleMesh,
 };
+
+/// A stored shape and, when an operation produced it, where its faces came
+/// from. The history is recorded at operation time: the kernel reports the
+/// source faces of the *copies* it worked on, so the source can only be named
+/// by geometry while those copies are alive.
+pub(crate) struct StoredShape {
+    solid: Solid,
+    face_history: BTreeMap<u64, FaceSource>,
+}
 
 pub struct OcctBackend {
     next_id: u64,
-    solids: HashMap<u64, Solid>,
+    solids: HashMap<u64, StoredShape>,
 }
 
 impl Default for OcctBackend {
@@ -30,16 +39,28 @@ impl OcctBackend {
     }
 
     fn insert(&mut self, solid: Solid) -> ShapeId {
+        self.insert_with_history(solid, BTreeMap::new())
+    }
+
+    fn insert_with_history(
+        &mut self,
+        solid: Solid,
+        face_history: BTreeMap<u64, FaceSource>,
+    ) -> ShapeId {
         let id = self.next_id;
         self.next_id += 1;
-        self.solids.insert(id, solid);
+        self.solids.insert(id, StoredShape { solid, face_history });
         ShapeId(id)
     }
 
-    fn get(&self, id: ShapeId) -> GeomResult<&Solid> {
+    fn stored(&self, id: ShapeId) -> GeomResult<&StoredShape> {
         self.solids
             .get(&id.0)
             .ok_or(GeomError::UnknownShape(id))
+    }
+
+    fn get(&self, id: ShapeId) -> GeomResult<&Solid> {
+        Ok(&self.stored(id)?.solid)
     }
 
 
@@ -71,9 +92,24 @@ impl OcctBackend {
             .map_err(|e| GeomError::Backend(e.to_string()))?;
         let mut result = triangle_mesh_from_cadrum(&mesh);
         // OpenCascade identifies faces and edges by address, which changes in
-        // every process. The document needs names that do not.
-        result.face_names = stable_face_names(&owned);
-        result.edges = stable_edges(&owned);
+        // every process. Start from the geometric signature; the rebuild then
+        // replaces it with a reference to the feature that created the face.
+        let topology = topology_of(&owned);
+        result.face_names = topology
+            .faces
+            .iter()
+            .map(|(face_id, info)| {
+                (
+                    *face_id,
+                    NamedFace {
+                        name: info.signature.clone(),
+                        signature: info.signature.clone(),
+                        label: info.label.clone(),
+                    },
+                )
+            })
+            .collect();
+        result.edges = topology.edges.values().cloned().collect();
         Ok(result)
     }
 }
@@ -173,58 +209,99 @@ fn polyline_midpoint(points: &[CVec3]) -> CVec3 {
     }
 }
 
-/// Stable name for every face of these solids, keyed by the process-local face
-/// id that also appears in the tessellation.
-fn stable_face_names(solids: &[Solid]) -> BTreeMap<u64, NamedFace> {
-    let mut named: Vec<(u64, NamedFace)> = Vec::new();
-    for solid in solids {
-        for face in solid.iter_face() {
-            let surface = face.surface();
-            let kind = describe_surface(surface);
-            let center = face.center();
-            // Only a planar face has one meaningful normal. On a curved face
-            // the normal at the centre depends on where the projection lands,
-            // which is not a property of the geometry.
-            let normal = match surface.map(|surface| surface.kind) {
-                Some(SurfaceKind::Plane) => {
-                    let (_, normal) = face.project(center);
-                    (normal.length() > 0.0).then(|| normal.normalize().to_array())
-                }
-                _ => None,
-            };
-            let edges: Vec<&Edge> = face.iter_edge().collect();
-            let perimeter = edges.iter().map(|edge| polyline_length(&edge_polyline(edge))).sum();
-            let facts = FaceFacts {
-                kind: &kind,
-                area: face.area(),
-                center: center.to_array(),
-                normal,
-                edge_count: edges.len(),
-                perimeter,
-            };
-            named.push((
-                face.id(),
-                NamedFace {
-                    name: naming::face_signature(&facts),
-                    label: naming::face_label(&facts),
-                },
-            ));
+/// Geometric facts of one face, shared by the mesh builder and the rebuild.
+fn describe_face(face: &cadrum::Face) -> FaceInfo {
+    let surface = face.surface();
+    let kind = describe_surface(surface);
+    let center = face.center();
+    // Only a planar face has one meaningful normal. On a curved face the normal
+    // at the centre depends on where the projection lands, which is not a
+    // property of the geometry.
+    let normal = match surface.map(|surface| surface.kind) {
+        Some(SurfaceKind::Plane) => {
+            let (_, normal) = face.project(center);
+            (normal.length() > 0.0).then(|| normal.normalize().to_array())
         }
+        _ => None,
+    };
+    let edge_ids: Vec<u64> = face.iter_edge().map(|edge| edge.id()).collect();
+    let perimeter = face
+        .iter_edge()
+        .map(|edge| polyline_length(&edge_polyline(edge)))
+        .sum();
+    let facts = FaceFacts {
+        kind: &kind,
+        area: face.area(),
+        center: center.to_array(),
+        normal,
+        edge_count: edge_ids.len(),
+        perimeter,
+    };
+    FaceInfo {
+        signature: naming::face_signature(&facts),
+        label: naming::face_label(&facts),
+        kind,
+        area: face.area(),
+        center: center.to_array(),
+        normal,
+        edges: edge_ids,
     }
-    let mut faces: Vec<NamedFace> = named.iter().map(|(_, face)| face.clone()).collect();
-    naming::disambiguate_faces(&mut faces);
-    named
-        .into_iter()
-        .zip(faces)
-        .map(|((id, _), face)| (id, face))
+}
+
+/// Signature per face id, for the input of an operation.
+fn face_signatures(solid: &Solid) -> BTreeMap<u64, String> {
+    solid
+        .iter_face()
+        .map(|face| (face.id(), describe_face(face).signature))
         .collect()
 }
 
-/// Stable name for every edge of these solids, with the geometry and polyline
-/// the interface needs to draw and pick them.
-fn stable_edges(solids: &[Solid]) -> Vec<NamedEdge> {
-    let mut edges = Vec::new();
+/// Where each face of an operation result came from, named by the signature of
+/// the source face in the input it belongs to. `inputs` pairs each operand with
+/// whether it is the tool of the operation.
+fn operation_history(
+    result: &Solid,
+    inputs: &[(&BTreeMap<u64, String>, bool)],
+) -> BTreeMap<u64, FaceSource> {
+    let mut history = BTreeMap::new();
+    for [post, source] in result.iter_history() {
+        for (signatures, from_tool) in inputs {
+            if let Some(signature) = signatures.get(&source) {
+                history.insert(
+                    post,
+                    FaceSource {
+                        source_signature: signature.clone(),
+                        from_tool: *from_tool,
+                    },
+                );
+                break;
+            }
+        }
+    }
+    history
+}
+
+/// Faces, edges and face history of these solids.
+///
+/// Single source of the geometric topology facts: the mesh builder uses the
+/// signatures as names, and the rebuild turns them into feature-anchored
+/// references.
+fn topology_of(solids: &[Solid]) -> ShapeTopology {
+    let mut faces: Vec<(u64, FaceInfo)> = Vec::new();
+    let mut named: Vec<NamedFace> = Vec::new();
+    let mut edges: Vec<NamedEdge> = Vec::new();
+
     for solid in solids {
+        for face in solid.iter_face() {
+            let info = describe_face(face);
+            named.push(NamedFace {
+                name: info.signature.clone(),
+                signature: info.signature.clone(),
+                label: info.label.clone(),
+            });
+            faces.push((face.id(), info));
+        }
+
         for edge in solid.iter_edge() {
             let points = edge_polyline(edge);
             let length = polyline_length(&points);
@@ -247,8 +324,10 @@ fn stable_edges(solids: &[Solid]) -> Vec<NamedEdge> {
                 midpoint: midpoint.to_array(),
                 closed,
             };
+            let signature = naming::edge_signature(&facts);
             edges.push(NamedEdge {
-                name: naming::edge_signature(&facts),
+                name: signature.clone(),
+                signature,
                 label: naming::edge_label(&facts),
                 kernel_id: edge.id(),
                 start: start.to_array(),
@@ -263,8 +342,26 @@ fn stable_edges(solids: &[Solid]) -> Vec<NamedEdge> {
             });
         }
     }
+
+    // Two elements sharing a signature are the same geometry (two identical
+    // holes): the suffix keeps the lookup unambiguous.
+    naming::disambiguate_faces(&mut named);
     naming::disambiguate_edges(&mut edges);
-    edges
+
+    let mut topology = ShapeTopology::default();
+    for ((face_id, mut info), face) in faces.into_iter().zip(named) {
+        info.signature = face.signature;
+        info.label = face.label;
+        topology.faces.insert(face_id, info);
+    }
+    for edge in edges {
+        topology.edges.insert(edge.kernel_id, edge);
+    }
+    // Face history cannot be resolved here: the kernel reports the source
+    // faces of the copies an operation worked on, and those are gone by now.
+    // It is recorded when the operation runs (`operation_history`) and put
+    // back by `OcctBackend::topology`.
+    topology
 }
 
 impl GeometryBackend for OcctBackend {
@@ -305,6 +402,11 @@ impl GeometryBackend for OcctBackend {
     fn boolean(&mut self, a: ShapeId, b: ShapeId, op: BooleanOp) -> GeomResult<ShapeId> {
         let sa = self.get(a)?.clone();
         let sb = self.get(b)?.clone();
+        // Name the operands by geometry while the copies are still alive: the
+        // history the kernel records points at these copies, not at the shapes
+        // the caller holds.
+        let base_signatures = face_signatures(&sa);
+        let tool_signatures = face_signatures(&sb);
         let solid = match op {
             BooleanOp::Union => (&sa + &sb)
                 .build()
@@ -316,7 +418,11 @@ impl GeometryBackend for OcctBackend {
                 .build()
                 .map_err(|e| GeomError::Backend(e.to_string()))?,
         };
-        Ok(self.insert(solid))
+        let history = operation_history(
+            &solid,
+            &[(&base_signatures, false), (&tool_signatures, true)],
+        );
+        Ok(self.insert_with_history(solid, history))
     }
 
     fn translate(&mut self, shape: ShapeId, delta: DVec3) -> GeomResult<ShapeId> {
@@ -326,20 +432,24 @@ impl GeometryBackend for OcctBackend {
 
     fn fillet_all(&mut self, shape: ShapeId, radius: f64) -> GeomResult<ShapeId> {
         let solid = self.get(shape)?.clone();
+        let input_signatures = face_signatures(&solid);
         let edges: Vec<_> = solid.iter_edge().collect();
         let filleted = solid
             .fillet_edges(radius, edges)
             .map_err(|e| GeomError::Backend(e.to_string()))?;
-        Ok(self.insert(filleted))
+        let history = operation_history(&filleted, &[(&input_signatures, false)]);
+        Ok(self.insert_with_history(filleted, history))
     }
 
     fn chamfer_all(&mut self, shape: ShapeId, distance: f64) -> GeomResult<ShapeId> {
         let solid = self.get(shape)?.clone();
+        let input_signatures = face_signatures(&solid);
         let edges: Vec<_> = solid.iter_edge().collect();
         let chamfered = solid
             .chamfer_edges(distance, edges)
             .map_err(|e| GeomError::Backend(e.to_string()))?;
-        Ok(self.insert(chamfered))
+        let history = operation_history(&chamfered, &[(&input_signatures, false)]);
+        Ok(self.insert_with_history(chamfered, history))
     }
 
     fn sew(&mut self, shapes: &[ShapeId], tolerance: f64) -> GeomResult<ShapeId> {
@@ -357,6 +467,16 @@ impl GeometryBackend for OcctBackend {
 
     fn tessellate_many(&mut self, shapes: &[ShapeId]) -> GeomResult<TriangleMesh> {
         self.mesh_of(shapes)
+    }
+
+    fn topology(&mut self, shape: ShapeId) -> GeomResult<ShapeTopology> {
+        // Read the stored shape, never a clone: cloning rebuilds topology and
+        // hands out fresh TShape addresses, so the ids would not match the ones
+        // another call reported for the same shape.
+        let stored = self.stored(shape)?;
+        let mut topology = topology_of(std::slice::from_ref(&stored.solid));
+        topology.face_history = stored.face_history.clone();
+        Ok(topology)
     }
 
     fn write_step(&mut self, shapes: &[ShapeId], path: &Path) -> GeomResult<()> {

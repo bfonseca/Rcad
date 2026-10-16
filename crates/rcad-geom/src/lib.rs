@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod naming;
+pub mod topology;
 
 pub use naming::{EdgeFacts, FaceFacts, NamedEdge, NamedFace};
+pub use topology::{FaceInfo, FaceSource, ShapeTopology};
 
 /// Opaque handle to a BREP shape owned by a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -198,6 +200,15 @@ pub trait GeometryBackend: Send {
 
     fn tessellate(&mut self, shape: ShapeId) -> GeomResult<TriangleMesh>;
     fn tessellate_many(&mut self, shapes: &[ShapeId]) -> GeomResult<TriangleMesh>;
+
+    /// Faces, edges and face history of `shape`, so the rebuild can give its
+    /// topology names that survive a rebuild.
+    ///
+    /// Backends that cannot report topology return an empty one; every name
+    /// then falls back to its geometric signature.
+    fn topology(&mut self, _shape: ShapeId) -> GeomResult<ShapeTopology> {
+        Ok(ShapeTopology::default())
+    }
 
     fn write_step(&mut self, shapes: &[ShapeId], path: &std::path::Path) -> GeomResult<()>;
     fn write_stl(&mut self, shapes: &[ShapeId], path: &std::path::Path) -> GeomResult<()>;
