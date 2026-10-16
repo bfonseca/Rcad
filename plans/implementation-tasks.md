@@ -529,3 +529,26 @@ relabel a side); `Revolve`, `Loft`, `Boundary`, `Sew`, `Shell`, `Draft`, `Hole`,
 `Pattern` and `Mirror` keep their signatures until they get a role catalogue or
 history of their own. A face that a feature cannot claim still loses its tag when
 its geometry is edited, and the status bar reports it instead of guessing.
+
+### Selection: one ordered list (step 1 of the selection/sketch plan)
+
+`crates/rcad-app/src/selection.rs` holds the single selection list shared by the
+viewport and the model tree. Items carry the stable reference (face name, edge
+name, feature id), never an index, so a selection can go straight into
+`FeatureReferences`. A plain click replaces, Ctrl toggles, Shift extends, and the
+order is kept.
+
+- The viewport picks most specific first: edge, then datum, then face. A
+  right-click cycles the candidates under the cursor, so a face under an edge,
+  or a datum over a face, can still be reached.
+- Solid edges are drawn when selected or hovered, faces are highlighted by
+  reference (not by triangle) and datums by feature id.
+- The selection bar above the status bar shows the ordered list, and its tooltip
+  names the seed: a command reads the first item as its placement and the last
+  as its seed.
+- `new_sketch` already consumes the selection: the sketch is placed on the first
+  planar datum selected, and waits in placement mode when there is none.
+
+Next, step 2: tangents and the incident face references on `NamedEdge`, then the
+queries (boundary, tangent chain, surface ring), then fillet and chamfer by the
+selected edges.

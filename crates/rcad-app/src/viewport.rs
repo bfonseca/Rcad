@@ -1,9 +1,10 @@
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 use glam::{Mat4, Vec3, Vec4};
 use rcad_doc::{Feature, FeatureKind, ConstructionKind, Part, ProjectManifest};
-use rcad_geom::TriangleMesh;
+use rcad_geom::{NamedEdge, TriangleMesh};
 
 use crate::camera::OrbitCamera;
+use crate::selection::{Selected, Selection};
 
 /// 3D ray for picking
 #[derive(Debug, Clone, Copy)]
@@ -166,30 +167,6 @@ pub enum PickTarget {
     None,
 }
 
-/// Selection state
-#[derive(Debug, Default, Clone)]
-#[allow(dead_code)] // edge/vertex picking is not implemented yet
-pub struct SelectionState {
-    pub selected_triangle: Option<usize>,
-    pub selected_edge: Option<usize>,
-    pub selected_vertex: Option<usize>,
-    pub selected_construction: Option<usize>, // Feature index for construction geometry
-    pub hover_triangle: Option<usize>,
-    pub hover_edge: Option<usize>,
-    pub hover_vertex: Option<usize>,
-    pub hover_construction: Option<usize>,
-    pub pick_mode: PickMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)] // face/edge/vertex picking is not implemented yet
-pub enum PickMode {
-    #[default]
-    Object,
-    Face,
-    Edge,
-    Vertex,
-}
 
 // ConstructionGeometry struct is kept for future use but currently not directly used
 // Kept for potential future rendering enhancements
@@ -238,8 +215,9 @@ pub fn draw_viewport(
      mesh: &TriangleMesh,
      camera: &mut OrbitCamera,
      underlay_tint: Option<Color32>,
-     selected_triangle: Option<usize>,
-     selected_construction: Option<usize>,
+     // The one selection list, shared with the model tree.
+     selection: &Selection,
+     hover: Option<&Selected>,
      part: Option<&Part>,
     // The open project's rcad.toml: it owns the RGB value of every colour id.
     manifest: &ProjectManifest,
@@ -293,7 +271,7 @@ pub fn draw_viewport(
     }
 
     if !mesh.is_empty() {
-        draw_mesh(&painter, rect, mesh, camera, selected_triangle, part, manifest);
+        draw_mesh(&painter, rect, mesh, camera, selection, hover, part, manifest);
     } else {
         painter.text(
             rect.center(),
@@ -304,9 +282,12 @@ pub fn draw_viewport(
         );
     }
 
+    // Solid edges are only drawn when they matter: selected or hovered.
+    draw_edges(&painter, rect, camera, mesh, selection, hover);
+
     // Draw construction geometry from part features
     if let Some(part) = part {
-        draw_construction_geometry(&painter, rect, camera, part, selected_construction);
+        draw_construction_geometry(&painter, rect, camera, part, selection, hover);
     }
 
     // Draw corner CYS (Coordinate System) in bottom-left
@@ -438,12 +419,19 @@ pub fn shaded_colour(rgb: [u8; 3], brightness: f32) -> Color32 {
     Color32::from_rgb(scale(rgb[0]), scale(rgb[1]), scale(rgb[2]))
 }
 
+/// Colour of a selected element. Creo uses a warm highlight for the picked
+/// geometry, which reads well against the default grey shading.
+pub const SELECTED_COLOUR: Color32 = Color32::from_rgb(255, 170, 40);
+/// Colour of what the cursor is over.
+pub const HOVER_COLOUR: Color32 = Color32::from_rgb(120, 200, 255);
+
 fn draw_mesh(
     painter: &egui::Painter,
     rect: Rect,
     mesh: &TriangleMesh,
     camera: &OrbitCamera,
-    selected_triangle: Option<usize>,
+    selection: &Selection,
+    hover: Option<&Selected>,
     part: Option<&Part>,
     manifest: &ProjectManifest,
 ) {
@@ -484,9 +472,16 @@ fn draw_mesh(
              ),
          };
 
-         // Highlight selected triangle
-         if Some(triangle_index) == selected_triangle {
-             color = Color32::YELLOW;
+         // Highlight by stable reference, not by triangle: every face of the
+         // selection lights up, whatever triangle the picker landed on.
+         if let Some(name) = mesh.face_name(triangle_index) {
+             let hovered = matches!(hover, Some(Selected::Face { reference, .. }) if reference == name);
+             if hovered {
+                 color = HOVER_COLOUR;
+             }
+             if selection.has_face(name) {
+                 color = SELECTED_COLOUR;
+             }
          }
          
          let (Some(a), Some(b), Some(c)) = (
@@ -506,7 +501,51 @@ fn draw_mesh(
      }
 }
 
-fn draw_construction_geometry(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera, part: &Part, selected_construction: Option<usize>) {
+/// Selected and hovered solid edges, as thick lines over the shading.
+fn draw_edges(
+    painter: &egui::Painter,
+    rect: Rect,
+    camera: &OrbitCamera,
+    mesh: &TriangleMesh,
+    selection: &Selection,
+    hover: Option<&Selected>,
+) {
+    let hovered = match hover {
+        Some(Selected::Edge { reference, .. }) => Some(reference.as_str()),
+        _ => None,
+    };
+    let vp = view_proj(rect, camera);
+    for edge in &mesh.edges {
+        let selected = selection.has_edge(&edge.name);
+        let is_hovered = hovered == Some(edge.name.as_str());
+        if !selected && !is_hovered {
+            continue;
+        }
+        let points: Vec<Pos2> = edge
+            .points
+            .iter()
+            .filter_map(|point| project(vp, rect, Vec3::from(*point)))
+            .collect();
+        if points.len() < 2 {
+            continue;
+        }
+        let (colour, width) = if selected {
+            (SELECTED_COLOUR, 3.0_f32)
+        } else {
+            (HOVER_COLOUR, 2.0_f32)
+        };
+        painter.add(Shape::line(points, Stroke::new(width, colour)));
+    }
+}
+
+fn draw_construction_geometry(
+    painter: &egui::Painter,
+    rect: Rect,
+    camera: &OrbitCamera,
+    part: &Part,
+    selection: &Selection,
+    hover: Option<&Selected>,
+) {
     let vp = view_proj(rect, camera);
     let eye = camera.eye();
     
@@ -538,8 +577,9 @@ fn draw_construction_geometry(painter: &egui::Painter, rect: Rect, camera: &Orbi
     construction_items.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     
     // Draw in sorted order
+    let hovered_feature = hover.and_then(Selected::feature);
     for (_, idx, feature, kind, origin_v, dir_v) in construction_items {
-        let is_selected = selected_construction == Some(idx);
+        let is_selected = selection.has_feature(feature.id) || hovered_feature == Some(feature.id);
         
         match kind {
             ConstructionKind::Plane => {
@@ -929,50 +969,93 @@ pub fn pick_construction(
     
     closest_feature
 }
+/// How far, in pixels, the cursor may be from an edge and still pick it.
+pub const EDGE_PICK_TOLERANCE: f32 = 6.0;
 
-/// Handle picking interaction in viewport
-pub fn handle_picking(
-   ui: &mut Ui,
-   rect: Rect,
-   mesh: &TriangleMesh,
-   camera: &OrbitCamera,
-   selection: &mut SelectionState,
-   part: &Part,
-) {
-    if ui.rect_contains_pointer(rect) {
-        let pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
-        
-        // Update hover for triangles (solid geometry)
-        if let Some(tri) = pick_triangle(pos, rect, mesh, camera) {
-            selection.hover_triangle = Some(tri);
-        } else {
-            selection.hover_triangle = None;
-        }
-        
-        // Update hover for construction geometry
-        if let Some(feat_idx) = pick_construction(pos, rect, part, camera) {
-            selection.hover_construction = Some(feat_idx);
-        } else {
-            selection.hover_construction = None;
-        }
-        
-        // Handle click for selection
-        if ui.input(|i| i.pointer.primary_clicked()) {
-            // Try construction geometry first (it's on top visually)
-            if let Some(feat_idx) = pick_construction(pos, rect, part, camera) {
-                selection.selected_construction = Some(feat_idx);
-                selection.selected_triangle = None;
-            } else if let Some(tri) = pick_triangle(pos, rect, mesh, camera) {
-                selection.selected_triangle = Some(tri);
-                selection.selected_construction = None;
-            }
-            // Note: Don't clear selection on empty click - let the app handle deselection logic
-            // to preserve history tree selection
-        }
-    } else {
-        selection.hover_triangle = None;
-        selection.hover_construction = None;
+/// Everything under the cursor, most specific first.
+///
+/// An edge wins over the face it lies on, and datum geometry wins over the face
+/// behind it. The list is what a right-click cycles through, so the user can
+/// reach the face under an edge, or the datum over a face.
+pub fn pick_candidates(
+    pos: Pos2,
+    rect: Rect,
+    mesh: &TriangleMesh,
+    camera: &OrbitCamera,
+    part: Option<&Part>,
+) -> Vec<Selected> {
+    let mut candidates = Vec::new();
+
+    if let Some(edge) = pick_edge(pos, rect, mesh, camera) {
+        candidates.push(edge);
     }
+
+    if let Some(part) = part {
+        if let Some(index) = pick_construction(pos, rect, part, camera) {
+            if let Some(feature) = part.features.get(index) {
+                candidates.push(Selected::Datum {
+                    feature: feature.id,
+                    label: feature.name.clone(),
+                });
+            }
+        }
+    }
+
+    if let Some(triangle) = pick_triangle(pos, rect, mesh, camera) {
+        if let Some(reference) = mesh.face_name(triangle) {
+            candidates.push(Selected::Face {
+                reference: reference.to_string(),
+                label: mesh.face_label(triangle).unwrap_or(reference).to_string(),
+                triangle,
+            });
+        }
+    }
+
+    candidates
+}
+
+/// The nearest solid edge whose polyline passes close to the cursor.
+pub fn pick_edge(
+    pos: Pos2,
+    rect: Rect,
+    mesh: &TriangleMesh,
+    camera: &OrbitCamera,
+) -> Option<Selected> {
+    let vp = view_proj(rect, camera);
+    let mut best: Option<(f32, &NamedEdge)> = None;
+    for edge in &mesh.edges {
+        let points: Vec<Pos2> = edge
+            .points
+            .iter()
+            .filter_map(|point| project(vp, rect, Vec3::from(*point)))
+            .collect();
+        for pair in points.windows(2) {
+            let distance = distance_to_segment(pos, pair[0], pair[1]);
+            if distance <= EDGE_PICK_TOLERANCE && best.map_or(true, |(closest, _)| distance < closest)
+            {
+                best = Some((distance, edge));
+            }
+        }
+    }
+    best.map(|(_, edge)| Selected::Edge {
+        reference: edge.name.clone(),
+        label: if edge.label.is_empty() {
+            edge.name.clone()
+        } else {
+            edge.label.clone()
+        },
+    })
+}
+
+/// Distance from a point to a screen-space segment.
+fn distance_to_segment(point: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let length_squared = ab.length_sq();
+    if length_squared <= f32::EPSILON {
+        return (point - a).length();
+    }
+    let t = ((point - a).dot(ab) / length_squared).clamp(0.0, 1.0);
+    (point - (a + ab * t)).length()
 }
 
 #[cfg(test)]
@@ -1115,5 +1198,35 @@ mod tests {
             Color32::from_rgb(255, 255, 255),
             "a full-brightness colour must not overflow"
         );
+    }
+
+    /// An edge is picked when the cursor is close to its polyline on screen,
+    /// which is how the solid edges became selectable at all.
+    #[test]
+    fn an_edge_is_picked_from_its_polyline() {
+        let mut mesh = TriangleMesh {
+            positions: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        };
+        mesh.edges.push(rcad_geom::NamedEdge {
+            name: "E:line:test".to_string(),
+            signature: "E:line:test".to_string(),
+            label: "top edge".to_string(),
+            points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+            ..Default::default()
+        });
+
+        let mut camera = OrbitCamera::default();
+        camera.look_from(Vec3::Z);
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let vp = view_proj(rect, &camera);
+        let midpoint = project(vp, rect, Vec3::new(5.0, 0.0, 0.0)).expect("the edge projects");
+
+        let picked = pick_edge(midpoint, rect, &mesh, &camera).expect("the edge should be picked");
+        assert_eq!(picked.reference(), Some("E:line:test"));
+
+        let far = Pos2::new(midpoint.x + 200.0, midpoint.y + 120.0);
+        assert!(pick_edge(far, rect, &mesh, &camera).is_none());
     }
 }

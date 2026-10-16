@@ -1,5 +1,6 @@
 use eframe::egui;
-use crate::viewport::{draw_viewport, handle_picking, SelectionState};
+use crate::selection::{ClickMode, Selected, Selection};
+use crate::viewport::{draw_viewport, pick_candidates};
 use crate::camera::{OrbitCamera, Projection};
 use crate::settings::AppSettings;
 use crate::undo::UndoStack;
@@ -69,7 +70,6 @@ impl CaptureRequest {
 pub struct RcadApp {
     camera: OrbitCamera,
     mesh: TriangleMesh,
-    selected_triangle: Option<usize>,
     project: Project,
     current_path: Option<PathBuf>,
     occt_backend: OcctBackend,
@@ -90,9 +90,14 @@ pub struct RcadApp {
     dragged_feature: Option<uuid::Uuid>,
     drop_target: Option<uuid::Uuid>,
     
-    // Selection state
-    selected_feature: Option<uuid::Uuid>,
-    selected_construction_feature: Option<usize>, // Feature index for construction geometry
+    /// The one ordered selection, shared by the viewport and the model tree.
+    selection: Selection,
+    /// What the cursor is over, if anything.
+    hover: Option<Selected>,
+    /// Candidates under the cursor, most specific first: a right-click cycles
+    /// through them, the way Creo lets a user reach the face under an edge.
+    hover_candidates: Vec<Selected>,
+    hover_cycle: usize,
 #[allow(dead_code)] // set but not read until picking modes exist
     selection_mode: SelectionMode,
     
@@ -188,7 +193,6 @@ impl RcadApp {
         let mut this = Self {
             camera: OrbitCamera::default(),
             mesh: TriangleMesh::default(),
-            selected_triangle: None,
             project: Project::default(),
             current_path: None,
             occt_backend: OcctBackend::default(),
@@ -209,8 +213,10 @@ impl RcadApp {
             drop_target: None,
             
             // Selection state
-            selected_feature: None,
-            selected_construction_feature: None,
+            selection: Selection::default(),
+            hover: None,
+            hover_candidates: Vec::new(),
+            hover_cycle: 0,
             selection_mode: SelectionMode::Object,
             
             // Async kernel worker
@@ -678,23 +684,22 @@ impl RcadApp {
             });
         });
         
+        // 2b) Selection bar: the ordered selection, the way Creo shows it.
+        self.draw_selection_bar(ctx);
+
         // 3) Central panel: viewport + history overlay
         egui::CentralPanel::default().show(ctx, |ui| {
             // Viewport with picking
             let part_clone = self.get_active_part().cloned();
-            
-            let mut selection_state = SelectionState::default();
-            // Initialize selection state with current selection to preserve history tree selection
-            selection_state.selected_construction = self.selected_construction_feature;
-            selection_state.selected_triangle = self.selected_triangle;
-            
+            let selection_before = self.selection.clone();
+
             let response = draw_viewport(
                 ui,
                 &self.mesh,
                 &mut self.camera,
                 None,
-                self.selected_triangle,
-                self.selected_construction_feature,
+                &selection_before,
+                self.hover.as_ref(),
                 part_clone.as_ref(),
                 &self.manifest,
                 self.settings.show_grid,
@@ -714,45 +719,60 @@ impl RcadApp {
                     },
                 );
             
-            // Handle viewport picking
-            if let Some(part) = part_clone.as_ref() {
-                handle_picking(ui, response.rect, &self.mesh, &self.camera, &mut selection_state, part);
-            }
-            
-            // Update selected triangle from selection state
-            // Only update if viewport actually picked something (not None from empty click)
-            if selection_state.selected_triangle != self.selected_triangle {
-                self.selected_triangle = selection_state.selected_triangle;
-            }
-            
-            // Update selected construction feature from selection state
-            // Only update if viewport picked a new construction feature, otherwise preserve history tree selection
-            if selection_state.selected_construction != self.selected_construction_feature {
-                self.selected_construction_feature = selection_state.selected_construction;
-            }
-            
-            // Sync viewport selection to history overlay (only when viewport initiates selection)
-            if let Some(feat_idx) = selection_state.selected_construction {
-                if self.selected_construction_feature != Some(feat_idx) || self.selected_feature.is_none() {
-                    if let Some(part) = part_clone.as_ref() {
-                        if let Some(feature) = part.features.get(feat_idx) {
-                            self.history_overlay.select_feature(Some(feature.id));
-                            self.selected_feature = Some(feature.id);
+            // Picking: what is under the cursor, and what a click means.
+            //
+            // Creo behaviour: an edge beats the face it lies on and a datum
+            // beats the face behind it, so the candidate list is ordered most
+            // specific first. A right-click cycles through it; a left-click
+            // selects the highlighted candidate, Ctrl toggles and Shift extends,
+            // keeping the order the user selected in.
+            if response.hovered() {
+                let pos = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .unwrap_or(response.rect.center());
+                let candidates = pick_candidates(
+                    pos,
+                    response.rect,
+                    &self.mesh,
+                    &self.camera,
+                    part_clone.as_ref(),
+                );
+                if candidates != self.hover_candidates {
+                    self.hover_candidates = candidates;
+                    self.hover_cycle = 0;
+                }
+                if ui.input(|i| i.pointer.secondary_clicked()) && !self.hover_candidates.is_empty() {
+                    self.hover_cycle = (self.hover_cycle + 1) % self.hover_candidates.len();
+                }
+                self.hover = self.hover_candidates.get(self.hover_cycle).cloned();
+
+                if ui.input(|i| i.pointer.primary_clicked()) {
+                    let mode = ui.input(|i| ClickMode::from_modifiers(&i.modifiers));
+                    match self.hover.clone() {
+                        Some(item) => {
+                            self.selection.click(item, mode);
                         }
+                        // A plain click on empty space clears the selection.
+                        None if !mode.toggle && !mode.extend => self.selection.clear(),
+                        None => {}
                     }
                 }
-            } else if selection_state.selected_triangle.is_some() && self.selected_triangle != selection_state.selected_triangle {
-                // Triangle selected via viewport - could map to feature, but for now just clear construction selection
-                self.history_overlay.select_feature(None);
-                self.selected_feature = None;
+            } else {
+                self.hover = None;
+                self.hover_candidates.clear();
+                self.hover_cycle = 0;
             }
-            // Don't clear selection when clicking empty space if history tree has a construction feature selected
-            // The history tree selection should persist until explicitly changed
-            
+
             // History overlay (right side, over viewport)
             if self.history_overlay.visible {
                 if let Some(part) = part_clone {
-                    self.history_overlay.show(ui, &part, &mut |action| history_action = Some(action));
+                    let selection = self.selection.clone();
+                    self.history_overlay.show(
+                        ui,
+                        &part,
+                        &selection,
+                        &mut |action| history_action = Some(action),
+                    );
                 }
             }
             // A drag on the tree resize handle is remembered too.
@@ -1282,7 +1302,7 @@ impl RcadApp {
     /// Only ids the project actually defines are offered: the vocabulary is
     /// installation-wide, but an id without an RGB value has nothing to show.
     fn draw_face_colour_control(&mut self, ui: &mut egui::Ui) {
-        let Some(triangle) = self.selected_triangle else {
+        let Some(triangle) = self.selection.primary_face_triangle() else {
             return;
         };
         let Some(face_name) = self.mesh.face_name(triangle).map(str::to_string) else {
@@ -1314,6 +1334,54 @@ impl RcadApp {
             });
         if choice != current {
             self.apply_face_colour(face_name, face_label, choice);
+        }
+    }
+
+    /// The selection strip: what is selected, in the order it was selected.
+    ///
+    /// The order is not cosmetic: a command reads the first item as its
+    /// placement, the rest as orientation. Showing it is how the user checks it
+    /// before starting a sketch or a fillet.
+    fn draw_selection_bar(&mut self, ctx: &egui::Context) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let mut remove_index: Option<usize> = None;
+        let mut clear = false;
+        egui::TopBottomPanel::bottom("selection_bar").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let seed = self
+                    .selection
+                    .primary()
+                    .map(|item| item.label().to_string())
+                    .unwrap_or_default();
+                ui.label(egui::RichText::new(format!("Selection ({})", self.selection.len())))
+                    .on_hover_text(format!(
+                        "{}\nSeed (the last picked): {seed}",
+                        self.selection.summary()
+                    ));
+                for (index, item) in self.selection.items().iter().enumerate() {
+                    let text = format!("{} {}  ✕", item.kind(), item.label());
+                    let response = ui.small_button(text);
+                    let response = match item.reference() {
+                        Some(reference) => response.on_hover_text(reference),
+                        None => response,
+                    };
+                    if response.clicked() {
+                        remove_index = Some(index);
+                    }
+                }
+                if ui.small_button("Clear").clicked() {
+                    clear = true;
+                }
+            });
+        });
+        if let Some(index) = remove_index {
+            let item = self.selection.items()[index].clone();
+            self.selection.remove(&item);
+        }
+        if clear {
+            self.selection.clear();
         }
     }
 
@@ -1658,21 +1726,81 @@ impl RcadApp {
         self.last_error = Some("Delete not yet implemented".to_string());
     }
     
+    /// A new sketch, placed on the first planar reference in the selection.
+    ///
+    /// The plane comes from the selection, and the reference is kept: this is
+    /// the first consumer of the shared selection, and the same shape of code a
+    /// feature dashboard will use.
     pub fn new_sketch(&mut self) {
         self.undo_stack.push(self.project.clone());
-        
-        // Check if there's a selected feature (plane, face, etc.) for sketch placement
-        // If not, prompt user to select a planar face, datum plane, or create on default plane
-        if self.selected_feature.is_none() {
-            self.last_error = Some("Select a planar face or datum plane for sketch placement (left-click to select), then click 'New Sketch' again. Or click 'New Sketch' again to create on default XY plane.".to_string());
-            // Create sketch in placement mode - waiting for plane selection
-            self.sketch = Some(rcad_sketch::Sketch::new("Sketch1"));
-            self.sketch.as_mut().unwrap().in_placement_mode = true;
-        } else {
-            // Use the selected feature as sketch plane
-            self.sketch = Some(rcad_sketch::Sketch::new("Sketch1"));
-            self.last_error = Some("Sketch created on selected plane. Choose vertical orientation (edge/axis) for sketch coordinate system.".to_string());
+        let mut sketch = rcad_sketch::Sketch::new("Sketch1");
+
+        match self.selection_plane() {
+            Some((origin, normal, x_direction)) => {
+                sketch.set_sketch_plane(origin, normal, x_direction);
+                self.status = Some("Sketch placed on the selected reference.".to_string());
+            }
+            None => {
+                // No plane in the selection: ask for one and wait for it.
+                sketch.in_placement_mode = true;
+                self.status = Some(
+                    "Select a planar face or datum plane, or start the sketch again on the default plane."
+                        .to_string(),
+                );
+            }
         }
+
+        self.sketch = Some(sketch);
+    }
+
+    /// The placement plane of the first planar reference in the selection.
+    fn selection_plane(&self) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
+        let part = self.get_active_part()?;
+        let item = self.selection.items().iter().find(|item| {
+            matches!(
+                item,
+                Selected::Datum { .. } | Selected::Face { .. } | Selected::Feature { .. }
+            )
+        })?;
+        let feature = match item {
+            Selected::Datum { feature, .. } | Selected::Feature { feature, .. } => {
+                part.features.iter().find(|f| f.id == *feature)?
+            }
+            // A planar solid face has no stored datum yet; the sketch tools that
+            // read the mesh for that come next.
+            Selected::Face { .. } => return None,
+            Selected::Edge { .. } => return None,
+        };
+        let FeatureKind::Construction {
+            kind: ConstructionKind::Plane,
+            origin,
+            direction,
+        } = &feature.kind
+        else {
+            return None;
+        };
+        let normal = normalised(*direction)?;
+        // Any direction perpendicular to the normal will do as the sketch X.
+        let reference = if normal[2].abs() < 0.9 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+        let x_direction = normalised(cross(normal, reference))?;
+        Some((*origin, normal, x_direction))
+    }
+
+    /// The feature a tree row refers to: a datum when it is construction
+    /// geometry, a feature otherwise.
+    fn tree_item(&self, feature: uuid::Uuid) -> Option<Selected> {
+        let part = self.get_active_part()?;
+        let feature = part.features.iter().find(|f| f.id == feature)?;
+        Some(match feature.kind {
+            FeatureKind::Construction { .. } => Selected::Datum {
+                feature: feature.id,
+                label: feature.name.clone(),
+            },
+            _ => Selected::Feature {
+                feature: feature.id,
+                label: feature.name.clone(),
+            },
+        })
     }
     
     pub fn solve_sketch(&mut self) {
@@ -1743,7 +1871,7 @@ impl RcadApp {
     }
     
     pub fn deselect(&mut self) {
-        self.selected_triangle = None;
+        self.selection.clear();
     }
     
     pub fn show_shortcuts_help(&mut self) {
@@ -2094,16 +2222,12 @@ impl RcadApp {
         use crate::ui::HistoryOverlayAction;
         
         match action {
-            HistoryOverlayAction::SelectFeature(feature_id) => {
-                self.history_overlay.select_feature(Some(feature_id));
-                self.selected_feature = Some(feature_id);
-                
-                // Sync to viewport: find feature index and update selected_construction_feature
-                if let Some(part) = self.get_active_part() {
-                    if let Some(feat_idx) = part.features.iter().position(|f| f.id == feature_id) {
-                        if matches!(part.features[feat_idx].kind, FeatureKind::Construction { .. }) {
-                            self.selected_construction_feature = Some(feat_idx);
-                        }
+            HistoryOverlayAction::SelectFeature { feature, toggle } => {
+                if let Some(item) = self.tree_item(feature) {
+                    if toggle {
+                        self.selection.toggle(item);
+                    } else {
+                        self.selection.replace(item);
                     }
                 }
             }
@@ -2281,7 +2405,6 @@ impl Default for RcadApp {
         Self {
             camera: OrbitCamera::default(),
             mesh: TriangleMesh::default(),
-            selected_triangle: None,
             project: Project::default(),
             current_path: None,
             occt_backend: OcctBackend::default(),
@@ -2302,8 +2425,10 @@ impl Default for RcadApp {
             drop_target: None,
             
             // Selection state
-            selected_feature: None,
-            selected_construction_feature: None,
+            selection: Selection::default(),
+            hover: None,
+            hover_candidates: Vec::new(),
+            hover_cycle: 0,
             selection_mode: SelectionMode::Object,
             
             // Async kernel worker
@@ -2355,6 +2480,20 @@ impl eframe::App for RcadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui(ctx);
     }
+}
+
+/// Unit vector, or `None` when the vector is degenerate.
+fn normalised(v: [f64; 3]) -> Option<[f64; 3]> {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    (length > 1e-9).then(|| [v[0] / length, v[1] / length, v[2] / length])
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 /// The stable names of the top and of the right-hand face of a mesh.
@@ -2780,7 +2919,11 @@ mod interaction_tests {
     fn a_selected_face_draws_the_colour_control() {
         let mut session = Session::new(RcadApp::default());
         session.app.mesh = two_face_mesh();
-        session.app.selected_triangle = Some(0);
+        session.app.selection.replace(Selected::Face {
+            reference: TOP_FACE.to_string(),
+            label: "face 5".to_string(),
+            triangle: 0,
+        });
         session
             .app
             .manifest
@@ -2809,6 +2952,81 @@ mod interaction_tests {
         assert_eq!(opened.project.parts[0].name, "Reopened");
         assert!(opened.needs_rebuild, "opening a document must rebuild it");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Creo behaviour in the tree: a plain click replaces, Ctrl adds, and Ctrl
+    /// on a selected row removes it, keeping the order of the rest.
+    #[test]
+    fn tree_clicks_collect_an_ordered_selection() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        let part = app.project.parts.first().unwrap();
+        let datums: Vec<uuid::Uuid> = part
+            .features
+            .iter()
+            .filter(|feature| matches!(feature.kind, FeatureKind::Construction { .. }))
+            .map(|feature| feature.id)
+            .collect();
+        let (first, second) = (datums[0], datums[1]);
+
+        app.handle_history_action(HistoryOverlayAction::SelectFeature {
+            feature: first,
+            toggle: false,
+        });
+        app.handle_history_action(HistoryOverlayAction::SelectFeature {
+            feature: second,
+            toggle: true,
+        });
+
+        assert_eq!(app.selection.len(), 2);
+        assert_eq!(app.selection.items()[0].feature(), Some(first));
+        assert_eq!(app.selection.items()[1].feature(), Some(second));
+
+        // Ctrl on an already selected row removes it and keeps the rest.
+        app.handle_history_action(HistoryOverlayAction::SelectFeature {
+            feature: first,
+            toggle: true,
+        });
+        assert_eq!(app.selection.len(), 1);
+        assert_eq!(app.selection.items()[0].feature(), Some(second));
+    }
+
+    /// The first consumer of the shared selection: a sketch placed on the
+    /// selected datum plane, instead of waiting in placement mode.
+    #[test]
+    fn a_sketch_is_placed_on_the_selected_datum_plane() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        let plane = app
+            .project
+            .parts
+            .first()
+            .unwrap()
+            .features
+            .iter()
+            .find(|feature| {
+                matches!(
+                    &feature.kind,
+                    FeatureKind::Construction {
+                        kind: ConstructionKind::Plane,
+                        ..
+                    }
+                )
+            })
+            .unwrap()
+            .id;
+        app.selection.replace(Selected::Datum {
+            feature: plane,
+            label: "FRONT_PLANE".to_string(),
+        });
+
+        app.new_sketch();
+
+        let sketch = app.sketch.as_ref().expect("a sketch should be open");
+        assert!(
+            !sketch.in_placement_mode,
+            "the sketch should be placed on the selected plane"
+        );
     }
 
     /// A tag whose face is gone (edited or deleted) is reported, not silently

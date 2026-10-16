@@ -5,6 +5,8 @@
 
 use eframe::egui;
 use rcad_doc::{EntityId, Feature, Part};
+
+use crate::selection::Selection;
 use std::collections::HashMap;
 
 use super::toolbar::{feature_kind_icon_id, IconTextures, IconTheme};
@@ -28,7 +30,6 @@ pub struct HistoryOverlay {
     pub tree_states: HashMap<EntityId, TreeNodeState>,
     pub insert_here_index: Option<usize>,
     pub rollback_index: Option<usize>,
-    pub selected_feature: Option<EntityId>,
     pub show_parents: bool,
     pub show_children: bool,
     pub search_filter: String,
@@ -55,7 +56,6 @@ impl Default for HistoryOverlay {
             tree_states: HashMap::new(),
             insert_here_index: None,
             rollback_index: None,
-            selected_feature: None,
             show_parents: false,
             show_children: false,
             search_filter: String::new(),
@@ -88,10 +88,6 @@ impl HistoryOverlay {
         self.get_node_state(feature_id).expanded = !self.is_expanded(feature_id);
     }
     
-    /// Set selected feature
-    pub fn select_feature(&mut self, feature_id: Option<EntityId>) {
-        self.selected_feature = feature_id;
-    }
     
     /// Set insert here position
     pub fn set_insert_here(&mut self, index: Option<usize>) {
@@ -127,6 +123,7 @@ impl HistoryOverlay {
         &mut self,
         ui: &mut egui::Ui,
         part: &Part,
+        selection: &Selection,
         on_action: &mut dyn FnMut(HistoryOverlayAction),
     ) {
         if !self.visible {
@@ -232,7 +229,7 @@ impl HistoryOverlay {
         egui::ScrollArea::vertical()
             .auto_shrink([false, true])
             .show(&mut content_ui, |ui| {
-                self.render_feature_tree(ui, part, on_action);
+                self.render_feature_tree(ui, part, selection, on_action);
             });
         
         // Context menu
@@ -246,6 +243,7 @@ impl HistoryOverlay {
         &mut self,
         ui: &mut egui::Ui,
         part: &Part,
+        selection: &Selection,
         on_action: &mut dyn FnMut(HistoryOverlayAction),
     ) {
         let features = &part.features;
@@ -266,7 +264,7 @@ impl HistoryOverlay {
         
         // Render each root feature
         for root_idx in root_indices {
-            self.render_feature_node(ui, part, root_idx, 0, &children_map, on_action);
+            self.render_feature_node(ui, part, selection, root_idx, 0, &children_map, on_action);
         }
     }
     
@@ -275,6 +273,7 @@ impl HistoryOverlay {
         &mut self,
         ui: &mut egui::Ui,
         part: &Part,
+        selection: &Selection,
         feature_idx: usize,
         depth: usize,
         children_map: &HashMap<EntityId, Vec<usize>>,
@@ -302,7 +301,7 @@ impl HistoryOverlay {
             }
         }
         
-        let is_selected = self.selected_feature == Some(feature.id);
+        let is_selected = selection.has_feature(feature.id);
         let has_children = children_map.contains_key(&feature.id);
         let is_expanded = self.is_expanded(feature.id);
         
@@ -409,9 +408,14 @@ impl HistoryOverlay {
            
            let response = ui.selectable_label(is_selected, label);
             
-            // Click to select
+            // Click to select; Ctrl adds to the selection instead of replacing
+            // it, so several references can be collected before a command.
             if response.clicked() {
-                on_action(HistoryOverlayAction::SelectFeature(feature.id));
+                let toggle = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+                on_action(HistoryOverlayAction::SelectFeature {
+                    feature: feature.id,
+                    toggle,
+                });
             }
             
             // Right-click for context menu
@@ -450,7 +454,7 @@ impl HistoryOverlay {
         if node_state.expanded {
             if let Some(child_indices) = children_map.get(&feature.id) {
                 for child_idx in child_indices {
-                    self.render_feature_node(ui, part, *child_idx, depth + 1, children_map, on_action);
+                    self.render_feature_node(ui, part, selection, *child_idx, depth + 1, children_map, on_action);
                 }
             }
         }
@@ -564,7 +568,11 @@ impl HistoryOverlay {
 /// Actions that can be triggered from the history overlay
 #[derive(Debug, Clone)]
 pub enum HistoryOverlayAction {
-    SelectFeature(EntityId),
+    /// A tree row was clicked. `toggle` keeps the rest of the selection.
+    SelectFeature {
+        feature: EntityId,
+        toggle: bool,
+    },
     OpenContextMenu(EntityId, egui::Pos2),
     EditDefinition(EntityId),
     SuppressFeature(EntityId),
