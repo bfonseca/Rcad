@@ -1,5 +1,47 @@
 # Detailed Task Breakdown - Creo Workflow Implementation for rcad
 
+---
+
+## ESTADO E PRÓXIMOS PASSOS (handover - ler primeiro)
+
+**Onde estamos (última sessão):** o sketch está a meio. Os pontos 1 e 2 abaixo
+ficaram por fazer; tudo o resto descrito neste ficheiro, até essa data, está
+feito, commitado e verde.
+
+**Próximo, por esta ordem (instrução do utilizador):**
+
+1. **Desenhar com o rato**: dois cliques para um retângulo no viewport, com snap
+   à grelha, em coordenadas do sketch. Hoje a geometria entra só pelos
+   botões/shortcuts do sketch (`add_sketch_rectangle` etc.).
+2. **Restrições, dimensões e graus de liberdade no ecrã**: o crate `rcad-sketch`
+   já tem `analyze_dof()` e `constraint_status()`; nada é mostrado.
+
+**Feito até aqui (não repetir):** nomes estáveis de faces e arestas; referências
+persistentes por feature; seleção ordenada partilhada (viewport + árvore) com
+consultas `boundary` / `tangent chain` / `surface ring`; fillet e chamfro por
+`EdgeSet` (References / All / Outer / Inner / Vertical / Horizontal) com ângulo
+diedral calculado no kernel; reparação de referências (deteção, memória da última
+geometria, lista com substituição); sketch sobre datum **ou face**, plano visível
+com grelha e eixos; extrude e revolve com `SketchPlacement` (varrem segundo a
+normal / eixo do plano); plano do sketch como referência persistente.
+
+**Portão de qualidade:** `cargo test --workspace` tem de dar exit 0 e
+`cargo check --workspace --all-targets` **0 avisos**. Commits vão para `main` e
+são enviados com `git push origin main`.
+
+**Detalhes que poupam tempo:**
+
+- Capturas de ecrã: `--screenshot <path> --frames 30` com
+  `LIBGL_ALWAYS_SOFTWARE=1`. Em Wayland a app força o backend X11 sozinha (ver a
+  secção "Screenshots on a Wayland session"); sem isso o processo pendura-se.
+- `rcad-param` tem `rcad-occt` como *dev-dependency*, para os testes com kernel
+  real (arestas, faces, fillets geométricos).
+- Duplicação conhecida a unificar: a regra de referências perdidas existe na app
+  (`lost_references`) e no kernel (`RebuildResult.lost_references`).
+- `Extrude`/`Revolve` sem `placement` mantêm o comportamento antigo (XY, eixo Z),
+  por compatibilidade com documentos antigos e com o MCP.
+
+
 Based on the approved plan in `plans/creo-workflow-analysis.md`, this document breaks down each phase into actionable coding tasks.
 
 ---
