@@ -17,6 +17,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::TriangleMesh;
+
 /// Grid the face and edge signatures are rounded to, in millimetres. Also the
 /// smallest difference in a length, area or position the names can express.
 pub const NAME_QUANTUM: f64 = 1e-4;
@@ -319,6 +321,62 @@ pub fn disambiguate_edges(edges: &mut [NamedEdge]) {
             edges[index].label = format!("{label} #{}", suffix + 1);
         }
     }
+}
+
+
+/// What is known about a reference from the last build that had it: enough for a
+/// repair list to tell the user which one went missing and where it used to be.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceMemory {
+    pub reference: String,
+    /// "edge" or "face".
+    pub kind: String,
+    /// Midpoint of an edge, in mm.
+    pub location: [f64; 3],
+    /// Length of the edge, in mm.
+    pub size: f64,
+    /// The faces it bounded, by reference.
+    pub neighbours: Vec<String>,
+    pub label: String,
+}
+
+impl ReferenceMemory {
+    /// One sentence for the repair list.
+    pub fn describe(&self) -> String {
+        format!(
+            "{} {} of {} mm at ({}, {}, {})",
+            self.label,
+            self.kind,
+            quantised(self.size),
+            quantised(self.location[0]),
+            quantised(self.location[1]),
+            quantised(self.location[2]),
+        )
+    }
+}
+
+/// Remember every named edge of a mesh, by reference.
+///
+/// References are stable names, so this survives a rebuild: a reference that
+/// disappears keeps its last entry, which is what the repair list needs to say
+/// where it was.
+pub fn remember(mesh: &TriangleMesh) -> BTreeMap<String, ReferenceMemory> {
+    mesh.edges
+        .iter()
+        .map(|edge| {
+            (
+                edge.name.clone(),
+                ReferenceMemory {
+                    reference: edge.name.clone(),
+                    kind: "edge".to_string(),
+                    location: edge.midpoint,
+                    size: edge.length,
+                    neighbours: edge.faces.clone(),
+                    label: edge.label.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

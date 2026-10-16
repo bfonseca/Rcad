@@ -211,6 +211,14 @@ pub fn apply_references(mesh: &mut TriangleMesh, topology: &ShapeTopology, refs:
     }
 }
 
+/// What an edge set resolved to on a shape: the edges it found, and the
+/// references it asked for that are no longer there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EdgeSetResolution {
+    pub found: Vec<String>,
+    pub lost: Vec<String>,
+}
+
 /// Cosine of one degree between an edge and the reference axis, and its sine:
 /// the tolerances of the vertical and horizontal edge sets.
 const AXIS_PARALLEL: f64 = 0.99985;
@@ -231,19 +239,29 @@ pub fn resolve_edge_set(
     topology: &ShapeTopology,
     references: Option<&BTreeMap<u64, String>>,
     axis: Option<[f64; 3]>,
-) -> Vec<String> {
+) -> EdgeSetResolution {
+    // References can go missing; the rule modes cannot, they are re-evaluated.
+    if let EdgeSet::References(names) = set {
+        let mut found = Vec::new();
+        let mut lost = Vec::new();
+        for name in names {
+            let edge_id = references.and_then(|map| {
+                map.iter()
+                    .find(|(_, reference)| *reference == name)
+                    .map(|(edge_id, _)| *edge_id)
+            });
+            match edge_id.and_then(|edge_id| topology.edges.get(&edge_id)) {
+                Some(edge) => found.push(edge.signature.clone()),
+                None => lost.push(name.clone()),
+            }
+        }
+        return EdgeSetResolution { found, lost };
+    }
+
     let wanted: Vec<u64> = match set {
         EdgeSet::All => topology.edges.keys().copied().collect(),
-        EdgeSet::References(names) => topology
-            .edges
-            .keys()
-            .copied()
-            .filter(|edge_id| {
-                references
-                    .and_then(|map| map.get(edge_id))
-                    .map_or(false, |reference| names.iter().any(|name| name == reference))
-            })
-            .collect(),
+        // Handled above, because it is the only mode that can lose one.
+        EdgeSet::References(_) => Vec::new(),
         EdgeSet::Outer => topology
             .edges
             .iter()
@@ -259,10 +277,13 @@ pub fn resolve_edge_set(
         EdgeSet::Vertical { .. } => along_axis(topology, axis, true),
         EdgeSet::Horizontal { .. } => along_axis(topology, axis, false),
     };
-    wanted
-        .into_iter()
-        .filter_map(|edge_id| topology.edges.get(&edge_id).map(|edge| edge.signature.clone()))
-        .collect()
+    EdgeSetResolution {
+        found: wanted
+            .into_iter()
+            .filter_map(|edge_id| topology.edges.get(&edge_id).map(|edge| edge.signature.clone()))
+            .collect(),
+        lost: Vec::new(),
+    }
 }
 
 /// Edges parallel to the reference axis, or perpendicular to it, within one
@@ -827,6 +848,54 @@ mod tests {
         );
     }
 
+    /// A reference that is no longer on the body is reported as lost, the rest of
+    /// the picks still apply, and the round never widens to every edge.
+    #[test]
+    fn a_lost_reference_is_reported_without_widening_the_round() {
+        let mut part = Part::new_solid("P");
+        part.features.push(box_feature([40.0, 30.0, 8.0]));
+        let boxed = rebuild(&part);
+        let good = boxed.display_mesh.edges[0].name.clone();
+
+        part.features.push(plane_feature(FeatureKind::Fillet {
+            radius: 1.0,
+            edges: EdgeSet::References(vec![good, "edge(gone|gone)".to_string()]),
+        }));
+        let partial = rebuild(&part);
+
+        assert_eq!(partial.lost_references.len(), 1, "one reference went missing");
+        assert_eq!(partial.lost_references[0].reference, "edge(gone|gone)");
+        assert_eq!(partial.lost_references[0].feature_name, "F");
+        assert!(partial.errors.is_empty(), "the rest still builds: {:?}", partial.errors);
+        assert!(
+            partial.display_mesh.face_names.len() > 6,
+            "the pick that survived should still have been rounded"
+        );
+    }
+
+    /// When every pick is gone the feature is skipped, not widened: rounding the
+    /// whole body is the failure that hurts.
+    #[test]
+    fn a_round_with_no_surviving_reference_is_skipped() {
+        let mut part = Part::new_solid("P");
+        part.features.push(box_feature([40.0, 30.0, 8.0]));
+        part.features.push(plane_feature(FeatureKind::Fillet {
+            radius: 1.0,
+            edges: EdgeSet::References(vec!["edge(gone|gone)".to_string()]),
+        }));
+
+        let result = rebuild(&part);
+
+        assert_eq!(result.lost_references.len(), 1);
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert!(result.errors[0].contains("none of its edge references"), "{:?}", result.errors);
+        assert_eq!(
+            result.display_mesh.face_names.len(),
+            6,
+            "the body is still the plain box"
+        );
+    }
+
     fn test_edge(
         kernel_id: u64,
         signature: &str,
@@ -876,7 +945,9 @@ mod tests {
             (3, "along-z".to_string()),
         ]);
         let axis = Some([0.0, 0.0, 1.0]);
-        let resolve = |set: &EdgeSet| resolve_edge_set(set, &topology, Some(&references), axis);
+        let resolve = |set: &EdgeSet| {
+            resolve_edge_set(set, &topology, Some(&references), axis).found
+        };
         let pick = |name: &str| name.to_string();
 
         assert_eq!(resolve(&EdgeSet::All).len(), 3);
@@ -912,7 +983,9 @@ mod tests {
                 axis: uuid::Uuid::new_v4(),
             },
         ] {
-            assert!(resolve_edge_set(&set, &topology, Some(&references), None).is_empty());
+            assert!(resolve_edge_set(&set, &topology, Some(&references), None)
+                .found
+                .is_empty());
         }
     }
 

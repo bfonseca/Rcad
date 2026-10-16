@@ -713,3 +713,23 @@ Tests: an extrude placed on the XZ plane (normal +Y) produces geometry bounded b
 the profile in X and Z and by the height along Y; a sketch off the XY plane
 extrudes and the feature records its normal; and a round on the outer edges of a
 box is the same feature as a round on all twelve references of it.
+
+### Lost references: detection and memory (first layer)
+
+- `resolve_edge_set` now returns an `EdgeSetResolution { found, lost }`: the rule
+  modes can never lose a reference (they are re-evaluated), the picked ones can.
+- A round whose references are partly gone applies to the survivors and is
+  reported; when every pick is gone the feature is **skipped**, never widened to
+  the whole body - which was the dangerous silent behaviour.
+- `RebuildResult.lost_references: Vec<LostReference>` carries, per feature, the
+  reference that went missing.
+- `rcad_geom::remember(mesh)` records what is known about each edge reference
+  (midpoint, length, the faces it bounded, label) so a repair list can say where
+  the lost one used to be, and `ReferenceMemory::describe()` writes the sentence.
+
+Tests: a partly lost set keeps the surviving pick and reports one lost reference;
+a fully lost set is skipped with an explanation and the body stays a plain box.
+
+Still to do here: the app does not yet keep the memory across rebuilds, fill
+`last_location`/`last_description`, or offer substitution (replace the lost
+reference in the feature with one the user has just selected).

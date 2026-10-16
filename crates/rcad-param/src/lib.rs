@@ -146,8 +146,14 @@ impl ShapeCache {
             // second eval_feature() call in the error branch, which created
             // (and leaked) backend shapes twice for every failing feature.
             // A fillet or chamfer is told which edges to work on, resolved from
-            // its edge set against the body it consumes.
-            let edge_signatures = match &feature.kind {
+            // its edge set against the body it consumes. `references_only` is
+            // what tells a set whose picks vanished from the rule modes.
+            let references_only = matches!(
+                &feature.kind,
+                FeatureKind::Fillet { edges, .. } | FeatureKind::Chamfer { edges, .. }
+                    if edges.is_references()
+            );
+            let resolution = match &feature.kind {
                 FeatureKind::Fillet { edges, .. } | FeatureKind::Chamfer { edges, .. } => {
                     let topology = match current {
                         Some(shape) => backend.topology(shape).unwrap_or_default(),
@@ -165,8 +171,32 @@ impl ShapeCache {
                     });
                     naming::resolve_edge_set(edges, &topology, references, axis)
                 }
-                _ => Vec::new(),
+                _ => naming::EdgeSetResolution::default(),
             };
+            let edge_signatures = resolution.found;
+
+            for reference in &resolution.lost {
+                result.lost_references.push(rcad_doc::LostReference {
+                    feature: feature.id,
+                    feature_name: feature.name.clone(),
+                    reference: reference.clone(),
+                    last_location: None,
+                    last_description: None,
+                });
+            }
+            // A round whose references are all gone must not quietly become a
+            // round of every edge: skip it and let the user repair it.
+            if references_only
+                && edge_signatures.is_empty()
+                && !resolution.lost.is_empty()
+            {
+                result.errors.push(format!(
+                    "{}: none of its edge references exist any more ({} lost)",
+                    feature.name,
+                    resolution.lost.len()
+                ));
+                continue;
+            }
             match eval_feature(
                 &feature.kind,
                 current,

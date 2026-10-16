@@ -641,6 +641,28 @@ pub struct RebuildResult {
     pub display_mesh: rcad_geom::TriangleMesh,
     /// Human-readable errors, one per feature that failed to evaluate.
     pub errors: Vec<String>,
+    /// References features asked for that the model no longer has, so the user can
+    /// be told which one went missing and put another in its place.
+    pub lost_references: Vec<LostReference>,
+}
+
+/// A reference a feature used that the model no longer has.
+///
+/// Creo tells the user which reference was lost and where it used to be; the
+/// location comes from the last build that still had it, which is what
+/// `last_location` and `last_description` carry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LostReference {
+    /// The feature that needs repairing.
+    pub feature: EntityId,
+    pub feature_name: String,
+    /// The reference that no longer resolves.
+    pub reference: String,
+    /// What is known about where it was, when a previous build still had it.
+    #[serde(default)]
+    pub last_location: Option<[f64; 3]>,
+    #[serde(default)]
+    pub last_description: Option<String>,
 }
 
 pub fn dvec3_from(a: [f64; 3]) -> DVec3 {
