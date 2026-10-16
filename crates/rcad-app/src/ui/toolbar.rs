@@ -963,7 +963,11 @@ mod icon_tests {
                 placement: None,
             },
             FeatureKind::ExtrudeSurface { profile: profile.clone(), height: 1.0 },
-            FeatureKind::Revolve { profile: profile.clone(), angle_deg: 90.0 },
+            FeatureKind::Revolve {
+                profile: profile.clone(),
+                angle_deg: 90.0,
+                placement: None,
+            },
             FeatureKind::Boolean { tool_feature: uuid::Uuid::new_v4(), op: BooleanOp::Union },
             FeatureKind::Boolean { tool_feature: uuid::Uuid::new_v4(), op: BooleanOp::Subtract },
             FeatureKind::Boolean { tool_feature: uuid::Uuid::new_v4(), op: BooleanOp::Intersect },

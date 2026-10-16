@@ -533,6 +533,34 @@ impl GeometryBackend for OcctBackend {
         Ok(self.insert(solid))
     }
 
+    /// Revolve the profile about the in-plane y axis of the plane it lies on.
+    /// That is what revolving a sketch means: the sketch vertical is the axis,
+    /// so the profile has to be built on its plane first.
+    fn revolve_profile_placed(
+        &mut self,
+        profile: &Profile2D,
+        angle_rad: f64,
+        origin: DVec3,
+        x_direction: DVec3,
+        normal: DVec3,
+    ) -> GeomResult<ShapeId> {
+        let normal = normal.normalize_or_zero();
+        if normal.length() == 0.0 {
+            return Err(GeomError::InvalidProfile("plane normal is zero".into()));
+        }
+        let u = (x_direction - normal * x_direction.dot(normal)).normalize_or_zero();
+        if u.length() == 0.0 {
+            return Err(GeomError::InvalidProfile(
+                "plane x direction is along the normal".into(),
+            ));
+        }
+        let v = normal.cross(u);
+        let edges = Self::profile_edges_on(profile, origin, u, v)?;
+        let solid = Solid::revolve(&edges, cvec(origin), cvec(v), angle_rad)
+            .map_err(|e| GeomError::Backend(e.to_string()))?;
+        Ok(self.insert(solid))
+    }
+
     fn boolean(&mut self, a: ShapeId, b: ShapeId, op: BooleanOp) -> GeomResult<ShapeId> {
         let sa = self.get(a)?.clone();
         let sb = self.get(b)?.clone();

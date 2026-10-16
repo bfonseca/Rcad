@@ -249,7 +249,7 @@ impl Server {
                 let part = self.active_part_mut().map_err(tool_failure)?;
                 let feature_name = arg_str(&args, "name")
                     .unwrap_or_else(|| rcad_features::unique_feature_name(part, "Revolve"));
-                let id = rcad_features::add_revolve(part, &feature_name, profile, angle);
+                let id = rcad_features::add_revolve(part, &feature_name, profile, angle, None);
                 Ok(format!(
                     "Added revolve '{feature_name}' ({id}) by {angle} degrees."
                 ))

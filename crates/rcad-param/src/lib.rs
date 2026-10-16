@@ -399,12 +399,29 @@ fn eval_feature(
                 .map(Some)
                 .map_err(|e| e.to_string())
         }
-        FeatureKind::Revolve { profile, angle_deg } => {
+        FeatureKind::Revolve {
+            profile,
+            angle_deg,
+            placement,
+        } => {
             let angle = angle_deg.to_radians();
-            backend
-                .revolve_profile(profile, DVec3::ZERO, DVec3::Z, angle)
-                .map(Some)
-                .map_err(|e| e.to_string())
+            // A profile that knows its plane is revolved about the in-plane axis
+            // of that plane; one that does not keeps the old world-Z axis.
+            let shape = match placement {
+                Some(plane) => backend.revolve_profile_placed(
+                    profile,
+                    angle,
+                    dvec3(plane.origin[0], plane.origin[1], plane.origin[2]),
+                    dvec3(
+                        plane.x_direction[0],
+                        plane.x_direction[1],
+                        plane.x_direction[2],
+                    ),
+                    dvec3(plane.normal[0], plane.normal[1], plane.normal[2]),
+                ),
+                None => backend.revolve_profile(profile, DVec3::ZERO, DVec3::Z, angle),
+            };
+            shape.map(Some).map_err(|e| e.to_string())
         }
         FeatureKind::Boolean { tool_feature, op } => {
             let tool = named

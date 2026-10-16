@@ -190,6 +190,21 @@ pub trait GeometryBackend: Send {
         let _ = (origin, x_direction, normal);
         self.extrude_profile(profile, height)
     }
+    /// Revolve a profile that lies on a plane, about the in-plane y axis through
+    /// the plane origin. The default revolves about the world Z axis through the
+    /// origin, which is only meaningful for a profile drawn on the XY plane.
+    fn revolve_profile_placed(
+        &mut self,
+        profile: &Profile2D,
+        angle_rad: f64,
+        origin: DVec3,
+        x_direction: DVec3,
+        normal: DVec3,
+    ) -> GeomResult<ShapeId> {
+        let _ = (origin, x_direction, normal);
+        self.revolve_profile(profile, DVec3::ZERO, DVec3::Z, angle_rad)
+    }
+
     fn revolve_profile(
         &mut self,
         profile: &Profile2D,

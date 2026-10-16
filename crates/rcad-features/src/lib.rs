@@ -108,10 +108,23 @@ pub fn unique_feature_name(part: &Part, base: &str) -> String {
     }
 }
 
-pub fn add_revolve(part: &mut Part, name: &str, profile: Profile2D, angle_deg: f64) -> EntityId {
+pub fn add_revolve(
+    part: &mut Part,
+    name: &str,
+    profile: Profile2D,
+    angle_deg: f64,
+    placement: Option<SketchPlacement>,
+) -> EntityId {
     push_feature(
         part,
-        Feature::new(name, FeatureKind::Revolve { profile, angle_deg }),
+        Feature::new(
+            name,
+            FeatureKind::Revolve {
+                profile,
+                angle_deg,
+                placement,
+            },
+        ),
     )
 }
 

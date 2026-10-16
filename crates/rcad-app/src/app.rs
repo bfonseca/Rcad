@@ -2228,9 +2228,16 @@ impl RcadApp {
     }
     
     pub fn revolve_sketch(&mut self) {
+        let placement = self
+            .sketch_plane
+            .map(|(origin, normal, x_direction)| SketchPlacement {
+                origin,
+                normal,
+                x_direction,
+            });
         if let Some(sketch) = &self.sketch {
             if let Some(profile) = sketch.to_profile() {
-                if let Err(e) = self.revolve_sketch_internal(profile, 360.0) {
+                if let Err(e) = self.revolve_sketch_internal(profile, 360.0, placement) {
                     self.last_error = Some(format!("Revolve failed: {e}"));
                 }
             }
@@ -2281,12 +2288,17 @@ impl RcadApp {
         Ok(())
     }
     
-    fn revolve_sketch_internal(&mut self, profile: rcad_geom::Profile2D, angle_deg: f64) -> Result<(), Box<dyn std::error::Error>> {
+    fn revolve_sketch_internal(
+        &mut self,
+        profile: rcad_geom::Profile2D,
+        angle_deg: f64,
+        placement: Option<SketchPlacement>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Save state before modifying
         self.undo_stack.push(self.project.clone());
         if let Some(part) = self.get_active_part_mut() {
             let name = rcad_features::unique_feature_name(part, "Revolve");
-            rcad_features::add_revolve(part, &name, profile, angle_deg);
+            rcad_features::add_revolve(part, &name, profile, angle_deg, placement);
             self.rebuild_active_part();
         }
         Ok(())
@@ -3808,6 +3820,28 @@ mod interaction_tests {
             !app.substitute_reference(id, "not-there", "x"),
             "a reference the feature never had cannot be substituted"
         );
+    }
+
+    /// The revolve carries the sketch plane too, so it spins about the axis of
+    /// the plane the sketch was drawn on.
+    #[test]
+    fn a_sketch_revolves_around_its_plane_axis() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        app.new_sketch();
+        app.sketch_plane = Some(([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
+        app.add_sketch_rectangle();
+        app.solve_sketch();
+
+        app.revolve_sketch();
+
+        let part = app.project.parts.first().unwrap();
+        let placement = part.features.iter().find_map(|feature| match &feature.kind {
+            FeatureKind::Revolve { placement, .. } => Some(placement.clone()),
+            _ => None,
+        });
+        let placement = placement.expect("the sketch should have revolved");
+        assert_eq!(placement.expect("a placement").normal, [1.0, 0.0, 0.0]);
     }
 
     /// A tag whose face is gone (edited or deleted) is reported, not silently

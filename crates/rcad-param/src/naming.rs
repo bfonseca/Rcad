@@ -896,6 +896,47 @@ mod tests {
         );
     }
 
+    /// A revolve that carries its plane spins about that plane in-plane axis,
+    /// instead of the world Z axis, which for a flat profile is degenerate.
+    #[test]
+    fn a_revolve_with_a_placement_spins_around_the_plane_axis() {
+        // A profile offset from the axis, so the result is a ring and not a
+        // profile that crosses its own axis of revolution.
+        let profile = rcad_geom::Profile2D {
+            outer: vec![[5.0, -5.0], [15.0, -5.0], [15.0, 5.0], [5.0, 5.0]],
+            holes: Vec::new(),
+        };
+        let mut part = Part::new_solid("P");
+        part.features.push(Feature::new(
+            "R",
+            FeatureKind::Revolve {
+                profile,
+                angle_deg: 360.0,
+                placement: Some(rcad_doc::SketchPlacement {
+                    origin: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    x_direction: [1.0, 0.0, 0.0],
+                }),
+            },
+        ));
+
+        let result = rebuild(&part);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let mut spun_out = false;
+        for position in &result.display_mesh.positions {
+            let radius = (position[0] as f64).hypot(position[2] as f64);
+            assert!(
+                radius >= 5.0 - 1e-2 && radius <= 15.0 + 1e-2,
+                "radius {radius} outside the profile"
+            );
+            assert!(position[1].abs() <= 5.0 + 1e-2, "y {} outside it", position[1]);
+            if position[2].abs() > 10.0 {
+                spun_out = true;
+            }
+        }
+        assert!(spun_out, "the profile should have been spun around the Y axis");
+    }
+
     fn test_edge(
         kernel_id: u64,
         signature: &str,

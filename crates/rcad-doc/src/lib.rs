@@ -534,6 +534,9 @@ pub enum FeatureKind {
     Revolve {
         profile: Profile2D,
         angle_deg: f64,
+        /// Where the profile lies. Without it the profile is on the XY plane.
+        #[serde(default)]
+        placement: Option<SketchPlacement>,
     },
     Boolean {
         tool_feature: EntityId,

@@ -223,6 +223,7 @@ fn create_shaft() -> Result<Part, Box<dyn std::error::Error>> {
         FeatureKind::Revolve {
             profile: rcad_geom::Profile2D { outer: vec![], holes: vec![] },
             angle_deg: 360.0,
+            placement: None,
         },
     ));
     

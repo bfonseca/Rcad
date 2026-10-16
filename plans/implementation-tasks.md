@@ -755,3 +755,25 @@ Known limit: the memory covers edges (what fillets and chamfers reference today)
 lost *face* references, such as a sketch plane, are not listed yet. The list is
 also derived in the app from the part and the mesh, while the kernel derives its
 own copy to decide whether to skip a feature: same rule in two places.
+
+### Revolve carries its plane too (step 3)
+
+The revolve had exactly the extrude problem, and worse: the profile was built on
+the XY plane and spun about the **world Z axis**, which for a flat profile is
+degenerate. Now the profile is built on its own plane and spun about that plane
+in-plane y axis through the sketch origin, which is what revolving a sketch
+means. `SketchPlacement` on `Revolve`, serde-defaulted; `revolve_profile_placed`
+on the backend, defaulting to the old world-Z axis for callers that have no
+placement.
+
+Test: an offset profile revolved 360 degrees gives a ring whose radius stays
+between the profile edges and that reaches out of the original plane. Plus an app
+test that a sketch off the XY plane records the plane on the Revolve.
+
+Still missing in the sketch, in order:
+
+1. Drawing with the mouse: two clicks for a rectangle, snapping to the grid.
+2. Constraints and dimensions on screen, and the degrees of freedom
+   (`Sketch::analyze_dof` / `constraint_status` exist but are not shown).
+3. The sketch plane as a persistent reference, not three numbers: today a sketch
+   does not follow the face it was drawn on when that face moves.
