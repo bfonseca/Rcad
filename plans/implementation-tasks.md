@@ -621,3 +621,21 @@ Tests: a fillet on two references rounds two edges and adds far fewer faces than
 the same fillet on every edge; the rule modes resolve on a synthetic topology
 with one edge of each kind; the vertical and horizontal modes resolve to nothing
 without the axis; and every box edge reports ninety degrees.
+
+### The cycle is closed: pick, size, round (step 2, done)
+
+- The selection bar carries the size of the next round or break (a drag value in
+  mm, 1 mm by default), and Round/Break use it.
+- The toolbar Fillet and Chamfer buttons, which were TODO stubs, now create the
+  feature: the selected edges when there are any, every edge otherwise. The
+  labels in the tree and the icons already followed.
+- `selection_edge_set()` is the one place that rule lives.
+
+Tests: the toolbar round stores the selected references in order and the size
+from the field; the same button with nothing picked stores `EdgeSet::All` at
+1 mm. 57 in rcad-app, 0 warnings.
+
+Next: the sketch. `new_sketch` already places a sketch on the first planar datum
+picked; what is missing is the sketch environment itself - the grid and plane in
+the viewport, drawing and constraining in it, and then reading its profile as an
+extrude input.

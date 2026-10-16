@@ -100,6 +100,9 @@ pub struct RcadApp {
     hover_cycle: usize,
 #[allow(dead_code)] // set but not read until picking modes exist
     selection_mode: SelectionMode,
+    /// Size of the next round or break, in mm: the radius or the distance the
+    /// toolbar and the selection menu use.
+    edge_feature_size: f64,
     
     // Async kernel worker
     kernel_worker_tx: Option<Sender<RebuildJob>>,
@@ -248,6 +251,7 @@ impl RcadApp {
             hover_candidates: Vec::new(),
             hover_cycle: 0,
             selection_mode: SelectionMode::Object,
+            edge_feature_size: 1.0,
             
             // Async kernel worker
             kernel_worker_tx: Some(job_tx),
@@ -1460,6 +1464,14 @@ impl RcadApp {
                         remove_index = Some(index);
                     }
                 }
+                // The size of the next round or break, then the sets.
+                ui.label("Size");
+                ui.add(
+                    egui::DragValue::new(&mut self.edge_feature_size)
+                        .speed(0.1)
+                        .range(0.05..=100.0)
+                        .suffix(" mm"),
+                );
                 // Round and break read the same edge sets, the way the Creo
                 // dashboard does.
                 for (label, kind) in [
@@ -1498,7 +1510,8 @@ impl RcadApp {
             self.apply_selection_query(query);
         }
         if let Some((kind, edges)) = pending_feature {
-            self.add_edge_feature(kind, 1.0, edges);
+            let size = self.edge_feature_size;
+            self.add_edge_feature(kind, size, edges);
         }
     }
 
@@ -1521,7 +1534,18 @@ impl RcadApp {
         })
     }
 
-    /// Add a round or a break driven by an edge set, at the default size.
+    /// The edge set the toolbar buttons use: the edges that are selected, or
+    /// every edge when none is.
+    fn selection_edge_set(&self) -> EdgeSet {
+        let references = self.selection.edge_references();
+        if references.is_empty() {
+            EdgeSet::All
+        } else {
+            EdgeSet::References(references.iter().map(|r| r.to_string()).collect())
+        }
+    }
+
+    /// Add a round or a break driven by an edge set.
     pub fn add_edge_feature(&mut self, kind: EdgeFeature, size: f64, edges: EdgeSet) {
         self.undo_stack.push(self.project.clone());
         let Some(part) = self.get_active_part_mut() else {
@@ -2175,10 +2199,18 @@ impl RcadApp {
                 // TODO: Boundary
             }
             ToolbarAction::ModelFillet => {
-                // TODO: Fillet
+                self.add_edge_feature(
+                    EdgeFeature::Fillet,
+                    self.edge_feature_size,
+                    self.selection_edge_set(),
+                );
             }
             ToolbarAction::ModelChamfer => {
-                // TODO: Chamfer
+                self.add_edge_feature(
+                    EdgeFeature::Chamfer,
+                    self.edge_feature_size,
+                    self.selection_edge_set(),
+                );
             }
             ToolbarAction::ModelShell => {
                 // TODO: Shell
@@ -2637,6 +2669,7 @@ impl Default for RcadApp {
             hover_candidates: Vec::new(),
             hover_cycle: 0,
             selection_mode: SelectionMode::Object,
+            edge_feature_size: 1.0,
             
             // Async kernel worker
             kernel_worker_tx: Some(job_tx),
@@ -3332,6 +3365,57 @@ mod interaction_tests {
         assert!(part.features.iter().any(|feature| matches!(
             &feature.kind,
             FeatureKind::Chamfer { edges: EdgeSet::Inner, .. }
+        )));
+    }
+
+    /// The toolbar round reads the selection and the size field: the cycle from
+    /// picking edges to a feature that stores them.
+    #[test]
+    fn the_toolbar_round_uses_the_selected_edges_and_the_size() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        app.selection.replace(Selected::Edge {
+            reference: "e1".to_string(),
+            label: "e1".to_string(),
+        });
+        app.selection.extend(Selected::Edge {
+            reference: "e2".to_string(),
+            label: "e2".to_string(),
+        });
+        app.edge_feature_size = 2.5;
+
+        app.handle_toolbar_action(ToolbarAction::ModelFillet);
+
+        let part = app.project.parts.first().unwrap();
+        let round = part
+            .features
+            .iter()
+            .find(|feature| matches!(feature.kind, FeatureKind::Fillet { .. }))
+            .expect("a round");
+        match &round.kind {
+            FeatureKind::Fillet { radius, edges } => {
+                assert_eq!(*radius, 2.5);
+                assert_eq!(
+                    *edges,
+                    EdgeSet::References(vec!["e1".to_string(), "e2".to_string()])
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// With nothing picked, the same button means every edge, as it always did.
+    #[test]
+    fn the_toolbar_break_without_a_selection_covers_every_edge() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+
+        app.handle_toolbar_action(ToolbarAction::ModelChamfer);
+
+        let part = app.project.parts.first().unwrap();
+        assert!(part.features.iter().any(|feature| matches!(
+            &feature.kind,
+            FeatureKind::Chamfer { edges: EdgeSet::All, distance } if (*distance - 1.0).abs() < 1e-9
         )));
     }
 
