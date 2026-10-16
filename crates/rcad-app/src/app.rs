@@ -137,6 +137,12 @@ pub struct RcadApp {
     /// Set by `--demo-colours`: tag two visible demo faces with the project's
     /// first two colour ids once the mesh has been tessellated.
     pending_demo_colours: bool,
+    /// Set by `--save`: write the document once the model is built and the
+    /// demo colours (if any) have been applied.
+    pending_save: Option<PathBuf>,
+    /// True once a rebuild response has been applied, so headless save can wait
+    /// for the real model instead of writing an empty one.
+    mesh_ready: bool,
 }
 
 /// Transient state for the feature dialog's "add parameter" row.
@@ -228,6 +234,8 @@ impl RcadApp {
             project_error: None,
             new_colour_id: String::new(),
             pending_demo_colours: false,
+            pending_save: None,
+            mesh_ready: false,
         };
         
         // Create default datum geometry (coordinate system + datum planes) for new part
@@ -756,6 +764,7 @@ impl RcadApp {
                     // Only apply if this is the latest version
                     if response.version >= self.kernel_version.load(Ordering::Relaxed) {
                         self.mesh = response.mesh;
+                        self.mesh_ready = true;
                         // Frame the model the first time it appears: the app
                         // previously opened at a fixed camera distance.
                         if self.needs_fit {
@@ -770,9 +779,11 @@ impl RcadApp {
                     }
                 }
             }
-            // Runs outside the receiver borrow: tagging colours does not rebuild
-            // geometry, the next frame simply resolves them differently.
+            // Run outside the receiver borrow: neither of these rebuilds
+            // geometry, the next frame simply resolves the colours differently.
             self.apply_pending_demo_colours();
+            self.report_unmatched_face_colours();
+            self.flush_pending_save();
 
             // Trigger the kernel worker only when the part tree actually
             // changed. This block used to queue a full rebuild on every frame,
@@ -1192,36 +1203,74 @@ impl RcadApp {
             self.pending_demo_colours = false;
             return;
         }
-        // Keep waiting until a tessellation with face ids has arrived.
-        let Some((top, side)) = demo_face_ids(&self.mesh) else {
+        // Keep waiting until a tessellation with stable face names has arrived.
+        let Some((top, side)) = demo_face_names(&self.mesh) else {
             return;
         };
         if let Some(part) = self.get_active_part_mut() {
-            part.set_face_colour(top, ids[0].clone());
-            part.set_face_colour(side, ids[1].clone());
+            part.set_face_colour(top.clone(), ids[0].clone());
+            part.set_face_colour(side.clone(), ids[1].clone());
         }
         self.pending_demo_colours = false;
         self.status = Some(format!(
-            "Demo faces coloured from rcad.toml: {top} = {}, {side} = {}",
+            "Two demo faces coloured from rcad.toml: {}, {}",
             ids[0], ids[1]
         ));
     }
 
-    /// Tag a kernel face with a logical colour id from the project vocabulary,
-    /// or clear its tag. The viewport resolves the id to RGB on the next frame.
-    pub fn apply_face_colour(&mut self, face_id: u64, colour_id: Option<String>) {
+    /// Warn when a colour tag no longer matches any face of the rebuilt model.
+    ///
+    /// That happens when the face was edited or deleted: its stable name
+    /// changed with its geometry. Saying so is better than leaving the user
+    /// wondering where the colour went - and much better than painting the
+    /// colour on whichever face took its place.
+    fn report_unmatched_face_colours(&mut self) {
+        let available: Vec<String> = self
+            .mesh
+            .face_names
+            .values()
+            .map(|face| face.name.clone())
+            .collect();
+        if available.is_empty() {
+            return;
+        }
+        let unmatched = match self.get_active_part() {
+            Some(part) => part.unmatched_face_colours(&available).len(),
+            None => return,
+        };
+        if unmatched > 0 {
+            self.status = Some(format!(
+                "{unmatched} colour tag(s) no longer match a face; the geometry changed."
+            ));
+        }
+    }
+
+    /// Tag a face with a logical colour id from the project vocabulary, or
+    /// clear its tag. The key is the stable face name, so the tag still points
+    /// at the same face after a rebuild, a save and a reload, or a restart.
+    pub fn apply_face_colour(
+        &mut self,
+        face_name: String,
+        face_label: String,
+        colour_id: Option<String>,
+    ) {
+        let what = if face_label.is_empty() {
+            "Face".to_string()
+        } else {
+            face_label
+        };
         let message = {
             let Some(part) = self.get_active_part_mut() else {
                 return;
             };
             match colour_id {
                 Some(id) => {
-                    part.set_face_colour(face_id, id.clone());
-                    format!("Face {face_id} tagged '{id}'.")
+                    part.set_face_colour(face_name.clone(), id.clone());
+                    format!("{what} tagged '{id}'.")
                 }
                 None => {
-                    part.clear_face_colour(face_id);
-                    format!("Face {face_id} colour cleared.")
+                    part.clear_face_colour(&face_name);
+                    format!("{what} colour cleared.")
                 }
             }
         };
@@ -1236,18 +1285,17 @@ impl RcadApp {
         let Some(triangle) = self.selected_triangle else {
             return;
         };
-        let Some(face_id) = self.mesh.face_id(triangle) else {
+        let Some(face_name) = self.mesh.face_name(triangle).map(str::to_string) else {
             return;
         };
-        if face_id == rcad_geom::NO_FACE_ID {
-            return;
-        }
+        let face_label = self.mesh.face_label(triangle).unwrap_or("Face").to_string();
 
         ui.separator();
-        ui.label(format!("Face {face_id}"));
+        ui.label(&face_label)
+            .on_hover_text(format!("Stable face id:\n{face_name}"));
         let current = self
             .get_active_part()
-            .and_then(|part| part.face_colour_id(face_id))
+            .and_then(|part| part.face_colour_id(&face_name))
             .map(str::to_string);
         let ids: Vec<String> = self.manifest.surface_colors.keys().cloned().collect();
         let mut choice = current.clone();
@@ -1265,7 +1313,7 @@ impl RcadApp {
                 }
             });
         if choice != current {
-            self.apply_face_colour(face_id, choice);
+            self.apply_face_colour(face_name, face_label, choice);
         }
     }
 
@@ -1527,6 +1575,54 @@ impl RcadApp {
                 self.current_path = Some(path);
                 self.last_error = None;
             }
+        }
+    }
+
+    /// Open a document by path. The menu uses the file dialog; this is the
+    /// headless path used by `--open` and by tests.
+    pub fn open_document_at(&mut self, path: PathBuf) -> Result<(), String> {
+        let project =
+            Project::load(&path).map_err(|e| format!("Failed to load {}: {e}", path.display()))?;
+        self.project = project;
+        self.current_path = Some(path);
+        self.last_error = None;
+        self.restore_view();
+        self.needs_rebuild = true;
+        self.mesh_ready = false;
+        Ok(())
+    }
+
+    /// Save the document to a path. The menu uses the file dialog; this is the
+    /// headless path used by `--save` and by tests.
+    pub fn save_document_at(&mut self, path: PathBuf) -> Result<(), String> {
+        self.capture_view();
+        self.project
+            .save(&path)
+            .map_err(|e| format!("Failed to save {}: {e}", path.display()))?;
+        self.current_path = Some(path);
+        self.last_error = None;
+        Ok(())
+    }
+
+    /// `--save`: write the document once the model is built, so a headless run
+    /// can save a document that already carries its face colours.
+    pub fn request_save(&mut self, path: PathBuf) {
+        self.pending_save = Some(path);
+    }
+
+    fn flush_pending_save(&mut self) {
+        let Some(path) = self.pending_save.clone() else {
+            return;
+        };
+        // Wait for the first rebuild, and for --demo-colours to be applied, so
+        // the file on disk is the finished document.
+        if self.pending_demo_colours || !self.mesh_ready {
+            return;
+        }
+        self.pending_save = None;
+        match self.save_document_at(path) {
+            Ok(()) => self.status = Some("Document saved.".to_string()),
+            Err(err) => self.last_error = Some(err),
         }
     }
     
@@ -2231,6 +2327,8 @@ impl Default for RcadApp {
             project_error: None,
             new_colour_id: String::new(),
             pending_demo_colours: false,
+            pending_save: None,
+            mesh_ready: false,
         }
     }
 }
@@ -2259,12 +2357,12 @@ impl eframe::App for RcadApp {
     }
 }
 
-/// The face ids of the top and of the right-hand face of a mesh.
+/// The stable names of the top and of the right-hand face of a mesh.
 ///
 /// Used by `--demo-colours` to make the colour scheme visible in a screenshot.
 /// Picked from the summed normal of each face's triangles, so the choice does
 /// not depend on tessellation order or on knowing OpenCascade ids in advance.
-fn demo_face_ids(mesh: &TriangleMesh) -> Option<(u64, u64)> {
+fn demo_face_names(mesh: &TriangleMesh) -> Option<(String, String)> {
     let mut summed: std::collections::HashMap<u64, glam::Vec3> = std::collections::HashMap::new();
     for (triangle, indices) in mesh.indices.chunks_exact(3).enumerate() {
         let Some(face_id) = mesh.face_id(triangle) else {
@@ -2286,7 +2384,8 @@ fn demo_face_ids(mesh: &TriangleMesh) -> Option<(u64, u64)> {
         .filter(|(id, _)| **id != top)
         .max_by(|a, b| a.1.x.total_cmp(&b.1.x))?
         .0;
-    Some((top, side))
+    let name_of = |face_id: u64| mesh.face_names.get(&face_id).map(|face| face.name.clone());
+    Some((name_of(top)?, name_of(side)?))
 }
 
 /// Pull a screenshot out of this frame's input events, if egui delivered one.
@@ -2584,10 +2683,13 @@ mod interaction_tests {
         );
     }
 
-    /// Two triangles with distinct kernel face ids: one facing +Z (id 5) and
-    /// one facing +X (id 9).
+    const TOP_FACE: &str = "F:plane:a1.0000:c0.0000,0.0000,0.0000:n0.000,0.000,1.000:e3:p3.0000";
+    const SIDE_FACE: &str = "F:plane:a1.0000:c0.0000,0.0000,0.0000:n1.000,0.000,0.000:e3:p3.0000";
+
+    /// Two triangles with distinct faces: one facing +Z (kernel id 5) and one
+    /// facing +X (kernel id 9), each with its stable name.
     fn two_face_mesh() -> TriangleMesh {
-        TriangleMesh {
+        let mut mesh = TriangleMesh {
             positions: vec![
                 [0.0, 0.0, 0.0],
                 [1.0, 0.0, 0.0],
@@ -2606,7 +2708,18 @@ mod interaction_tests {
             ],
             indices: vec![0, 1, 2, 3, 4, 5],
             face_ids: vec![5, 9],
+            ..Default::default()
+        };
+        for (id, name) in [(5, TOP_FACE), (9, SIDE_FACE)] {
+            mesh.face_names.insert(
+                id,
+                rcad_geom::NamedFace {
+                    name: name.to_string(),
+                    label: format!("face {id}"),
+                },
+            );
         }
+        mesh
     }
 
     /// Step F: tagging the selected face stores the logical id on the part, and
@@ -2616,25 +2729,28 @@ mod interaction_tests {
         let mut app = RcadApp::default();
         app.open_project_folder(temp_project_dir());
 
-        app.apply_face_colour(11, Some("fit zone".to_string()));
+        app.apply_face_colour(TOP_FACE.to_string(), "top face".to_string(), Some("fit zone".to_string()));
         assert_eq!(
-            app.get_active_part().unwrap().face_colour_id(11),
+            app.get_active_part().unwrap().face_colour_id(TOP_FACE),
             Some("fit zone")
         );
 
-        app.apply_face_colour(11, None);
-        assert!(app.get_active_part().unwrap().face_colour_id(11).is_none());
+        app.apply_face_colour(TOP_FACE.to_string(), "top face".to_string(), None);
+        assert!(app.get_active_part().unwrap().face_colour_id(TOP_FACE).is_none());
     }
 
     /// The demo helper picks the top and the right-hand face from the geometry,
-    /// not from the tessellation order.
+    /// not from the tessellation order, and returns their stable names.
     #[test]
-    fn demo_face_ids_pick_the_top_and_the_right_face() {
-        assert_eq!(demo_face_ids(&two_face_mesh()), Some((5, 9)));
+    fn demo_face_names_pick_the_top_and_the_right_face() {
+        assert_eq!(
+            demo_face_names(&two_face_mesh()),
+            Some((TOP_FACE.to_string(), SIDE_FACE.to_string()))
+        );
     }
 
     /// `--demo-colours`: the first two ids the project defines are applied once
-    /// a mesh with face ids has arrived, and the part keeps the ids so the
+    /// a mesh with stable names has arrived, and the part keeps the ids so the
     /// project still owns the RGB values.
     #[test]
     fn demo_colours_tag_two_faces_from_the_project() {
@@ -2648,10 +2764,10 @@ mod interaction_tests {
         app.apply_pending_demo_colours();
 
         let part = app.get_active_part().unwrap();
-        assert_eq!(part.face_colour_id(5), Some("fit zone"));
-        assert_eq!(part.face_colour_id(9), Some("threads"));
+        assert_eq!(part.face_colour_id(TOP_FACE), Some("fit zone"));
+        assert_eq!(part.face_colour_id(SIDE_FACE), Some("threads"));
         assert_eq!(
-            part.face_colour(5, &app.manifest),
+            part.face_colour(TOP_FACE, &app.manifest),
             Some([0, 255, 0]),
             "the RGB value must come from the project manifest"
         );
@@ -2673,7 +2789,99 @@ mod interaction_tests {
         session.frame();
         session.frame();
 
-        assert_eq!(session.app.mesh.face_id(0), Some(5));
+        assert_eq!(session.app.mesh.face_name(0), Some(TOP_FACE));
+    }
+
+    /// `--save` and `--open` go through the same methods as the tests.
+    #[test]
+    fn a_document_saves_and_reopens_through_the_headless_path() {
+        let root = temp_project_dir();
+        let mut app = RcadApp::default();
+        app.open_project_folder(root.clone());
+        app.project.parts[0].name = "Reopened".to_string();
+        let path = root.join("doc.rcad");
+
+        app.save_document_at(path.clone()).expect("save");
+
+        let mut opened = RcadApp::default();
+        opened.open_document_at(path).expect("open");
+        assert_eq!(opened.project.parts[0].name, "Reopened");
+        assert!(opened.needs_rebuild, "opening a document must rebuild it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A tag whose face is gone (edited or deleted) is reported, not silently
+    /// dropped and not painted on whichever face took its place.
+    #[test]
+    fn a_lost_face_tag_is_reported_in_the_status_bar() {
+        let mut app = RcadApp::default();
+        app.open_project_folder(temp_project_dir());
+        app.mesh = two_face_mesh();
+        app.apply_face_colour(
+            TOP_FACE.to_string(),
+            "top face".to_string(),
+            Some("fit zone".to_string()),
+        );
+        app.apply_face_colour(
+            "F:deleted-face".to_string(),
+            "deleted face".to_string(),
+            Some("fit zone".to_string()),
+        );
+
+        app.report_unmatched_face_colours();
+
+        let status = app.status.clone().unwrap_or_default();
+        assert!(
+            status.contains("1 colour tag"),
+            "the lost tag was not reported: {status}"
+        );
+    }
+
+    /// The requirement that started this: tag a face, save the document, load
+    /// it in a *fresh kernel* (new shapes, new addresses) and the colour must
+    /// still land on the same face.
+    #[test]
+    fn a_face_colour_survives_a_save_and_a_reload_in_a_fresh_kernel() {
+        let project_root = temp_project_dir();
+        let mut app = RcadApp::default();
+        app.open_project_folder(project_root.clone());
+        app.manifest.surface_colors.insert("fit zone".to_string(), [0, 255, 0]);
+
+        // First kernel: build a real box and take the stable name of one face.
+        let mut first_backend = rcad_occt::OcctBackend::default();
+        let first_shape = first_backend.box_solid(glam::DVec3::new(10.0, 20.0, 30.0)).unwrap();
+        let first_mesh = first_backend.tessellate(first_shape).unwrap();
+        let face_name = first_mesh.face_names.values().next().unwrap().name.clone();
+        let first_ids: std::collections::BTreeSet<u64> =
+            first_mesh.face_names.keys().copied().collect();
+        app.apply_face_colour(face_name.clone(), "face".to_string(), Some("fit zone".to_string()));
+
+        // Save and load the document, then rebuild in a second kernel.
+        let path = project_root.join("part.rcad");
+        app.project.save(&path).expect("save");
+        let reloaded = rcad_doc::Project::load(&path).expect("load");
+        let mut second_backend = rcad_occt::OcctBackend::default();
+        let second_shape = second_backend.box_solid(glam::DVec3::new(10.0, 20.0, 30.0)).unwrap();
+        let second_mesh = second_backend.tessellate(second_shape).unwrap();
+        let second_ids: std::collections::BTreeSet<u64> =
+            second_mesh.face_names.keys().copied().collect();
+
+        assert_ne!(first_ids, second_ids, "a fresh kernel has fresh addresses");
+        assert_eq!(
+            reloaded.parts[0].face_colour_id(&face_name),
+            Some("fit zone"),
+            "the tag must survive the round trip"
+        );
+        let resolved = reloaded.parts[0].face_colour(&face_name, &app.manifest);
+        assert_eq!(resolved, Some([0, 255, 0]));
+        assert_eq!(
+            reloaded.parts[0].unmatched_face_colours(
+                &second_mesh.face_names.values().map(|face| face.name.clone()).collect::<Vec<_>>()
+            ),
+            Vec::<&str>::new(),
+            "the tag still matches a face in the rebuilt model"
+        );
+        let _ = std::fs::remove_dir_all(&project_root);
     }
 
     /// 0.1: a folder without a manifest becomes a project.

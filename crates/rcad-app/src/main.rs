@@ -43,6 +43,10 @@ struct Cli {
     project: Option<PathBuf>,
     /// Open the Options dialog on startup.
     options: bool,
+    /// Open this document directly (headless, for docs and tests).
+    open: Option<PathBuf>,
+    /// Write the document to this path once the model is built.
+    save: Option<PathBuf>,
 }
 
 const USAGE: &str = "\
@@ -59,6 +63,8 @@ Options:
   --renderer <backend>  default | glow | wgpu
   --view <name>         iso | front | back | left | right | top | bottom
   --dialog              Open the feature dialog for the first feature
+  --open <file>         Open a .rcad document directly
+  --save <file>         Write the .rcad document once the model is built
   --help                Show this message
 ";
 
@@ -91,6 +97,12 @@ fn parse_args() -> Result<Cli, String> {
             "--options" => cli.options = true,
             "--project" => {
                 cli.project = Some(PathBuf::from(args.next().ok_or("--project needs a folder")?));
+            }
+            "--open" => {
+                cli.open = Some(PathBuf::from(args.next().ok_or("--open needs a file")?));
+            }
+            "--save" => {
+                cli.save = Some(PathBuf::from(args.next().ok_or("--save needs a file")?));
             }
             "--view" => {
                 cli.view = Some(args.next().ok_or("--view needs a name")?);
@@ -170,6 +182,8 @@ fn main() -> eframe::Result<()> {
     let view = cli.view.clone();
     let dialog = cli.dialog;
     let project = cli.project.clone();
+    let open_document = cli.open.clone();
+    let save_document = cli.save.clone();
     let open_options = cli.options;
 
     eframe::run_native(
@@ -180,6 +194,11 @@ fn main() -> eframe::Result<()> {
             app.restore_last_project();
             if let Some(folder) = project.clone() {
                 app.open_project_folder(folder);
+            }
+            if let Some(path) = open_document.clone() {
+                if let Err(err) = app.open_document_at(path) {
+                    tracing::error!("{err}");
+                }
             }
             if open_options {
                 app.open_options();
@@ -203,6 +222,9 @@ fn main() -> eframe::Result<()> {
             }
             if hide_datums {
                 app.set_datums_visible(None, false);
+            }
+            if let Some(path) = save_document.clone() {
+                app.request_save(path);
             }
             if dialog {
                 app.open_feature_dialog_for_first_feature();

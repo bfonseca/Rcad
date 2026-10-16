@@ -411,7 +411,7 @@ already computed by OpenCascade on every rebuild; no new kernel work is needed.
 Note: cadrum also exposes its own `colormap`, but the project manifest must own
 the RGB values, so rcad should use `face_ids` and resolve colours itself.
 
-#### Known limitation found while verifying (open, needs a decision)
+#### The limitation that motivated this work (resolved below)
 
 `cadrum` face ids are the `TopoDS_TShape*` **address** of the face
 (`src/occt/face.rs` -> `ffi::face_tshape_id`), so they are process-local, not
@@ -431,3 +431,56 @@ example by re-resolving at load time from a geometric signature (quantised face
 centroid + normal + area), or by storing a Creo-style stable face name on the
 feature that created the face. The map on `Part` can stay; only the key needs to
 change. Tracked here so the next session does not re-discover it.
+
+#### Resolved: stable names for faces and edges
+
+The limitation above was real: cadrum identifies a face or an edge by the
+`TopoDS_TShape*` address, so the id changes in every process - and can even be
+reused by the allocator once the shape is freed. A colour saved against one was
+meaningless. The fix is to name topology from its geometry, in
+`rcad_geom::naming`:
+
+- A face name is `F:<kind>:a<area>:c<centre>[:n<normal>]:e<edges>:p<perimeter>`,
+  with the surface kind and its parameters in `<kind>` (`plane`,
+  `cylinder(r5.0000)`, ...). The normal is included for planar faces only: on a
+  curved face the normal at the centre depends on where the projection lands.
+- An edge name is `E:<kind>:l<length>:s<start>:t<end>:m<midpoint>`. The endpoints
+  are canonicalised, so the curve parameter direction OCCT happens to choose
+  does not change the name.
+- Lengths, areas and positions are rounded to 1e-4 mm and directions to 1e-3, so
+  numeric noise between runs cannot change a name.
+- Faces (or edges) sharing a signature are the same geometry, for instance two
+  identical holes: they get a `#1`, `#2` suffix. The set of names is
+  deterministic; which of two *identical* elements gets which suffix is not, and
+  cannot matter.
+- `TriangleMesh` carries `face_names` (kernel id -> `NamedFace`) and `edges`
+  (`NamedEdge`: name, label, endpoints, length, polyline), filled by `rcad-occt`
+  from `Solid::iter_face()` / `Solid::iter_edge()`. Construction geometry is
+  appended without names, so it can never match a face.
+
+`Part::face_colours` is now keyed by the stable name. A tag whose face was
+edited or deleted no longer matches anything: `Part::unmatched_face_colours`
+reports it and the status bar says how many tags were lost, instead of painting
+the colour on whichever face took the old one's place.
+
+Verification (in the suite): a box has six named faces and twelve named edges;
+two independent builds give identical name sets; every triangle's face id has a
+name; the names carry the face areas (200/300/600 mm2) and never an address.
+`a_face_colour_survives_a_save_and_a_reload_in_a_fresh_kernel` saves a document,
+loads it and resolves the colour against a second kernel;
+`the_same_name_resolves_whatever_the_kernel_address_is` pins the viewport side;
+`a_lost_face_tag_is_reported_in_the_status_bar` covers the honest failure mode.
+
+Screenshots (`--save`, then `--open` in a second process): face-colours-a.png
+(saved and coloured) and face-colours-reloaded.png (document reopened by a fresh
+process) are pixel-identical in the model; face-colours-a.png against
+face-colours-b.png differs only in the two tagged faces. Reproduce with
+`--demo --demo-colours --hide-datums --save <file>`, then `--open <file>` under a
+second project.
+
+Still open, and the honest limit of a purely geometric name: if a face is
+*edited*, its name changes with its geometry, so its colour is dropped and
+reported. Keeping a colour across a parameter change needs a history-aware name
+(Creo-style, derived from the feature that created the face); cadrum exposes
+`iter_history()` for exactly that, as a follow-up. Edges already carry stable
+names, so fillets and chamfers can reference them once that UI exists.

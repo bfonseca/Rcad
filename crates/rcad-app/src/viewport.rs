@@ -419,20 +419,16 @@ fn draw_corner_cys(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera) {
 
 /// The project colour a triangle should be drawn with.
 ///
-/// Returns `None` when the triangle has no kernel face id, when the face is
-/// untagged, or when the project does not define a value for its id. The
-/// caller then keeps the default shading. Construction geometry is
-/// sentinel-tagged by the rebuild, so it can never match a face colour.
+/// Returns `None` when the triangle has no stable face name, when the face is
+/// untagged, or when the project does not define a value for its id. The caller
+/// then keeps the default shading. Construction geometry carries no name, so it
+/// can never match a face colour.
 pub fn face_colour(
-    face_id: Option<u64>,
+    face_name: Option<&str>,
     part: Option<&Part>,
     manifest: &ProjectManifest,
 ) -> Option<[u8; 3]> {
-    let face_id = face_id?;
-    if face_id == rcad_geom::NO_FACE_ID {
-        return None;
-    }
-    part?.face_colour(face_id, manifest)
+    part?.face_colour(face_name?, manifest)
 }
 
 /// Apply the viewport lighting to a project colour, so a coloured face still
@@ -476,10 +472,10 @@ fn draw_mesh(
          // Ambient floor of 0.3 keeps unlit faces readable instead of near-black.
          let brightness = n.dot(light).clamp(0.3, 1.0);
          let shade = (brightness * 220.0) as u8;
-         // A triangle whose kernel face is tagged in the document takes the
-         // project colour for that id; every other triangle keeps the default
-         // shading instead of guessing a colour.
-         let mut color = match face_colour(mesh.face_id(triangle_index), part, manifest) {
+         // A triangle whose face is tagged in the document takes the project
+         // colour for that name; every other triangle keeps the default shading
+         // instead of guessing a colour.
+         let mut color = match face_colour(mesh.face_name(triangle_index), part, manifest) {
              Some(rgb) => shaded_colour(rgb, brightness),
              None => Color32::from_rgb(
                  shade,
@@ -989,48 +985,96 @@ mod tests {
         manifest
     }
 
+    /// A one-triangle mesh with a kernel face id and its stable name.
+    fn one_triangle_mesh(kernel_face_id: u64, name: &str) -> TriangleMesh {
+        let mut mesh = TriangleMesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+            face_ids: vec![kernel_face_id],
+            ..Default::default()
+        };
+        mesh.face_names.insert(
+            kernel_face_id,
+            rcad_geom::NamedFace {
+                name: name.to_string(),
+                label: name.to_string(),
+            },
+        );
+        mesh
+    }
+
     /// Untagged faces keep the default shading: the viewport never invents a
     /// colour for a face the document did not tag.
     #[test]
     fn an_untagged_face_keeps_the_default_shading() {
         let manifest = manifest_with("fit zone", [0, 255, 0]);
         let part = Part::new_solid("P");
+        let mesh = one_triangle_mesh(7, "F:plane:a1");
 
-        assert_eq!(face_colour(Some(7), Some(&part), &manifest), None);
+        assert_eq!(face_colour(mesh.face_name(0), Some(&part), &manifest), None);
         assert_eq!(face_colour(None, Some(&part), &manifest), None);
-        assert_eq!(face_colour(Some(7), None, &manifest), None);
+        assert_eq!(face_colour(mesh.face_name(0), None, &manifest), None);
     }
 
-    /// Construction geometry carries the sentinel id, so it can never pick up
+    /// Construction geometry carries no stable name, so it can never pick up
     /// the colour of a solid face.
     #[test]
     fn construction_triangles_never_match_a_face_colour() {
         let manifest = manifest_with("fit zone", [0, 255, 0]);
         let mut part = Part::new_solid("P");
-        part.set_face_colour(rcad_geom::NO_FACE_ID, "fit zone");
+        part.set_face_colour("F:plane:a1", "fit zone");
 
-        assert_eq!(
-            face_colour(Some(rcad_geom::NO_FACE_ID), Some(&part), &manifest),
-            None
-        );
+        let mut mesh = one_triangle_mesh(1, "F:plane:a1");
+        mesh.face_ids = vec![rcad_geom::NO_FACE_ID];
+
+        assert_eq!(mesh.face_name(0), None);
+        assert_eq!(face_colour(mesh.face_name(0), Some(&part), &manifest), None);
     }
 
     #[test]
     fn a_tagged_face_resolves_to_the_project_colour() {
         let manifest = manifest_with("fit zone", [0, 255, 0]);
         let mut part = Part::new_solid("P");
-        part.set_face_colour(7, "fit zone");
+        part.set_face_colour("F:plane:a1", "fit zone");
+        let mesh = one_triangle_mesh(7, "F:plane:a1");
 
-        assert_eq!(face_colour(Some(7), Some(&part), &manifest), Some([0, 255, 0]));
+        assert_eq!(
+            face_colour(mesh.face_name(0), Some(&part), &manifest),
+            Some([0, 255, 0])
+        );
     }
 
     #[test]
     fn an_id_the_project_does_not_define_falls_back_to_shading() {
         let manifest = ProjectManifest::default();
         let mut part = Part::new_solid("P");
-        part.set_face_colour(7, "fit zone");
+        part.set_face_colour("F:plane:a1", "fit zone");
+        let mesh = one_triangle_mesh(7, "F:plane:a1");
 
-        assert_eq!(face_colour(Some(7), Some(&part), &manifest), None);
+        assert_eq!(face_colour(mesh.face_name(0), Some(&part), &manifest), None);
+    }
+
+    /// The name is what ties a stored colour to a face: the kernel address may
+    /// be different in the next process, the name is not.
+    #[test]
+    fn the_same_name_resolves_whatever_the_kernel_address_is() {
+        let manifest = manifest_with("fit zone", [0, 255, 0]);
+        let mut part = Part::new_solid("P");
+        part.set_face_colour("F:plane:a1", "fit zone");
+
+        let first = one_triangle_mesh(0x7f00_0000_0001, "F:plane:a1");
+        let second = one_triangle_mesh(0x7f00_0000_9999, "F:plane:a1");
+
+        assert_ne!(first.face_id(0), second.face_id(0));
+        assert_eq!(
+            face_colour(first.face_name(0), Some(&part), &manifest),
+            Some([0, 255, 0])
+        );
+        assert_eq!(
+            face_colour(second.face_name(0), Some(&part), &manifest),
+            Some([0, 255, 0])
+        );
     }
 
     /// Step E verification: editing the RGB in rcad.toml changes the display,
@@ -1038,15 +1082,24 @@ mod tests {
     #[test]
     fn editing_the_project_changes_the_colour_without_touching_the_part() {
         let mut part = Part::new_solid("P");
-        part.set_face_colour(7, "fit zone");
+        part.set_face_colour("F:plane:a1", "fit zone");
+        let mesh = one_triangle_mesh(7, "F:plane:a1");
 
-        let before = face_colour(Some(7), Some(&part), &manifest_with("fit zone", [0, 255, 0]));
-        let after = face_colour(Some(7), Some(&part), &manifest_with("fit zone", [255, 0, 0]));
+        let before = face_colour(
+            mesh.face_name(0),
+            Some(&part),
+            &manifest_with("fit zone", [0, 255, 0]),
+        );
+        let after = face_colour(
+            mesh.face_name(0),
+            Some(&part),
+            &manifest_with("fit zone", [255, 0, 0]),
+        );
 
         assert_eq!(before, Some([0, 255, 0]));
         assert_eq!(after, Some([255, 0, 0]));
         assert_eq!(
-            part.face_colour_id(7),
+            part.face_colour_id("F:plane:a1"),
             Some("fit zone"),
             "the part stores the id, never the RGB value"
         );

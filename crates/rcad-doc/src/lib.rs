@@ -1,6 +1,6 @@
 //! Project document model: parts, assemblies, skeletons, feature trees.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use chrono;
@@ -190,15 +190,20 @@ pub struct Part {
     pub bodies: Vec<Body>,
     /// Active body for new features (Insert Here mode)
     pub active_body_index: Option<usize>,
-    /// Kernel face id -> logical colour id from the project vocabulary.
+    /// Stable face name -> logical colour id from the project vocabulary.
     ///
-    /// The RGB value is never stored here: it lives in the project manifest,
-    /// so editing the project restyles every component that uses an id. Face
-    /// ids survive rebuilds because OpenCascade derives them from the same
-    /// body, and construction geometry is sentinel-tagged so it can never
-    /// match one of these.
+    /// The key is the geometry-derived name from [`rcad_geom::naming`], not a
+    /// kernel handle: it is the same in every process and after a save/reload,
+    /// so the tag keeps pointing at the same face. The RGB value is never
+    /// stored here either: it lives in the project manifest, so editing the
+    /// project restyles every component that uses an id. Construction geometry
+    /// is sentinel-tagged and can never match a face name.
+    ///
+    /// If a face is edited until its geometry no longer matches, the tag finds
+    /// no face and is reported as unmatched instead of being drawn elsewhere;
+    /// see [`Part::unmatched_face_colours`].
     #[serde(default)]
-    pub face_colours: HashMap<u64, String>,
+    pub face_colours: BTreeMap<String, String>,
     /// Skeleton reference published entities consumed by child parts.
     pub published: Vec<PublishedRef>,
     /// Optional skeleton this part is driven by.
@@ -231,7 +236,7 @@ impl Part {
             underlay_ids: Vec::new(),
             bodies: Vec::new(),
             active_body_index: None,
-            face_colours: HashMap::new(),
+            face_colours: BTreeMap::new(),
             published: Vec::new(),
             skeleton_of: None,
             // NEW fields with defaults
@@ -251,26 +256,39 @@ impl Part {
         p
     }
 
-    /// Tag a kernel face with a logical colour id from the project vocabulary.
-    pub fn set_face_colour(&mut self, face_id: u64, colour_id: impl Into<String>) {
-        self.face_colours.insert(face_id, colour_id.into());
+    /// Tag a face with a logical colour id from the project vocabulary.
+    ///
+    /// `face_name` is the stable name reported by the kernel for that face.
+    pub fn set_face_colour(&mut self, face_name: impl Into<String>, colour_id: impl Into<String>) {
+        self.face_colours.insert(face_name.into(), colour_id.into());
     }
 
     /// Remove the colour of a face. Returns whether it had one.
-    pub fn clear_face_colour(&mut self, face_id: u64) -> bool {
-        self.face_colours.remove(&face_id).is_some()
+    pub fn clear_face_colour(&mut self, face_name: &str) -> bool {
+        self.face_colours.remove(face_name).is_some()
     }
 
     /// The logical colour id of a face, if it is tagged.
-    pub fn face_colour_id(&self, face_id: u64) -> Option<&str> {
-        self.face_colours.get(&face_id).map(String::as_str)
+    pub fn face_colour_id(&self, face_name: &str) -> Option<&str> {
+        self.face_colours.get(face_name).map(String::as_str)
     }
 
     /// The RGB value a face resolves to, given the project manifest. `None`
     /// when the face is untagged or the project does not define its id, in
     /// which case the viewport keeps its default shading.
-    pub fn face_colour(&self, face_id: u64, manifest: &ProjectManifest) -> Option<[u8; 3]> {
-        manifest.colour(self.face_colour_id(face_id)?)
+    pub fn face_colour(&self, face_name: &str, manifest: &ProjectManifest) -> Option<[u8; 3]> {
+        manifest.colour(self.face_colour_id(face_name)?)
+    }
+
+    /// Colour tags that no face of the rebuilt model matches any more, because
+    /// that face was edited or deleted. The interface reports them instead of
+    /// drawing the colour on whatever face happens to be there now.
+    pub fn unmatched_face_colours(&self, available: &[String]) -> Vec<&str> {
+        self.face_colours
+            .keys()
+            .filter(|name| !available.iter().any(|candidate| candidate == *name))
+            .map(String::as_str)
+            .collect()
     }
 }
 
@@ -639,22 +657,25 @@ mod face_colour_tests {
         manifest
     }
 
+    /// A stable face name, in the same shape the kernel produces.
+    const FACE: &str = "F:plane:a1200.0000:c20.0000,15.0000,8.0000:n0.000,0.000,1.000:e4:p140.0000";
+
     #[test]
     fn a_face_is_tagged_with_the_id_not_a_value() {
         let mut part = Part::new_solid("P");
-        part.set_face_colour(12, "fit zone");
+        part.set_face_colour(FACE, "fit zone");
 
-        assert_eq!(part.face_colour_id(12), Some("fit zone"));
-        assert!(part.face_colour_id(13).is_none());
+        assert_eq!(part.face_colour_id(FACE), Some("fit zone"));
+        assert!(part.face_colour_id("F:another").is_none());
     }
 
     #[test]
     fn a_face_colour_resolves_through_the_project() {
         let mut part = Part::new_solid("P");
-        part.set_face_colour(12, "fit zone");
+        part.set_face_colour(FACE, "fit zone");
         let manifest = manifest_with(&[("fit zone", [0, 255, 0])]);
 
-        assert_eq!(part.face_colour(12, &manifest), Some([0, 255, 0]));
+        assert_eq!(part.face_colour(FACE, &manifest), Some([0, 255, 0]));
     }
 
     /// An untagged face, or one whose id the project does not define, resolves
@@ -664,19 +685,19 @@ mod face_colour_tests {
         let manifest = manifest_with(&[("fit zone", [0, 255, 0])]);
         let mut part = Part::new_solid("P");
 
-        assert_eq!(part.face_colour(1, &manifest), None);
-        part.set_face_colour(1, "not in this project");
-        assert_eq!(part.face_colour(1, &manifest), None);
+        assert_eq!(part.face_colour("F:never-tagged", &manifest), None);
+        part.set_face_colour("F:never-tagged", "not in this project");
+        assert_eq!(part.face_colour("F:never-tagged", &manifest), None);
     }
 
     #[test]
     fn clearing_a_face_colour_is_reversible() {
         let mut part = Part::new_solid("P");
-        part.set_face_colour(4, "thread");
+        part.set_face_colour(FACE, "thread");
 
-        assert!(part.clear_face_colour(4));
-        assert!(!part.clear_face_colour(4));
-        assert!(part.face_colour_id(4).is_none());
+        assert!(part.clear_face_colour(FACE));
+        assert!(!part.clear_face_colour(FACE));
+        assert!(part.face_colour_id(FACE).is_none());
     }
 
     /// The vocabulary is global, the RGB value is per project: the part stores
@@ -685,25 +706,40 @@ mod face_colour_tests {
     #[test]
     fn the_project_owns_the_rgb_value() {
         let mut part = Part::new_solid("P");
-        part.set_face_colour(4, "fit zone");
+        part.set_face_colour(FACE, "fit zone");
         let before = part.clone();
 
         let client_a = manifest_with(&[("fit zone", [0, 255, 0])]);
         let client_b = manifest_with(&[("fit zone", [255, 0, 0])]);
 
-        assert_eq!(part.face_colour(4, &client_a), Some([0, 255, 0]));
-        assert_eq!(part.face_colour(4, &client_b), Some([255, 0, 0]));
+        assert_eq!(part.face_colour(FACE, &client_a), Some([0, 255, 0]));
+        assert_eq!(part.face_colour(FACE, &client_b), Some([255, 0, 0]));
         assert_eq!(part.face_colours, before.face_colours);
     }
 
     #[test]
     fn face_colours_survive_a_round_trip() {
         let mut part = Part::new_solid("P");
-        part.set_face_colour(8, "sealing zone");
+        part.set_face_colour(FACE, "sealing zone");
 
         let bytes = rmp_serde::to_vec_named(&part).expect("serialise");
         let back: Part = rmp_serde::from_slice(&bytes).expect("deserialise");
 
-        assert_eq!(back.face_colour_id(8), Some("sealing zone"));
+        assert_eq!(back.face_colour_id(FACE), Some("sealing zone"));
+    }
+
+    /// A tag whose face is gone (edited or deleted) must be reported, not
+    /// silently dropped and not drawn on whatever face took its place.
+    #[test]
+    fn a_tag_whose_face_is_gone_is_reported_as_unmatched() {
+        let mut part = Part::new_solid("P");
+        part.set_face_colour(FACE, "fit zone");
+        part.set_face_colour("F:deleted-face", "thread");
+
+        let available = vec![FACE.to_string(), "F:new-face".to_string()];
+        assert_eq!(part.unmatched_face_colours(&available), vec!["F:deleted-face"]);
+
+        let all = vec![FACE.to_string(), "F:deleted-face".to_string()];
+        assert!(part.unmatched_face_colours(&all).is_empty());
     }
 }
