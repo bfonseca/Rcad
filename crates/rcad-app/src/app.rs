@@ -2715,6 +2715,7 @@ mod interaction_tests {
                 id,
                 rcad_geom::NamedFace {
                     name: name.to_string(),
+                    signature: name.to_string(),
                     label: format!("face {id}"),
                 },
             );
@@ -2835,6 +2836,79 @@ mod interaction_tests {
             status.contains("1 colour tag"),
             "the lost tag was not reported: {status}"
         );
+    }
+
+
+    /// The whole story: tag a face, change a parameter, save the document,
+    /// reopen it in a fresh kernel - the colour is still on the same face.
+    #[test]
+    fn a_face_colour_survives_a_parameter_change_and_a_reload() {
+        let root = temp_project_dir();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut part = rcad_doc::Part::new_solid("P");
+        let tool = Feature::new("HoleTool", FeatureKind::Cylinder { radius: 5.0, height: 20.0 });
+        let tool_id = tool.id;
+        part.features.push(Feature::new("Base", FeatureKind::Box { size: [40.0, 30.0, 8.0] }));
+        part.features.push(tool);
+        part.features.push(Feature::new(
+            "CutHole",
+            FeatureKind::Boolean {
+                tool_feature: tool_id,
+                op: rcad_geom::BooleanOp::Subtract,
+            },
+        ));
+
+        // Rebuild once, pick the top face of the block and tag it.
+        let rebuilt = {
+            let mut backend = rcad_occt::OcctBackend::default();
+            let mut cache = ShapeCache::new();
+            cache.rebuild_part_incremental(&part, &mut backend)
+        };
+        let top_face = rebuilt
+            .display_mesh
+            .face_names
+            .values()
+            .find(|face| face.name.contains("/box/z+"))
+            .expect("the block should have a top face")
+            .name
+            .clone();
+        part.set_face_colour(&top_face, "fit zone");
+
+        // The user changes the height of the block, then saves.
+        part.features[0].kind = FeatureKind::Box { size: [40.0, 30.0, 24.0] };
+        let mut project = Project::default();
+        project.parts = vec![part];
+        let path = root.join("doc.rcad");
+        project.save(&path).expect("save");
+
+        // Another process: new kernel, new addresses, rebuild from the file.
+        let loaded = Project::load(&path).expect("load");
+        let mut backend = rcad_occt::OcctBackend::default();
+        let mut cache = ShapeCache::new();
+        let rebuilt = cache.rebuild_part_incremental(&loaded.parts[0], &mut backend);
+
+        let names: Vec<String> = rebuilt
+            .display_mesh
+            .face_names
+            .values()
+            .map(|face| face.name.clone())
+            .collect();
+        assert!(
+            names.contains(&top_face),
+            "the tagged face did not survive the height change: {names:?}"
+        );
+        let mut manifest = ProjectManifest::default();
+        manifest.surface_colors.insert("fit zone".to_string(), [0, 255, 0]);
+        assert_eq!(
+            loaded.parts[0].face_colour(&top_face, &manifest),
+            Some([0, 255, 0])
+        );
+        assert!(
+            loaded.parts[0].unmatched_face_colours(&names).is_empty(),
+            "the colour tag is reported as unmatched"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The requirement that started this: tag a face, save the document, load

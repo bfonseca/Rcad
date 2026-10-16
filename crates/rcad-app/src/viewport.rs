@@ -998,6 +998,7 @@ mod tests {
             kernel_face_id,
             rcad_geom::NamedFace {
                 name: name.to_string(),
+                signature: name.to_string(),
                 label: name.to_string(),
             },
         );

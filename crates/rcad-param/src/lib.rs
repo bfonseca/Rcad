@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod naming;
+
 #[derive(Debug, Error)]
 pub enum RebuildError {
     #[error("{0}")]
@@ -40,10 +42,18 @@ fn compute_feature_hash(feature: &rcad_doc::Feature) -> u64 {
     hasher.finish()
 }
 
+/// One cached feature: its shape, the hash it was built from, and the
+/// feature-anchored reference of every face of that shape.
+struct CachedShape {
+    hash: u64,
+    shape: ShapeId,
+    refs: naming::RefMap,
+}
+
 /// Shape cache for incremental rebuilds
 pub struct ShapeCache {
-    /// Cached shape IDs per feature UUID + parameter hash
-    entries: std::collections::HashMap<Uuid, (u64, ShapeId)>,
+    /// Cached shapes per feature UUID + parameter hash
+    entries: HashMap<Uuid, CachedShape>,
 }
 
 impl ShapeCache {
@@ -60,8 +70,12 @@ impl ShapeCache {
     ) -> RebuildResult {
         let mut result = RebuildResult::default();
         let mut named: HashMap<Uuid, ShapeId> = HashMap::new();
+        // Face references of every feature built so far, so a later feature can
+        // inherit the names of the body and of its tool.
+        let mut named_refs: HashMap<Uuid, naming::RefMap> = HashMap::new();
         let mut history: Vec<(Uuid, ShapeId)> = Vec::new();
         let mut current: Option<ShapeId> = None;
+        let mut current_refs: Option<naming::RefMap> = None;
         let mut current_visible = true;
         let mut first_dirty_idx = None;
         let mut visible_shapes: Vec<ShapeId> = Vec::new();
@@ -81,9 +95,14 @@ impl ShapeCache {
             // flag, and skipping hidden features used to break every feature
             // downstream of a hidden body.
             if first_dirty_idx.is_none() {
-                if let Some(&(cached_hash, shape_id)) = self.entries.get(&feature.id) {
+                let cached = self
+                    .entries
+                    .get(&feature.id)
+                    .map(|cached| (cached.hash, cached.shape, cached.refs.clone()));
+                if let Some((cached_hash, shape_id, refs)) = cached {
                     if cached_hash == hash {
                         named.insert(feature.id, shape_id);
+                        named_refs.insert(feature.id, refs.clone());
                         history.push((feature.id, shape_id));
                         if is_construction {
                             if feature.visible {
@@ -91,6 +110,7 @@ impl ShapeCache {
                             }
                         } else {
                             current = Some(shape_id);
+                            current_refs = Some(refs);
                             current_visible = feature.visible;
                             result.shapes.push((feature.id, shape_id));
                         }
@@ -111,15 +131,52 @@ impl ShapeCache {
             // (and leaked) backend shapes twice for every failing feature.
             match eval_feature(&feature.kind, current, &named, &history, backend) {
                 Ok(Some(new_shape)) => {
-                    if let Some((_, old_shape)) = self.entries.insert(feature.id, (hash, new_shape))
-                    {
-                        // Release the superseded shape; otherwise the backend
-                        // accumulates one dead solid per rebuild forever.
-                        if old_shape != new_shape {
-                            backend.drop_shape(old_shape);
+                    // Name the new topology before any later feature can consume
+                    // it: its faces inherit the reference of the source face
+                    // they came from, or take a role from this feature.
+                    let topology = backend.topology(new_shape).unwrap_or_default();
+                    let tool_refs = match &feature.kind {
+                        FeatureKind::Boolean { tool_feature, .. } => {
+                            named_refs.get(tool_feature).cloned()
+                        }
+                        _ => None,
+                    };
+                    // A boolean does not consume the last body: it uses the last
+                    // shape in the history that is not its tool, exactly as
+                    // `eval_feature` does. Everything else consumes `current`.
+                    let input_refs = match &feature.kind {
+                        FeatureKind::Boolean { tool_feature, .. } => history
+                            .iter()
+                            .rev()
+                            .find(|(id, _)| id != tool_feature)
+                            .and_then(|(id, _)| named_refs.get(id).cloned()),
+                        _ => current_refs.clone(),
+                    };
+                    let face_refs = naming::derive_face_refs(
+                        feature,
+                        &topology,
+                        input_refs.as_ref(),
+                        tool_refs.as_ref(),
+                    );
+                    let refs = naming::RefMap::new(&topology, &face_refs);
+
+                    let previous = self.entries.insert(
+                        feature.id,
+                        CachedShape {
+                            hash,
+                            shape: new_shape,
+                            refs: refs.clone(),
+                        },
+                    );
+                    // Release the superseded shape; otherwise the backend
+                    // accumulates one dead solid per rebuild forever.
+                    if let Some(previous) = previous {
+                        if previous.shape != new_shape {
+                            backend.drop_shape(previous.shape);
                         }
                     }
                     named.insert(feature.id, new_shape);
+                    named_refs.insert(feature.id, refs.clone());
                     history.push((feature.id, new_shape));
                     if is_construction {
                         if feature.visible {
@@ -128,6 +185,7 @@ impl ShapeCache {
                     } else {
                         // Boolean / fillet / transform update the active body.
                         current = Some(new_shape);
+                        current_refs = Some(refs);
                         current_visible = feature.visible;
                         result.shapes.push((feature.id, new_shape));
                     }
@@ -150,8 +208,8 @@ impl ShapeCache {
             .copied()
             .collect();
         for id in stale {
-            if let Some((_, shape)) = self.entries.remove(&id) {
-                backend.drop_shape(shape);
+            if let Some(cached) = self.entries.remove(&id) {
+                backend.drop_shape(cached.shape);
             }
         }
 
@@ -160,7 +218,19 @@ impl ShapeCache {
         if let Some(shape) = current {
             if current_visible {
                 match backend.tessellate(shape) {
-                    Ok(mesh) => result.display_mesh = mesh,
+                    Ok(mut mesh) => {
+                        // The mesh carries geometric signatures. Replace them
+                        // with the references this rebuild derived, and name
+                        // the edges from the two faces they bound.
+                        let topology = backend.topology(shape).unwrap_or_default();
+                        let empty = naming::RefMap::default();
+                        naming::apply_references(
+                            &mut mesh,
+                            &topology,
+                            current_refs.as_ref().unwrap_or(&empty),
+                        );
+                        result.display_mesh = mesh;
+                    }
                     Err(e) => result.errors.push(e.to_string()),
                 }
             }

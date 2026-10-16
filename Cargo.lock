@@ -3477,6 +3477,7 @@ dependencies = [
  "glam 0.30.10",
  "rcad-doc",
  "rcad-geom",
+ "rcad-occt",
  "rmp-serde",
  "thiserror 2.0.21",
  "uuid",

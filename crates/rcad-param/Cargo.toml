@@ -13,3 +13,8 @@ rmp-serde.workspace = true
 glam.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+# The naming tests drive a real kernel: whether a reference survives a
+# parameter change is a property of OpenCascade, not of the mock backend.
+rcad-occt.workspace = true

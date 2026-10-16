@@ -380,8 +380,9 @@ already computed by OpenCascade on every rebuild; no new kernel work is needed.
 - [x] **D.** The document maps a face to its colour id: `Part::face_colours`,
       with `set_face_colour` / `clear_face_colour` / `face_colour_id` /
       `face_colour(name, manifest)`. It takes part in serde round trips. The key
-      started as the kernel face id, which only survived cache-reused rebuilds;
-      it is now the stable geometry-derived name (see the resolution below).
+      started as the kernel face id, then became the geometric signature, and is
+      now the feature-anchored reference (see the resolution below), which
+      survives a parameter change as well.
 - [x] **E.** The viewport resolves each triangle: `face_ids[i]` -> its stable
       name through `face_names` -> colour id -> `manifest.colour(id)` -> RGB,
       falling back to the current shading when the face is untagged or the
@@ -479,9 +480,52 @@ face-colours-b.png differs only in the two tagged faces. Reproduce with
 `--demo --demo-colours --hide-datums --save <file>`, then `--open <file>` under a
 second project.
 
-Still open, and the honest limit of a purely geometric name: if a face is
-*edited*, its name changes with its geometry, so its colour is dropped and
-reported. Keeping a colour across a parameter change needs a history-aware name
-(Creo-style, derived from the feature that created the face); cadrum exposes
-`iter_history()` for exactly that, as a follow-up. Edges already carry stable
-names, so fillets and chamfers can reference them once that UI exists.
+A signature is stable only while the geometry is unchanged: change the height of
+a box and every signature on it moves with the geometry. On top of the
+signatures, the rebuild now names topology from the *feature* that created it and
+follows that name through regeneration, which is what Creo does.
+
+- A primitive names its own faces by role: `<feature uuid>/box/z+`,
+  `<feature uuid>/cylinder/side`, `<feature uuid>/extrude/side3`. The role comes
+  from the feature definition, not from the computed geometry, so it survives a
+  parameter change. The uuid is the key, not the feature name, so renaming a
+  feature cannot break a stored reference.
+- An operation records its face history *when it runs*, in terms of the
+  **signature** of the source face in the input it worked on. The kernel reports
+  the ids of the copies it operated on, which the caller never sees, and those
+  ids are reused by the allocator, so ids cannot carry the meaning; the geometry
+  can. A result face inherits the reference of the face it came from: a boolean
+  keeps the block faces and namespaces the ones taken from its tool under the
+  boolean (`<boolean uuid>/<tool uuid>/cylinder/side`, so two holes cut with the
+  same tool stay distinct), a fillet keeps the faces it trimmed, and a translate
+  inherits by kernel id because it preserves them.
+- Anything a feature cannot name keeps its geometric signature as the fallback.
+- An edge is named from the **two faces it bounds**: `edge(<face>|<face>)`, or
+  `edge(<face>|seam)`. An edge therefore follows its faces, which is what makes a
+  fillet or chamfer reference on the top edge of a hole survive a change of the
+  block height.
+
+Verification in the suite: `rcad-param::naming::tests` covers the derivation
+(roles, history, id inheritance, seam edges, duplicate suffixes) and drives the
+real kernel: a box keeps all 6 face and 12 edge references when its height
+changes; a drilled block keeps its 7 face and 15 edge references when the height
+changes; the six original faces keep their references through a fillet. End to
+end in `rcad-app`,
+`a_face_colour_survives_a_parameter_change_and_a_reload` tags a face, changes
+the height, saves the document, reopens it in a fresh kernel and resolves the
+colour against the rebuilt model.
+
+The saved document now carries these references instead of signatures: the
+`--demo --demo-colours --save` run writes `<feature uuid>/box/z+` and
+`<feature uuid>/box/x+` for the two tagged faces. The screenshots above were
+captured before this change (geometric keys); re-capturing them needs a working
+GL session - the display stopped delivering frames while this was being written,
+and the previous commit hangs the same way, so it is the session and not the
+code. The tests cover what the screenshots would show.
+
+Still open: the features whose topology the kernel does not describe. `Extrude`
+gets cap and side roles (sides by position order, so editing the profile can
+relabel a side); `Revolve`, `Loft`, `Boundary`, `Sew`, `Shell`, `Draft`, `Hole`,
+`Pattern` and `Mirror` keep their signatures until they get a role catalogue or
+history of their own. A face that a feature cannot claim still loses its tag when
+its geometry is edited, and the status bar reports it instead of guessing.
