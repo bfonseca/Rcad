@@ -639,3 +639,31 @@ Next: the sketch. `new_sketch` already places a sketch on the first planar datum
 picked; what is missing is the sketch environment itself - the grid and plane in
 the viewport, drawing and constraining in it, and then reading its profile as an
 extrude input.
+
+### The sketch plane is visible (step 3, first slice)
+
+A sketch now draws its own plane in the viewport: the grid, and its two axes in
+colour, centred on the sketch origin (`sketch_basis` + `sketch_grid_lines` +
+`draw_sketch_plane`). The plane comes from the selection (`new_sketch` records
+it in `sketch_plane`); while the sketch is in placement mode nothing is drawn,
+because it has no plane yet. The profile to extrude path already existed:
+`extrude_sketch` reads `Sketch::to_profile()` and creates the feature.
+
+Next in the sketch: draw in it (two clicks for a rectangle, snapping to the grid),
+constraints and dimensions on screen, and degrees of freedom. Then the profile
+closes the cycle plane -> profile -> solid.
+
+### Lost references: to do
+
+When a reference disappears and a later feature used it, the rebuild currently
+reports the failure of the whole feature. Creo shows which reference was lost,
+where it was, and lets the user substitute it. Planned shape:
+
+- A `LostReference` diagnostic per feature: the reference string, the last
+  geometry known for it (midpoint, length, the faces it bounded) kept from the
+  last successful build, and the feature that owns it.
+- Resolve an edge set into found and lost instead of failing: the feature applies
+  to what it found and is marked as needing repair.
+- A repair list in the UI: each lost reference with its last known location, and
+  a Substitute action that takes the new reference from the current selection
+  and rewrites that feature edge set, then rebuilds.

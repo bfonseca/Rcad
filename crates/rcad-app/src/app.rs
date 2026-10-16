@@ -1,6 +1,6 @@
 use eframe::egui;
 use crate::selection::{ClickMode, Selected, Selection};
-use crate::viewport::{draw_viewport, pick_candidates};
+use crate::viewport::{draw_sketch_plane, draw_viewport, pick_candidates, sketch_basis};
 use crate::camera::{OrbitCamera, Projection};
 use crate::settings::AppSettings;
 use crate::undo::UndoStack;
@@ -103,6 +103,9 @@ pub struct RcadApp {
     /// Size of the next round or break, in mm: the radius or the distance the
     /// toolbar and the selection menu use.
     edge_feature_size: f64,
+    /// The plane the open sketch is drawn on: origin, normal and sketch x. None
+    /// until a sketch is started.
+    sketch_plane: Option<([f64; 3], [f64; 3], [f64; 3])>,
     
     // Async kernel worker
     kernel_worker_tx: Option<Sender<RebuildJob>>,
@@ -252,6 +255,7 @@ impl RcadApp {
             hover_cycle: 0,
             selection_mode: SelectionMode::Object,
             edge_feature_size: 1.0,
+            sketch_plane: None,
             
             // Async kernel worker
             kernel_worker_tx: Some(job_tx),
@@ -740,6 +744,17 @@ impl RcadApp {
                 self.settings.show_grid,
                 self.settings.grid_spacing,
             );
+
+            // The plane the open sketch is being drawn on: seeing it is the
+            // difference between drawing and guessing.
+            if let (Some((origin, normal, x_direction)), Some(sketch)) =
+                (self.sketch_plane, self.sketch.as_ref())
+            {
+                if !sketch.in_placement_mode {
+                    let (u, v) = sketch_basis(normal, x_direction);
+                    draw_sketch_plane(ui, response.rect, &self.camera, origin, u, v, 50.0, 5.0);
+                }
+            }
 
             // Quick actions floating over the top of the viewport.
             let sketching = self.sketch.is_some();
@@ -1969,11 +1984,14 @@ impl RcadApp {
         match self.selection_plane() {
             Some((origin, normal, x_direction)) => {
                 sketch.set_sketch_plane(origin, normal, x_direction);
+                self.sketch_plane = Some((origin, normal, x_direction));
                 self.status = Some("Sketch placed on the selected reference.".to_string());
             }
             None => {
-                // No plane in the selection: ask for one and wait for it.
+                // No plane in the selection: ask for one and wait for it. The
+                // grid is not drawn while the sketch has no plane of its own.
                 sketch.in_placement_mode = true;
+                self.sketch_plane = Some(([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]));
                 self.status = Some(
                     "Select a planar face or datum plane, or start the sketch again on the default plane."
                         .to_string(),
@@ -2670,6 +2688,7 @@ impl Default for RcadApp {
             hover_cycle: 0,
             selection_mode: SelectionMode::Object,
             edge_feature_size: 1.0,
+            sketch_plane: None,
             
             // Async kernel worker
             kernel_worker_tx: Some(job_tx),

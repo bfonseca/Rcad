@@ -430,6 +430,10 @@ pub fn shaded_colour(rgb: [u8; 3], brightness: f32) -> Color32 {
 pub const SELECTED_COLOUR: Color32 = Color32::from_rgb(255, 170, 40);
 /// Colour of what the cursor is over.
 pub const HOVER_COLOUR: Color32 = Color32::from_rgb(120, 200, 255);
+/// The plane a sketch is drawn on, and its two axes.
+const SKETCH_GRID_COLOUR: Color32 = Color32::from_rgb(78, 96, 122);
+const SKETCH_X_COLOUR: Color32 = Color32::from_rgb(214, 96, 96);
+const SKETCH_Y_COLOUR: Color32 = Color32::from_rgb(120, 190, 120);
 
 fn draw_mesh(
     painter: &egui::Painter,
@@ -543,6 +547,91 @@ fn draw_edges(
             (HOVER_COLOUR, 2.0_f32)
         };
         painter.add(Shape::line(points, Stroke::new(width, colour)));
+    }
+}
+
+/// Two perpendicular unit vectors spanning the plane with this normal, the
+/// first as close to the wanted x direction as the plane allows.
+pub fn sketch_basis(normal: [f64; 3], x_direction: [f64; 3]) -> ([f32; 3], [f32; 3]) {
+    let n = Vec3::new(normal[0] as f32, normal[1] as f32, normal[2] as f32).normalize_or_zero();
+    let preferred =
+        Vec3::new(x_direction[0] as f32, x_direction[1] as f32, x_direction[2] as f32)
+            .normalize_or_zero();
+    let mut u = preferred - n * preferred.dot(n);
+    if u.length_squared() < 0.5 {
+        // The wanted direction is along the normal: any perpendicular will do.
+        let fallback = if n.z.abs() < 0.9 { Vec3::Z } else { Vec3::X };
+        u = fallback - n * fallback.dot(n);
+    }
+    let u = u.normalize_or_zero();
+    let v = n.cross(u).normalize_or_zero();
+    (u.to_array(), v.to_array())
+}
+
+/// The grid of a sketch plane: pairs of endpoints, `extent` from the origin each
+/// way and `spacing` apart, so the user can see where the sketch lies.
+pub fn sketch_grid_lines(
+    origin: [f64; 3],
+    u: [f32; 3],
+    v: [f32; 3],
+    extent: f32,
+    spacing: f32,
+) -> Vec<([f32; 3], [f32; 3])> {
+    let origin = Vec3::new(origin[0] as f32, origin[1] as f32, origin[2] as f32);
+    let u = Vec3::from(u);
+    let v = Vec3::from(v);
+    let spacing = spacing.max(1e-3);
+    let steps = (extent / spacing).floor().max(1.0) as i32;
+    let mut lines = Vec::new();
+    for step in -steps..=steps {
+        let offset = step as f32 * spacing;
+        lines.push((
+            origin + v * offset - u * extent,
+            origin + v * offset + u * extent,
+        ));
+        lines.push((
+            origin + u * offset - v * extent,
+            origin + u * offset + v * extent,
+        ));
+    }
+    lines.into_iter().map(|(a, b)| (a.to_array(), b.to_array())).collect()
+}
+
+/// Draw the plane a sketch is being drawn on: its grid, and its two axes
+/// brighter so the origin and the directions are readable.
+pub fn draw_sketch_plane(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    camera: &OrbitCamera,
+    origin: [f64; 3],
+    u: [f32; 3],
+    v: [f32; 3],
+    extent: f32,
+    spacing: f32,
+) {
+    let painter = ui.painter_at(rect);
+    let vp = view_proj(rect, camera);
+    let project_3d = |point: [f32; 3]| project(vp, rect, Vec3::from(point));
+    for (a, b) in sketch_grid_lines(origin, u, v, extent, spacing) {
+        let (Some(pa), Some(pb)) = (project_3d(a), project_3d(b)) else {
+            continue;
+        };
+        painter.add(Shape::line_segment(
+            [pa, pb],
+            Stroke::new(1.0_f32, SKETCH_GRID_COLOUR),
+        ));
+    }
+    let origin = Vec3::new(origin[0] as f32, origin[1] as f32, origin[2] as f32);
+    let u = Vec3::from(u);
+    let v = Vec3::from(v);
+    for (direction, colour) in [(u, SKETCH_X_COLOUR), (v, SKETCH_Y_COLOUR)] {
+        let (Some(pa), Some(pb)) = (
+            project_3d((origin - direction * extent).to_array()),
+            project_3d((origin + direction * extent).to_array()),
+        ) else {
+            continue;
+        };
+        painter.add(Shape::line_segment([pa, pb], Stroke::new(2.0_f32, colour)));
     }
 }
 
@@ -1236,5 +1325,47 @@ mod tests {
 
         let far = Pos2::new(midpoint.x + 200.0, midpoint.y + 120.0);
         assert!(pick_edge(far, rect, &mesh, &camera).is_none());
+    }
+
+    /// The sketch basis spans the plane: unit vectors, perpendicular to each
+    /// other and to the normal, the first as close to the wanted x as possible.
+    #[test]
+    fn the_sketch_basis_spans_the_plane() {
+        let (u, v) = sketch_basis([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
+        let u = Vec3::from(u);
+        let v = Vec3::from(v);
+        assert!((u.length() - 1.0).abs() < 1e-5);
+        assert!((v.length() - 1.0).abs() < 1e-5);
+        assert!(u.dot(v).abs() < 1e-5, "u and v must be perpendicular");
+        assert!(u.dot(Vec3::Z).abs() < 1e-5, "u must lie in the plane");
+        assert!(u.dot(Vec3::X) > 0.99, "u should follow the wanted x");
+
+        // A wanted x along the normal cannot be honoured: any perpendicular
+        // will do, but it must still be a basis of the plane.
+        let (u, v) = sketch_basis([0.0, 0.0, 1.0], [0.0, 0.0, 1.0]);
+        let u = Vec3::from(u);
+        let v = Vec3::from(v);
+        assert!((u.length() - 1.0).abs() < 1e-5);
+        assert!(u.dot(Vec3::Z).abs() < 1e-5);
+        assert!(u.dot(v).abs() < 1e-5);
+    }
+
+    /// The grid lies on the plane, is centred on the origin and spans the whole
+    /// extent in both directions.
+    #[test]
+    fn the_sketch_grid_lies_on_the_plane() {
+        let (u, v) = sketch_basis([0.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let lines = sketch_grid_lines([10.0, 5.0, 20.0], u, v, 20.0, 5.0);
+
+        assert_eq!(lines.len(), 2 * (2 * 4 + 1), "nine lines each way");
+        for (a, b) in &lines {
+            let (a, b) = (Vec3::from(*a), Vec3::from(*b));
+            let midpoint = (a + b) * 0.5;
+            assert!(midpoint.y == 5.0, "every line lies in the plane");
+            assert!(
+                ((b - a).length() - 40.0).abs() < 1e-3,
+                "each line spans the whole extent"
+            );
+        }
     }
 }
