@@ -13,7 +13,9 @@ pub mod naming;
 pub mod query;
 pub mod topology;
 
-pub use naming::{EdgeFacts, FaceFacts, NamedEdge, NamedFace, ReferenceMemory, remember};
+pub use naming::{
+    EdgeFacts, FaceFacts, NamedEdge, NamedFace, ReferenceMemory, plane_basis, remember,
+};
 pub use topology::{FaceInfo, FaceSource, ShapeTopology};
 
 /// Opaque handle to a BREP shape owned by a backend.

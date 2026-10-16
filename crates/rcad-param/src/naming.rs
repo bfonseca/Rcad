@@ -795,6 +795,7 @@ mod tests {
                     origin: [0.0, 0.0, 0.0],
                     normal: [0.0, 1.0, 0.0],
                     x_direction: [1.0, 0.0, 0.0],
+                    reference: None,
                 }),
             },
         ));
@@ -916,6 +917,7 @@ mod tests {
                     origin: [0.0, 0.0, 0.0],
                     normal: [0.0, 0.0, 1.0],
                     x_direction: [1.0, 0.0, 0.0],
+                    reference: None,
                 }),
             },
         ));
@@ -935,6 +937,86 @@ mod tests {
             }
         }
         assert!(spun_out, "the profile should have been spun around the Y axis");
+    }
+
+    /// The sketch plane follows the face it was drawn on: a profile placed by
+    /// reference sits on that face and is swept from it, whatever numbers were
+    /// stored when the sketch was made.
+    #[test]
+    fn a_profile_placed_by_reference_follows_the_face() {
+        let mut part = Part::new_solid("P");
+        part.features.push(box_feature([40.0, 30.0, 8.0]));
+        let boxed = rebuild(&part);
+        let top = boxed
+            .display_mesh
+            .face_names
+            .values()
+            .find(|face| face.name.contains("/box/z+"))
+            .expect("the top face")
+            .name
+            .clone();
+
+        part.features.push(Feature::new(
+            "E",
+            FeatureKind::Extrude {
+                profile: rcad_geom::Profile2D {
+                    outer: vec![[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]],
+                    holes: Vec::new(),
+                },
+                height: 4.0,
+                placement: Some(rcad_doc::SketchPlacement {
+                    origin: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    x_direction: [1.0, 0.0, 0.0],
+                    reference: Some(top.clone()),
+                }),
+            },
+        ));
+
+        let result = rebuild(&part);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.lost_references.is_empty(), "{:?}", result.lost_references);
+        let zs: Vec<f32> = result.display_mesh.positions.iter().map(|p| p[2]).collect();
+        let lowest = zs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let highest = zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!((lowest - 8.0).abs() < 1e-2, "sits on the face: {lowest}");
+        assert!(highest >= 12.0 - 1e-2, "swept from it: {highest}");
+    }
+
+    /// A plane reference that is gone is reported, and the last known numbers are
+    /// used instead of the profile flying off to the origin.
+    #[test]
+    fn a_placed_profile_reports_a_reference_that_is_gone() {
+        let mut part = Part::new_solid("P");
+        part.features.push(box_feature([40.0, 30.0, 8.0]));
+        part.features.push(Feature::new(
+            "E",
+            FeatureKind::Extrude {
+                profile: rcad_geom::Profile2D {
+                    outer: vec![[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]],
+                    holes: Vec::new(),
+                },
+                height: 4.0,
+                placement: Some(rcad_doc::SketchPlacement {
+                    origin: [0.0, 0.0, 20.0],
+                    normal: [0.0, 0.0, 1.0],
+                    x_direction: [1.0, 0.0, 0.0],
+                    reference: Some("face(never|seen)".to_string()),
+                }),
+            },
+        ));
+
+        let result = rebuild(&part);
+        assert_eq!(result.lost_references.len(), 1);
+        assert_eq!(result.lost_references[0].reference, "face(never|seen)");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let highest = result
+            .display_mesh
+            .positions
+            .iter()
+            .map(|p| p[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(highest >= 24.0 - 1e-2, "the stored plane is still used: {highest}");
     }
 
     fn test_edge(

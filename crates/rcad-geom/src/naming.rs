@@ -355,6 +355,44 @@ impl ReferenceMemory {
     }
 }
 
+/// Two perpendicular unit vectors spanning the plane with this normal, the
+/// first as close to the wanted x direction as the plane allows.
+///
+/// The app and the rebuild both need it: the app to draw the sketch grid, the
+/// rebuild to place a profile on the plane a reference resolves to.
+pub fn plane_basis(normal: [f64; 3], wanted_x: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    if length <= 1e-12 {
+        return ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+    }
+    let n = [normal[0] / length, normal[1] / length, normal[2] / length];
+    let dot = wanted_x[0] * n[0] + wanted_x[1] * n[1] + wanted_x[2] * n[2];
+    let mut u = [
+        wanted_x[0] - n[0] * dot,
+        wanted_x[1] - n[1] * dot,
+        wanted_x[2] - n[2] * dot,
+    ];
+    let mut u_length = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+    if u_length < 1e-6 {
+        // The wanted direction is along the normal: any perpendicular will do.
+        let fallback = if n[2].abs() < 0.9 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+        let dot = fallback[0] * n[0] + fallback[1] * n[1] + fallback[2] * n[2];
+        u = [
+            fallback[0] - n[0] * dot,
+            fallback[1] - n[1] * dot,
+            fallback[2] - n[2] * dot,
+        ];
+        u_length = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+    }
+    let u = [u[0] / u_length, u[1] / u_length, u[2] / u_length];
+    let v = [
+        n[1] * u[2] - n[2] * u[1],
+        n[2] * u[0] - n[0] * u[2],
+        n[0] * u[1] - n[1] * u[0],
+    ];
+    (u, v)
+}
+
 /// Remember every named edge of a mesh, by reference.
 ///
 /// References are stable names, so this survives a rebuild: a reference that

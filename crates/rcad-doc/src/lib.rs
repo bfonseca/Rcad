@@ -462,11 +462,17 @@ impl Feature {
 /// Where a sketch profile lies in space: the sketch origin, its normal and the
 /// x direction inside the plane. The profile itself is 2D, so without this it
 /// would be taken to be on the XY plane.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SketchPlacement {
     pub origin: [f64; 3],
     pub normal: [f64; 3],
     pub x_direction: [f64; 3],
+    /// The stable reference of the datum plane or model face the sketch was
+    /// placed on, when there was one. The numbers above are the last known
+    /// position; with this, the rebuild resolves the plane again, so a sketch
+    /// follows the face it was drawn on instead of a snapshot of it.
+    #[serde(default)]
+    pub reference: Option<String>,
 }
 
 /// Which edges a fillet or a chamfer applies to.

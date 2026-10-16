@@ -148,6 +148,40 @@ impl ShapeCache {
             // A fillet or chamfer is told which edges to work on, resolved from
             // its edge set against the body it consumes. `references_only` is
             // what tells a set whose picks vanished from the rule modes.
+            // The plane a profile lies on, resolved from its reference when it
+            // has one, so the feature follows the face or datum it was drawn on.
+            let plane = match &feature.kind {
+                FeatureKind::Extrude { placement, .. } | FeatureKind::Revolve { placement, .. } => {
+                    placement.as_ref().map(|planes| {
+                        let resolved = planes.reference.as_deref().and_then(|reference| {
+                            resolve_placement(
+                                reference,
+                                part,
+                                current,
+                                backend,
+                                current_feature.and_then(|id| named_refs.get(&id)),
+                            )
+                        });
+                        if resolved.is_none() {
+                            if let Some(reference) = &planes.reference {
+                                result.lost_references.push(rcad_doc::LostReference {
+                                    feature: feature.id,
+                                    feature_name: feature.name.clone(),
+                                    reference: reference.clone(),
+                                    last_location: Some(planes.origin),
+                                    last_description: Some(format!(
+                                        "sketch plane at ({}, {}, {})",
+                                        planes.origin[0], planes.origin[1], planes.origin[2]
+                                    )),
+                                });
+                            }
+                        }
+                        resolved.unwrap_or_else(|| planes.clone())
+                    })
+                }
+                _ => None,
+            };
+
             let references_only = matches!(
                 &feature.kind,
                 FeatureKind::Fillet { edges, .. } | FeatureKind::Chamfer { edges, .. }
@@ -204,6 +238,7 @@ impl ShapeCache {
                 &history,
                 backend,
                 &edge_signatures,
+                plane,
             ) {
                 Ok(Some(new_shape)) => {
                     // Name the new topology before any later feature can consume
@@ -340,6 +375,59 @@ impl Default for ShapeCache {
     }
 }
 
+/// The plane a feature profile lies on, resolved from the reference it came
+/// from so the feature follows the face or datum it was drawn on.
+///
+/// A datum plane is named by its feature id and never moves; a model face is
+/// named by its stable reference and is looked up on the body this feature
+/// consumes. `None` means the reference is gone: the caller keeps the last known
+/// numbers and reports it, which is what the repair list shows.
+fn resolve_placement(
+    reference: &str,
+    part: &Part,
+    current: Option<ShapeId>,
+    backend: &mut dyn GeometryBackend,
+    refs: Option<&naming::RefMap>,
+) -> Option<rcad_doc::SketchPlacement> {
+    if let Ok(id) = Uuid::parse_str(reference) {
+        if let Some(feature) = part.features.iter().find(|candidate| candidate.id == id) {
+            if let FeatureKind::Construction {
+                kind: ConstructionKind::Plane,
+                origin,
+                direction,
+            } = &feature.kind
+            {
+                let normal = unit(*direction)?;
+                let (x_direction, _) = rcad_geom::plane_basis(normal, [1.0, 0.0, 0.0]);
+                return Some(rcad_doc::SketchPlacement {
+                    origin: *origin,
+                    normal,
+                    x_direction,
+                    reference: Some(reference.to_string()),
+                });
+            }
+        }
+    }
+
+    let shape = current?;
+    let refs = refs?;
+    let face_id = refs
+        .by_id
+        .iter()
+        .find(|(_, name)| name.as_str() == reference)
+        .map(|(id, _)| *id)?;
+    let topology = backend.topology(shape).ok()?;
+    let face = topology.faces.get(&face_id)?;
+    let normal = unit(face.normal?)?;
+    let (x_direction, _) = rcad_geom::plane_basis(normal, [1.0, 0.0, 0.0]);
+    Some(rcad_doc::SketchPlacement {
+        origin: face.center,
+        normal,
+        x_direction,
+        reference: Some(reference.to_string()),
+    })
+}
+
 /// Unit vector, or `None` when the vector is degenerate.
 fn unit(v: [f64; 3]) -> Option<[f64; 3]> {
     let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
@@ -359,6 +447,7 @@ fn eval_feature(
     history: &[(Uuid, ShapeId)],
     backend: &mut dyn GeometryBackend,
     edge_signatures: &[String],
+    plane: Option<rcad_doc::SketchPlacement>,
 ) -> Result<Option<ShapeId>, String> {
     match kind {
         FeatureKind::Box { size } => backend
@@ -370,13 +459,11 @@ fn eval_feature(
             .map(Some)
             .map_err(|e| e.to_string()),
         FeatureKind::Extrude {
-            profile,
-            height,
-            placement,
+            profile, height, ..
         } => {
             // A profile that knows where it lies is swept along its own normal;
             // one that does not is taken to be on the XY plane, as before.
-            let shape = match placement {
+            let shape = match plane.as_ref() {
                 Some(plane) => backend.extrude_profile_placed(
                     profile,
                     *height,
@@ -400,14 +487,12 @@ fn eval_feature(
                 .map_err(|e| e.to_string())
         }
         FeatureKind::Revolve {
-            profile,
-            angle_deg,
-            placement,
+            profile, angle_deg, ..
         } => {
             let angle = angle_deg.to_radians();
             // A profile that knows its plane is revolved about the in-plane axis
             // of that plane; one that does not keeps the old world-Z axis.
-            let shape = match placement {
+            let shape = match plane.as_ref() {
                 Some(plane) => backend.revolve_profile_placed(
                     profile,
                     angle,

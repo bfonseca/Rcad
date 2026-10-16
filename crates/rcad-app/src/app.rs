@@ -115,6 +115,10 @@ pub struct RcadApp {
     reference_memory: std::collections::BTreeMap<String, rcad_geom::ReferenceMemory>,
     /// The references the part asks for that the body no longer has.
     lost_references: Vec<rcad_doc::LostReference>,
+    /// The stable reference of the plane the open sketch was placed on, when the
+    /// selection named one: a datum plane feature or a model face. With it, a
+    /// feature the sketch feeds follows the plane instead of a snapshot of it.
+    sketch_plane_reference: Option<String>,
     
     // Async kernel worker
     kernel_worker_tx: Option<Sender<RebuildJob>>,
@@ -267,6 +271,7 @@ impl RcadApp {
             sketch_plane: None,
             reference_memory: std::collections::BTreeMap::new(),
             lost_references: Vec::new(),
+            sketch_plane_reference: None,
             
             // Async kernel worker
             kernel_worker_tx: Some(job_tx),
@@ -1653,6 +1658,18 @@ impl RcadApp {
         }
     }
 
+    /// The stable reference of the plane the sketch is placed on, when the
+    /// selection names one: a model face, or a datum plane feature.
+    fn selection_plane_reference(&self) -> Option<String> {
+        self.selection.items().iter().find_map(|item| match item {
+            Selected::Face { reference, .. } => Some(reference.clone()),
+            Selected::Datum { feature, .. } | Selected::Feature { feature, .. } => {
+                Some(feature.to_string())
+            }
+            Selected::Edge { .. } => None,
+        })
+    }
+
     /// The first selected datum axis: the vertical reference the vertical and
     /// horizontal edge sets need.
     fn selected_axis(&self) -> Option<Uuid> {
@@ -2108,6 +2125,7 @@ impl RcadApp {
             Some((origin, normal, x_direction)) => {
                 sketch.set_sketch_plane(origin, normal, x_direction);
                 self.sketch_plane = Some((origin, normal, x_direction));
+                self.sketch_plane_reference = self.selection_plane_reference();
                 self.status = Some("Sketch placed on the selected reference.".to_string());
             }
             None => {
@@ -2115,6 +2133,7 @@ impl RcadApp {
                 // grid is not drawn while the sketch has no plane of its own.
                 sketch.in_placement_mode = true;
                 self.sketch_plane = Some(([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]));
+                self.sketch_plane_reference = None;
                 self.status = Some(
                     "Select a planar face or datum plane, or start the sketch again on the default plane."
                         .to_string(),
@@ -2217,6 +2236,7 @@ impl RcadApp {
                 origin,
                 normal,
                 x_direction,
+                reference: self.sketch_plane_reference.clone(),
             });
         if let Some(sketch) = &self.sketch {
             if let Some(profile) = sketch.to_profile() {
@@ -2234,6 +2254,7 @@ impl RcadApp {
                 origin,
                 normal,
                 x_direction,
+                reference: self.sketch_plane_reference.clone(),
             });
         if let Some(sketch) = &self.sketch {
             if let Some(profile) = sketch.to_profile() {
@@ -2840,6 +2861,7 @@ impl Default for RcadApp {
             sketch_plane: None,
             reference_memory: std::collections::BTreeMap::new(),
             lost_references: Vec::new(),
+            sketch_plane_reference: None,
             
             // Async kernel worker
             kernel_worker_tx: Some(job_tx),

@@ -777,3 +777,21 @@ Still missing in the sketch, in order:
    (`Sketch::analyze_dof` / `constraint_status` exist but are not shown).
 3. The sketch plane as a persistent reference, not three numbers: today a sketch
    does not follow the face it was drawn on when that face moves.
+
+### The sketch plane is a reference now (step 3, point 3 of 3)
+
+`SketchPlacement` carries `reference: Option<String>`, the stable name of the
+datum plane or model face the sketch was placed on. At rebuild time the plane is
+resolved again: a datum plane by its feature id, a model face by looking up the
+reference on the body the feature consumes (`resolve_placement`). So a feature the
+sketch feeds follows the face it was drawn on instead of a snapshot of it.
+
+The stored origin and normal stay as the last known position: when the reference
+is gone the feature is still built where it last was, and the reference shows up
+in the repair list, reusing the machinery the rounds and breaks use.
+
+Tests: a profile placed by reference sits on the top face of a box and is swept
+from it; a reference that is gone is reported and the stored plane is used.
+
+Remaining in the sketch: drawing with the mouse (two clicks, grid snap) and
+constraints/dimensions plus degrees of freedom on screen.
