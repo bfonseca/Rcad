@@ -667,3 +667,29 @@ where it was, and lets the user substitute it. Planned shape:
 - A repair list in the UI: each lost reference with its last known location, and
   a Substitute action that takes the new reference from the current selection
   and rewrites that feature edge set, then rebuilds.
+
+### Sketch: a face is a plane, and the profile extrudes (step 3)
+
+- A sketch can now be placed on a face of the model, not only on a datum:
+  `face_plane` takes the triangle centre and the normal from its vertices (not
+  from how the tessellation stores normals) and an x in the plane.
+- The cycle is proven by test: rectangle, solve, profile, extrude creates an
+  Extrude feature, and the profile that reaches the kernel is the sketch one.
+- `extrude_sketch` refuses a sketch off the XY plane with an explanation: the
+  kernel sweeps the profile along Z, which would put the solid in the wrong
+  place. This is a real limitation, not a polish item.
+
+Still missing in the sketch, and not pretended otherwise:
+
+- Drawing by clicking in the viewport (two clicks for a rectangle, snapping to
+  the grid). Today the geometry comes from the sketch toolbar and shortcuts.
+- Constraints and dimensions on screen, and the degrees of freedom
+  (`Sketch::analyze_dof` / `constraint_status` exist in the crate but are not
+  shown).
+- Extruding along the sketch normal: needs the plane on the feature and a
+  backend that extrudes along a direction.
+
+### Lost references (next)
+
+See the section above: found/lost resolution instead of failure, the last known
+geometry of each reference, and substitution from the selection in one list.

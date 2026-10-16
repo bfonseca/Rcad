@@ -2015,9 +2015,9 @@ impl RcadApp {
             Selected::Datum { feature, .. } | Selected::Feature { feature, .. } => {
                 part.features.iter().find(|f| f.id == *feature)?
             }
-            // A planar solid face has no stored datum yet; the sketch tools that
-            // read the mesh for that come next.
-            Selected::Face { .. } => return None,
+            // A face of the model is a sketch plane in its own right: its
+            // centre and normal are all the sketch needs.
+            Selected::Face { triangle, .. } => return face_plane(&self.mesh, *triangle),
             Selected::Edge { .. } => return None,
         };
         let FeatureKind::Construction {
@@ -2086,6 +2086,17 @@ impl RcadApp {
     }
     
     pub fn extrude_sketch(&mut self) {
+        // The kernel extrudes a profile along its own axis, so a sketch drawn on
+        // any other plane would come out in the wrong place. Say so instead.
+        if let Some((_, normal, _)) = self.sketch_plane {
+            if normal[2].abs() < 0.999 {
+                self.last_error = Some(
+                    "Extruding a sketch that is not on the XY plane is not supported yet: the profile would be swept along Z, not along the sketch normal. Draw on TOP_PLANE, or use a solid face parallel to it for now."
+                        .to_string(),
+                );
+                return;
+            }
+        }
         if let Some(sketch) = &self.sketch {
             if let Some(profile) = sketch.to_profile() {
                 if let Err(e) = self.extrude_sketch_internal(profile, 10.0) {
@@ -2754,6 +2765,36 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
+}
+
+/// The plane of a mesh triangle: its centre, its normal and an x direction in
+/// the plane. The normal comes from the triangle vertices, so it does not depend
+/// on how the tessellation happens to store its normals.
+fn face_plane(mesh: &TriangleMesh, triangle: usize) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
+    let indices = mesh.indices.get(triangle * 3..triangle * 3 + 3)?;
+    let mut corners = [[0.0f64; 3]; 3];
+    for (slot, index) in corners.iter_mut().zip(indices) {
+        let position = mesh.positions.get(*index as usize)?;
+        *slot = [position[0] as f64, position[1] as f64, position[2] as f64];
+    }
+    let centre = [
+        (corners[0][0] + corners[1][0] + corners[2][0]) / 3.0,
+        (corners[0][1] + corners[1][1] + corners[2][1]) / 3.0,
+        (corners[0][2] + corners[1][2] + corners[2][2]) / 3.0,
+    ];
+    let edge_a = [
+        corners[1][0] - corners[0][0],
+        corners[1][1] - corners[0][1],
+        corners[1][2] - corners[0][2],
+    ];
+    let edge_b = [
+        corners[2][0] - corners[0][0],
+        corners[2][1] - corners[0][1],
+        corners[2][2] - corners[0][2],
+    ];
+    let normal = normalised(cross(edge_a, edge_b))?;
+    let (x_direction, _) = crate::viewport::sketch_basis(normal, [1.0, 0.0, 0.0]);
+    Some((centre, normal, [x_direction[0] as f64, x_direction[1] as f64, x_direction[2] as f64]))
 }
 
 /// The first triangle of the face with this stable name, and its label.
@@ -3436,6 +3477,75 @@ mod interaction_tests {
             &feature.kind,
             FeatureKind::Chamfer { edges: EdgeSet::All, distance } if (*distance - 1.0).abs() < 1e-9
         )));
+    }
+
+    /// A face of the model is a sketch plane: its centre and normal are enough,
+    /// with no datum needed.
+    #[test]
+    fn a_sketch_is_placed_on_a_selected_model_face() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        app.mesh = TriangleMesh {
+            positions: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        };
+        app.selection.replace(Selected::Face {
+            reference: "face".to_string(),
+            label: "face".to_string(),
+            triangle: 0,
+        });
+
+        app.new_sketch();
+
+        let sketch = app.sketch.as_ref().expect("a sketch");
+        assert!(!sketch.in_placement_mode, "the face gives the plane");
+        let (origin, normal, _) = app.sketch_plane.expect("a plane");
+        assert_eq!(origin, [10.0 / 3.0, 10.0 / 3.0, 0.0]);
+        assert!(normal[2].abs() > 0.99, "{normal:?}");
+    }
+
+    /// The cycle the sketch exists for: rectangle, solve, profile, extrude.
+    #[test]
+    fn a_rectangle_sketch_extrudes_into_a_solid_feature() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        app.new_sketch();
+        app.add_sketch_rectangle();
+        app.solve_sketch();
+
+        app.extrude_sketch();
+
+        let part = app.project.parts.first().unwrap();
+        assert!(
+            part.features
+                .iter()
+                .any(|feature| matches!(feature.kind, FeatureKind::Extrude { .. })),
+            "the sketch profile should have become an extrude: {:?}",
+            app.last_error
+        );
+    }
+
+    /// Off the XY plane the kernel would sweep the profile along Z, in the wrong
+    /// place. Report it instead of producing silent nonsense.
+    #[test]
+    fn extruding_a_sketch_off_the_xy_plane_is_reported() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        app.new_sketch();
+        app.sketch_plane = Some(([0.0; 3], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]));
+        app.add_sketch_rectangle();
+        app.solve_sketch();
+
+        app.extrude_sketch();
+
+        let message = app.last_error.clone().unwrap_or_default();
+        assert!(message.contains("not supported yet"), "{message}");
+        let part = app.project.parts.first().unwrap();
+        assert!(part
+            .features
+            .iter()
+            .all(|feature| !matches!(feature.kind, FeatureKind::Extrude { .. })));
     }
 
     /// A tag whose face is gone (edited or deleted) is reported, not silently
