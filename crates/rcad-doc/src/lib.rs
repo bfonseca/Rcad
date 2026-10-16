@@ -459,6 +459,51 @@ impl Feature {
     }
 }
 
+/// Which edges a fillet or a chamfer applies to.
+///
+/// Creo calls this an edge set: a list of picked edges, or a rule that is
+/// re-evaluated on every regeneration, so the feature follows the model instead
+/// of a snapshot of it. The rule modes are the Creo ones: every edge, the outer
+/// edges (material angle below 180 degrees), the inner edges (above 180), and the
+/// edges parallel or perpendicular to a reference axis - which is why the
+/// vertical and horizontal modes need that reference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EdgeSet {
+    /// Edges the user picked, by stable reference.
+    References(Vec<String>),
+    /// Every edge of the body.
+    All,
+    /// Convex edges: the angle through the material is below 180 degrees.
+    Outer,
+    /// Concave edges: the angle through the material is above 180 degrees.
+    Inner,
+    /// Edges parallel to this datum axis.
+    Vertical { axis: EntityId },
+    /// Edges perpendicular to this datum axis.
+    Horizontal { axis: EntityId },
+}
+
+impl Default for EdgeSet {
+    fn default() -> Self {
+        EdgeSet::All
+    }
+}
+
+impl EdgeSet {
+    /// True when the set names specific edges rather than a rule.
+    pub fn is_references(&self) -> bool {
+        matches!(self, EdgeSet::References(_))
+    }
+
+    /// The reference axis, for the modes that need one.
+    pub fn axis(&self) -> Option<EntityId> {
+        match self {
+            EdgeSet::Vertical { axis } | EdgeSet::Horizontal { axis } => Some(*axis),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FeatureKind {
     Box {
@@ -485,9 +530,15 @@ pub enum FeatureKind {
     },
     Fillet {
         radius: f64,
+        /// Which edges to round. Empty of references and `All` mean every edge,
+        /// which is what the feature did before edge sets existed.
+        #[serde(default)]
+        edges: EdgeSet,
     },
     Chamfer {
         distance: f64,
+        #[serde(default)]
+        edges: EdgeSet,
     },
     Construction {
         kind: ConstructionKind,

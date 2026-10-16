@@ -597,3 +597,27 @@ the top face is its four edges, named as references.
 
 Still to do for step 2: fillet and chamfer by the selected edges - store them in
 `FeatureReferences.fillet_edges` and rebuild from them - and the From-To chain.
+
+### Fillet and chamfer by edge set (step 2, done)
+
+A round or a break now stores an `EdgeSet`, not a snapshot of edges, and the
+rebuild re-resolves it every time:
+
+- `References`: the edges the user picked, by stable reference.
+- `All`: every edge of the body.
+- `Outer` / `Inner`: the edges whose material angle is below / above 180 degrees.
+  `NamedEdge` carries the dihedral angle, computed per edge in the kernel backend
+  by probing along the bisector of the two adjacent face normals.
+- `Vertical` / `Horizontal`: the edges parallel / perpendicular to a datum axis,
+  within one degree. **Both need that reference**, because horizontal is defined
+  as perpendicular to it; without one they resolve to nothing rather than to
+  everything, and the menu offers them disabled with that explanation.
+
+The resolver returns edge *signatures*, not kernel ids: an operation works on a
+copy of the shape, whose ids are fresh, so ids resolved beforehand would not
+match. Selection menu: Round and Break each list the six sets.
+
+Tests: a fillet on two references rounds two edges and adds far fewer faces than
+the same fillet on every edge; the rule modes resolve on a synthetic topology
+with one edge of each kind; the vertical and horizontal modes resolve to nothing
+without the axis; and every box edge reports ninety degrees.

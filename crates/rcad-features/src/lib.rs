@@ -1,6 +1,6 @@
 //! Helpers to append common modelling features onto a [`Part`].
 
-use rcad_doc::{EntityId, Feature, FeatureKind, Part};
+use rcad_doc::{EdgeSet, EntityId, Feature, FeatureKind, Part};
 use rcad_geom::Profile2D;
 use rcad_param::rect_profile;
 use rcad_sketch::Sketch;
@@ -88,12 +88,18 @@ pub fn add_revolve(part: &mut Part, name: &str, profile: Profile2D, angle_deg: f
     )
 }
 
-pub fn add_fillet(part: &mut Part, name: &str, radius: f64) -> EntityId {
-    push_feature(part, Feature::new(name, FeatureKind::Fillet { radius }))
+pub fn add_fillet(part: &mut Part, name: &str, radius: f64, edges: EdgeSet) -> EntityId {
+    push_feature(
+        part,
+        Feature::new(name, FeatureKind::Fillet { radius, edges }),
+    )
 }
 
-pub fn add_chamfer(part: &mut Part, name: &str, distance: f64) -> EntityId {
-    push_feature(part, Feature::new(name, FeatureKind::Chamfer { distance }))
+pub fn add_chamfer(part: &mut Part, name: &str, distance: f64, edges: EdgeSet) -> EntityId {
+    push_feature(
+        part,
+        Feature::new(name, FeatureKind::Chamfer { distance, edges }),
+    )
 }
 
 pub fn add_surface_extrude(part: &mut Part, name: &str, profile: Profile2D, height: f64) -> EntityId {

@@ -77,6 +77,11 @@ pub struct NamedEdge {
     /// one for a seam. Filled by the rebuild; empty on construction geometry.
     #[serde(default)]
     pub faces: Vec<String>,
+    /// Angle through the material at this edge, in degrees. Below 180 is a
+    /// convex (outer) edge, above 180 a concave (inner) one, and 0 means the
+    /// backend did not say - which keeps such an edge out of either filter.
+    #[serde(default)]
+    pub dihedral_degrees: f64,
     /// Polyline approximation, for drawing and picking.
     #[serde(default)]
     pub points: Vec<[f32; 3]>,
@@ -86,6 +91,33 @@ impl NamedEdge {
     /// Whether this edge carries the given stable name.
     pub fn matches(&self, name: &str) -> bool {
         self.name == name
+    }
+
+    /// A convex edge: the material angle is below 180 degrees. Creo calls these
+    /// the outer edges.
+    pub fn is_outer(&self) -> bool {
+        self.dihedral_degrees > 0.0 && self.dihedral_degrees < 180.0
+    }
+
+    /// A concave edge: the material angle is above 180 degrees.
+    pub fn is_inner(&self) -> bool {
+        self.dihedral_degrees > 180.0
+    }
+
+    /// Unit direction from start to end, falling back to the start tangent on a
+    /// degenerate edge.
+    pub fn direction(&self) -> [f64; 3] {
+        let d = [
+            self.end[0] - self.start[0],
+            self.end[1] - self.start[1],
+            self.end[2] - self.start[2],
+        ];
+        let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if length > 1e-12 {
+            [d[0] / length, d[1] / length, d[2] / length]
+        } else {
+            self.start_tangent
+        }
     }
 }
 

@@ -10,7 +10,7 @@ use crate::ui::{
     VerticalToolbar,
 };
 use rcad_geom::{GeometryBackend, TriangleMesh};
-use rcad_doc::{Project, Feature, FeatureKind, ConstructionKind, Part, ProjectManifest};
+use rcad_doc::{Project, EdgeSet, Feature, FeatureKind, ConstructionKind, Part, ProjectManifest};
 use rcad_features;
 use rcad_occt::OcctBackend;
 use rcad_param::{ShapeCache};
@@ -151,6 +151,22 @@ pub struct RcadApp {
     /// True once a rebuild response has been applied, so headless save can wait
     /// for the real model instead of writing an empty one.
     mesh_ready: bool,
+}
+
+/// A feature driven by an edge set: a round or a break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeFeature {
+    Fillet,
+    Chamfer,
+}
+
+impl EdgeFeature {
+    fn name(self) -> &'static str {
+        match self {
+            EdgeFeature::Fillet => "Round",
+            EdgeFeature::Chamfer => "Chamfer",
+        }
+    }
 }
 
 /// A Creo-style smart-selection query, offered on a selected edge.
@@ -1378,9 +1394,29 @@ impl RcadApp {
         if self.selection.is_empty() {
             return;
         }
+        // The menu choices are built before the panel, so the closures only
+        // read them. The axis the vertical and horizontal modes need comes from
+        // the selection: without it those two are offered disabled.
+        let axis = self.selected_axis();
+        let mut edge_sets: Vec<(&'static str, EdgeSet)> = Vec::new();
+        let edge_references = self.selection.edge_references();
+        if !edge_references.is_empty() {
+            edge_sets.push((
+                "Selected edges",
+                EdgeSet::References(edge_references.iter().map(|r| r.to_string()).collect()),
+            ));
+        }
+        edge_sets.push(("Outer edges (up to 180)", EdgeSet::Outer));
+        edge_sets.push(("Inner edges (over 180)", EdgeSet::Inner));
+        edge_sets.push(("Every edge", EdgeSet::All));
+        if let Some(axis) = axis {
+            edge_sets.push(("Vertical edges", EdgeSet::Vertical { axis }));
+            edge_sets.push(("Horizontal edges", EdgeSet::Horizontal { axis }));
+        }
         let mut remove_index: Option<usize> = None;
         let mut clear = false;
         let mut query: Option<SelectionQuery> = None;
+        let mut pending_feature: Option<(EdgeFeature, EdgeSet)> = None;
         egui::TopBottomPanel::bottom("selection_bar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let seed = self
@@ -1424,6 +1460,28 @@ impl RcadApp {
                         remove_index = Some(index);
                     }
                 }
+                // Round and break read the same edge sets, the way the Creo
+                // dashboard does.
+                for (label, kind) in [
+                    ("Round", EdgeFeature::Fillet),
+                    ("Break", EdgeFeature::Chamfer),
+                ] {
+                    ui.menu_button(label, |ui| {
+                        for (name, set) in &edge_sets {
+                            if ui.button(*name).clicked() {
+                                pending_feature = Some((kind, (*set).clone()));
+                                ui.close();
+                            }
+                        }
+                        if axis.is_none() {
+                            for name in ["Vertical edges", "Horizontal edges"] {
+                                ui.add_enabled(false, egui::Button::new(name)).on_hover_text(
+                                    "Select a datum axis as the vertical reference first",
+                                );
+                            }
+                        }
+                    });
+                }
                 if ui.small_button("Clear").clicked() {
                     clear = true;
                 }
@@ -1439,6 +1497,43 @@ impl RcadApp {
         if let Some(query) = query {
             self.apply_selection_query(query);
         }
+        if let Some((kind, edges)) = pending_feature {
+            self.add_edge_feature(kind, 1.0, edges);
+        }
+    }
+
+    /// The first selected datum axis: the vertical reference the vertical and
+    /// horizontal edge sets need.
+    fn selected_axis(&self) -> Option<Uuid> {
+        let part = self.get_active_part()?;
+        self.selection.items().iter().find_map(|item| {
+            let Selected::Datum { feature, .. } = item else {
+                return None;
+            };
+            let datum = part.features.iter().find(|candidate| candidate.id == *feature)?;
+            match &datum.kind {
+                FeatureKind::Construction {
+                    kind: ConstructionKind::Axis,
+                    ..
+                } => Some(datum.id),
+                _ => None,
+            }
+        })
+    }
+
+    /// Add a round or a break driven by an edge set, at the default size.
+    pub fn add_edge_feature(&mut self, kind: EdgeFeature, size: f64, edges: EdgeSet) {
+        self.undo_stack.push(self.project.clone());
+        let Some(part) = self.get_active_part_mut() else {
+            return;
+        };
+        let name = rcad_features::unique_feature_name(part, kind.name());
+        match kind {
+            EdgeFeature::Fillet => rcad_features::add_fillet(part, &name, size, edges.clone()),
+            EdgeFeature::Chamfer => rcad_features::add_chamfer(part, &name, size, edges.clone()),
+        };
+        self.rebuild_active_part();
+        self.status = Some(format!("{name} added."));
     }
 
     /// Expand the selection with a Creo-style query on the seed edge.
@@ -3205,6 +3300,39 @@ mod interaction_tests {
 
         let status = app.status.clone().unwrap_or_default();
         assert!(status.contains("Pick an edge"), "{status}");
+    }
+
+    /// A round created from the selection stores the edge references, and the
+    /// rule modes are stored as rules: the rebuild re-resolves them.
+    #[test]
+    fn a_round_from_the_selection_stores_its_edge_set() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        app.add_edge_feature(
+            EdgeFeature::Fillet,
+            1.0,
+            EdgeSet::References(vec!["edge(a|b)".to_string()]),
+        );
+        app.add_edge_feature(EdgeFeature::Chamfer, 1.0, EdgeSet::Inner);
+
+        let part = app.project.parts.first().unwrap();
+        let rounds: Vec<&Feature> = part
+            .features
+            .iter()
+            .filter(|feature| matches!(feature.kind, FeatureKind::Fillet { .. }))
+            .collect();
+        assert_eq!(rounds.len(), 1, "one round");
+        match &rounds[0].kind {
+            FeatureKind::Fillet { radius, edges } => {
+                assert_eq!(*radius, 1.0);
+                assert_eq!(*edges, EdgeSet::References(vec!["edge(a|b)".to_string()]));
+            }
+            _ => unreachable!(),
+        }
+        assert!(part.features.iter().any(|feature| matches!(
+            &feature.kind,
+            FeatureKind::Chamfer { edges: EdgeSet::Inner, .. }
+        )));
     }
 
     /// A tag whose face is gone (edited or deleted) is reported, not silently

@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use rcad_doc::{Feature, FeatureKind};
+use rcad_doc::{EdgeSet, Feature, FeatureKind};
 use rcad_geom::{FaceInfo, ShapeTopology, TriangleMesh};
 
 /// The reference of one face of `feature`.
@@ -209,6 +209,84 @@ pub fn apply_references(mesh: &mut TriangleMesh, topology: &ShapeTopology, refs:
             edge.faces = faces.clone();
         }
     }
+}
+
+/// Cosine of one degree between an edge and the reference axis, and its sine:
+/// the tolerances of the vertical and horizontal edge sets.
+const AXIS_PARALLEL: f64 = 0.99985;
+const AXIS_PERPENDICULAR: f64 = 0.01745;
+
+/// The edges an edge set asks for, on a shape with this topology, as edge
+/// signatures.
+///
+/// Signatures, not kernel ids: the kernel hands out fresh ids when a shape is
+/// copied for an operation, so an id resolved here would not match there. The
+/// signature is the same geometry either way. `references` maps kernel edge id
+/// to stable reference, the same map the mesh carries, and `axis` is the
+/// direction the vertical or horizontal set refers to. A mode whose reference is
+/// missing resolves to nothing rather than to everything: silently rounding
+/// every edge is the failure that hurts.
+pub fn resolve_edge_set(
+    set: &EdgeSet,
+    topology: &ShapeTopology,
+    references: Option<&BTreeMap<u64, String>>,
+    axis: Option<[f64; 3]>,
+) -> Vec<String> {
+    let wanted: Vec<u64> = match set {
+        EdgeSet::All => topology.edges.keys().copied().collect(),
+        EdgeSet::References(names) => topology
+            .edges
+            .keys()
+            .copied()
+            .filter(|edge_id| {
+                references
+                    .and_then(|map| map.get(edge_id))
+                    .map_or(false, |reference| names.iter().any(|name| name == reference))
+            })
+            .collect(),
+        EdgeSet::Outer => topology
+            .edges
+            .iter()
+            .filter(|(_, edge)| edge.is_outer())
+            .map(|(edge_id, _)| *edge_id)
+            .collect(),
+        EdgeSet::Inner => topology
+            .edges
+            .iter()
+            .filter(|(_, edge)| edge.is_inner())
+            .map(|(edge_id, _)| *edge_id)
+            .collect(),
+        EdgeSet::Vertical { .. } => along_axis(topology, axis, true),
+        EdgeSet::Horizontal { .. } => along_axis(topology, axis, false),
+    };
+    wanted
+        .into_iter()
+        .filter_map(|edge_id| topology.edges.get(&edge_id).map(|edge| edge.signature.clone()))
+        .collect()
+}
+
+/// Edges parallel to the reference axis, or perpendicular to it, within one
+/// degree. Perpendicular is what horizontal means, which is why that mode needs
+/// the vertical reference as well.
+fn along_axis(topology: &ShapeTopology, axis: Option<[f64; 3]>, parallel: bool) -> Vec<u64> {
+    let Some(axis) = axis else {
+        return Vec::new();
+    };
+    topology
+        .edges
+        .iter()
+        .filter(|(_, edge)| {
+            let direction = edge.direction();
+            let dot = (axis[0] * direction[0] + axis[1] * direction[1] + axis[2] * direction[2])
+                .abs();
+            if parallel {
+                dot >= AXIS_PARALLEL
+            } else {
+                dot <= AXIS_PERPENDICULAR
+            }
+        })
+        .map(|(edge_id, _)| *edge_id)
+        .collect()
 }
 
 /// Role of a face, when the feature definition says what its faces are.
@@ -612,7 +690,10 @@ mod tests {
     fn the_original_faces_keep_their_references_through_a_fillet() {
         let mut part = Part::new_solid("P");
         part.features.push(box_feature([40.0, 30.0, 8.0]));
-        part.features.push(plane_feature(FeatureKind::Fillet { radius: 2.0 }));
+        part.features.push(plane_feature(FeatureKind::Fillet {
+            radius: 2.0,
+            edges: Default::default(),
+        }));
 
         let first = rebuild(&part);
         assert!(first.errors.is_empty(), "{:?}", first.errors);
@@ -675,6 +756,135 @@ mod tests {
         assert!(
             references.iter().all(|reference| reference.starts_with("edge(")),
             "{references:?}"
+        );
+    }
+
+    fn test_edge(
+        kernel_id: u64,
+        signature: &str,
+        start: [f64; 3],
+        end: [f64; 3],
+        dihedral_degrees: f64,
+    ) -> NamedEdge {
+        let d = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+        let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let unit = [d[0] / length, d[1] / length, d[2] / length];
+        NamedEdge {
+            name: signature.to_string(),
+            signature: signature.to_string(),
+            label: signature.to_string(),
+            kernel_id,
+            start,
+            end,
+            start_tangent: unit,
+            end_tangent: unit,
+            midpoint: [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5, 0.0],
+            length,
+            dihedral_degrees,
+            ..Default::default()
+        }
+    }
+
+    /// The rule modes of an edge set, on a topology with one edge of each kind:
+    /// an outer edge along X, an inner edge along X and an outer edge along Z.
+    #[test]
+    fn an_edge_set_resolves_by_rule() {
+        let mut topology = ShapeTopology::default();
+        topology.edges.insert(
+            1,
+            test_edge(1, "outer", [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 90.0),
+        );
+        topology.edges.insert(
+            2,
+            test_edge(2, "inner", [0.0, 5.0, 0.0], [10.0, 5.0, 0.0], 270.0),
+        );
+        topology.edges.insert(
+            3,
+            test_edge(3, "along-z", [20.0, 0.0, 0.0], [20.0, 0.0, 10.0], 90.0),
+        );
+        let references = BTreeMap::from([
+            (1, "outer".to_string()),
+            (2, "inner".to_string()),
+            (3, "along-z".to_string()),
+        ]);
+        let axis = Some([0.0, 0.0, 1.0]);
+        let resolve = |set: &EdgeSet| resolve_edge_set(set, &topology, Some(&references), axis);
+        let pick = |name: &str| name.to_string();
+
+        assert_eq!(resolve(&EdgeSet::All).len(), 3);
+        assert_eq!(
+            resolve(&EdgeSet::Outer),
+            vec![pick("outer"), pick("along-z")]
+        );
+        assert_eq!(resolve(&EdgeSet::Inner), vec![pick("inner")]);
+        assert_eq!(
+            resolve(&EdgeSet::Vertical {
+                axis: uuid::Uuid::new_v4()
+            }),
+            vec![pick("along-z")]
+        );
+        assert_eq!(
+            resolve(&EdgeSet::Horizontal {
+                axis: uuid::Uuid::new_v4()
+            }),
+            vec![pick("outer"), pick("inner")]
+        );
+        assert_eq!(
+            resolve(&EdgeSet::References(vec![pick("inner")])),
+            vec![pick("inner")]
+        );
+
+        // The modes that need a reference axis select nothing without one:
+        // quietly rounding every edge is the failure that hurts.
+        for set in [
+            EdgeSet::Vertical {
+                axis: uuid::Uuid::new_v4(),
+            },
+            EdgeSet::Horizontal {
+                axis: uuid::Uuid::new_v4(),
+            },
+        ] {
+            assert!(resolve_edge_set(&set, &topology, Some(&references), None).is_empty());
+        }
+    }
+
+    /// A fillet on picked edges rounds those edges and only those, which is the
+    /// whole point of an edge set: a couple of faces, not one per edge.
+    #[test]
+    fn a_fillet_by_reference_rounds_only_the_picked_edges() {
+        let mut part = Part::new_solid("P");
+        part.features.push(box_feature([40.0, 30.0, 8.0]));
+        let first = rebuild(&part);
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        let picked: Vec<String> = first
+            .display_mesh
+            .edges
+            .iter()
+            .take(2)
+            .map(|edge| edge.name.clone())
+            .collect();
+        assert_eq!(picked.len(), 2);
+
+        part.features.push(plane_feature(FeatureKind::Fillet {
+            radius: 1.0,
+            edges: EdgeSet::References(picked),
+        }));
+        let second = rebuild(&part);
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        let by_reference = second.display_mesh.face_names.len();
+        assert!(by_reference > 6, "the picked edges should have been rounded");
+
+        part.features[1].kind = FeatureKind::Fillet {
+            radius: 1.0,
+            edges: EdgeSet::All,
+        };
+        let all = rebuild(&part);
+        assert!(all.errors.is_empty(), "{:?}", all.errors);
+        assert!(
+            all.display_mesh.face_names.len() > by_reference,
+            "every edge should add more faces than two: {} vs {}",
+            all.display_mesh.face_names.len(),
+            by_reference
         );
     }
 }

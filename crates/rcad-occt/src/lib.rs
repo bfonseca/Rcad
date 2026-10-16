@@ -248,6 +248,80 @@ fn describe_face(face: &cadrum::Face) -> FaceInfo {
     }
 }
 
+/// The angle through the material at an edge, in degrees: below 180 for a
+/// convex edge, above for a concave one. Zero when it cannot be told, which
+/// keeps the edge out of both the outer and the inner filter.
+fn edge_dihedral(solid: &Solid, edge: &Edge, faces: Option<&Vec<&cadrum::Face>>) -> f64 {
+    let Some(faces) = faces else { return 0.0 };
+    if faces.len() != 2 {
+        return 0.0;
+    }
+    let points = edge_polyline(edge);
+    let midpoint = polyline_midpoint(&points);
+    let (_, first) = faces[0].project(midpoint);
+    let (_, second) = faces[1].project(midpoint);
+    if first.length() == 0.0 || second.length() == 0.0 {
+        return 0.0;
+    }
+    let (first, second) = (first.normalize(), second.normalize());
+    let between = first.dot(second).clamp(-1.0, 1.0).acos().to_degrees();
+    // A probe away from the edge, along the bisector of the normals and
+    // perpendicular to the edge. It lands in the material only where the edge is
+    // concave, which is what separates an outer edge from an inner one.
+    let mut offset = first - second;
+    let along = edge.end_point() - edge.start_point();
+    if along.length() > 0.0 {
+        let along = along.normalize();
+        offset -= along * offset.dot(along);
+    }
+    let offset = offset.normalize_or_zero();
+    if offset.length() == 0.0 {
+        return 0.0;
+    }
+    let step = (polyline_length(&points) * 0.02).clamp(1e-4, 0.5);
+    if solid.contains(midpoint + offset * step) {
+        180.0 + between
+    } else {
+        180.0 - between
+    }
+}
+
+/// The geometry-derived signature of one edge, without the ambiguity suffix the
+/// rebuild adds to duplicates.
+fn edge_signature_of(edge: &Edge) -> String {
+    let points = edge_polyline(edge);
+    let length = polyline_length(&points);
+    let start = edge.start_point();
+    let end = edge.end_point();
+    let closed = (end - start).length() <= Edge::precision_distance();
+    let midpoint = polyline_midpoint(&points);
+    let kind = if points.len() <= 2 {
+        "line"
+    } else if closed {
+        "circle"
+    } else {
+        "curve"
+    };
+    let facts = EdgeFacts {
+        kind,
+        length,
+        start: start.to_array(),
+        end: end.to_array(),
+        midpoint: midpoint.to_array(),
+        closed,
+    };
+    naming::edge_signature(&facts)
+}
+
+/// Whether an edge carries one of the selected signatures. A selected signature
+/// may carry the duplicate suffix the rebuild adds, so both are accepted.
+fn edge_matches(edge: &Edge, selected: &[String]) -> bool {
+    let signature = edge_signature_of(edge);
+    selected
+        .iter()
+        .any(|wanted| wanted == &signature || wanted.starts_with(&format!("{signature}#")))
+}
+
 /// Signature per face id, for the input of an operation.
 fn face_signatures(solid: &Solid) -> BTreeMap<u64, String> {
     solid
@@ -292,6 +366,14 @@ fn topology_of(solids: &[Solid]) -> ShapeTopology {
     let mut edges: Vec<NamedEdge> = Vec::new();
 
     for solid in solids {
+        // The faces of each edge, for the dihedral angle below.
+        let mut faces_of_edge: BTreeMap<u64, Vec<&cadrum::Face>> = BTreeMap::new();
+        for face in solid.iter_face() {
+            for edge in face.iter_edge() {
+                faces_of_edge.entry(edge.id()).or_default().push(face);
+            }
+        }
+
         for face in solid.iter_face() {
             let info = describe_face(face);
             named.push(NamedFace {
@@ -343,6 +425,7 @@ fn topology_of(solids: &[Solid]) -> ShapeTopology {
                     .collect(),
                 // Filled by the rebuild, which knows the face references.
                 faces: Vec::new(),
+                dihedral_degrees: edge_dihedral(solid, edge, faces_of_edge.get(&edge.id())),
             });
         }
     }
@@ -445,10 +528,64 @@ impl GeometryBackend for OcctBackend {
         Ok(self.insert_with_history(filleted, history))
     }
 
+    fn fillet_edges(
+        &mut self,
+        shape: ShapeId,
+        radius: f64,
+        selected: &[String],
+    ) -> GeomResult<ShapeId> {
+        if selected.is_empty() {
+            return self.fillet_all(shape, radius);
+        }
+        let solid = self.get(shape)?.clone();
+        let input_signatures = face_signatures(&solid);
+        let edges: Vec<&Edge> = solid
+            .iter_edge()
+            .filter(|edge| edge_matches(edge, selected))
+            .collect();
+        if edges.is_empty() {
+            return Err(GeomError::Backend(
+                "no edge of this body matches the edge set".into(),
+            ));
+        }
+        let filleted = solid
+            .fillet_edges(radius, edges)
+            .map_err(|e| GeomError::Backend(e.to_string()))?;
+        let history = operation_history(&filleted, &[(&input_signatures, false)]);
+        Ok(self.insert_with_history(filleted, history))
+    }
+
     fn chamfer_all(&mut self, shape: ShapeId, distance: f64) -> GeomResult<ShapeId> {
         let solid = self.get(shape)?.clone();
         let input_signatures = face_signatures(&solid);
         let edges: Vec<_> = solid.iter_edge().collect();
+        let chamfered = solid
+            .chamfer_edges(distance, edges)
+            .map_err(|e| GeomError::Backend(e.to_string()))?;
+        let history = operation_history(&chamfered, &[(&input_signatures, false)]);
+        Ok(self.insert_with_history(chamfered, history))
+    }
+
+    fn chamfer_edges(
+        &mut self,
+        shape: ShapeId,
+        distance: f64,
+        selected: &[String],
+    ) -> GeomResult<ShapeId> {
+        if selected.is_empty() {
+            return self.chamfer_all(shape, distance);
+        }
+        let solid = self.get(shape)?.clone();
+        let input_signatures = face_signatures(&solid);
+        let edges: Vec<&Edge> = solid
+            .iter_edge()
+            .filter(|edge| edge_matches(edge, selected))
+            .collect();
+        if edges.is_empty() {
+            return Err(GeomError::Backend(
+                "no edge of this body matches the edge set".into(),
+            ));
+        }
         let chamfered = solid
             .chamfer_edges(distance, edges)
             .map_err(|e| GeomError::Backend(e.to_string()))?;

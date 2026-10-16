@@ -185,7 +185,39 @@ pub trait GeometryBackend: Send {
     fn boolean(&mut self, a: ShapeId, b: ShapeId, op: BooleanOp) -> GeomResult<ShapeId>;
     fn translate(&mut self, shape: ShapeId, delta: DVec3) -> GeomResult<ShapeId>;
     fn fillet_all(&mut self, shape: ShapeId, radius: f64) -> GeomResult<ShapeId>;
+
+    /// Round only the edges with these signatures. An empty list means every
+    /// edge, which is what a backend that cannot pick edges still supports.
+    ///
+    /// Signatures rather than kernel ids: an operation works on a copy of the
+    /// shape, whose ids are fresh.
+    fn fillet_edges(&mut self, shape: ShapeId, radius: f64, edges: &[String]) -> GeomResult<ShapeId> {
+        if edges.is_empty() {
+            self.fillet_all(shape, radius)
+        } else {
+            Err(GeomError::Backend(
+                "this backend cannot round specific edges".into(),
+            ))
+        }
+    }
     fn chamfer_all(&mut self, shape: ShapeId, distance: f64) -> GeomResult<ShapeId>;
+
+    /// Break only the edges with these signatures. An empty list means every
+    /// edge.
+    fn chamfer_edges(
+        &mut self,
+        shape: ShapeId,
+        distance: f64,
+        edges: &[String],
+    ) -> GeomResult<ShapeId> {
+        if edges.is_empty() {
+            self.chamfer_all(shape, distance)
+        } else {
+            Err(GeomError::Backend(
+                "this backend cannot break specific edges".into(),
+            ))
+        }
+    }
 
     /// Sew open shells / faces into a solid (surface → solid path).
     fn sew(&mut self, shapes: &[ShapeId], tolerance: f64) -> GeomResult<ShapeId>;

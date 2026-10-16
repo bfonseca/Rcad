@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use glam::{dvec3, DVec3};
 use rcad_doc::{dvec3_from, ConstructionKind, FeatureKind, Part, RebuildResult};
 use rcad_geom::{BooleanOp, GeometryBackend, Profile2D, ShapeId};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -48,6 +48,9 @@ struct CachedShape {
     hash: u64,
     shape: ShapeId,
     refs: naming::RefMap,
+    /// Kernel edge id -> stable edge reference, so a fillet created later can
+    /// resolve the edges the user picked on this shape.
+    edge_refs: BTreeMap<u64, String>,
 }
 
 /// Shape cache for incremental rebuilds
@@ -73,6 +76,10 @@ impl ShapeCache {
         // Face references of every feature built so far, so a later feature can
         // inherit the names of the body and of its tool.
         let mut named_refs: HashMap<Uuid, naming::RefMap> = HashMap::new();
+        let mut named_edge_refs: HashMap<Uuid, BTreeMap<u64, String>> = HashMap::new();
+        // The feature that produced the current body, so a fillet can resolve the
+        // edge references the user picked on it.
+        let mut current_feature: Option<Uuid> = None;
         let mut history: Vec<(Uuid, ShapeId)> = Vec::new();
         let mut current: Option<ShapeId> = None;
         let mut current_refs: Option<naming::RefMap> = None;
@@ -98,11 +105,19 @@ impl ShapeCache {
                 let cached = self
                     .entries
                     .get(&feature.id)
-                    .map(|cached| (cached.hash, cached.shape, cached.refs.clone()));
-                if let Some((cached_hash, shape_id, refs)) = cached {
+                    .map(|cached| {
+                        (
+                            cached.hash,
+                            cached.shape,
+                            cached.refs.clone(),
+                            cached.edge_refs.clone(),
+                        )
+                    });
+                if let Some((cached_hash, shape_id, refs, edge_refs)) = cached {
                     if cached_hash == hash {
                         named.insert(feature.id, shape_id);
                         named_refs.insert(feature.id, refs.clone());
+                        named_edge_refs.insert(feature.id, edge_refs);
                         history.push((feature.id, shape_id));
                         if is_construction {
                             if feature.visible {
@@ -111,6 +126,7 @@ impl ShapeCache {
                         } else {
                             current = Some(shape_id);
                             current_refs = Some(refs);
+                            current_feature = Some(feature.id);
                             current_visible = feature.visible;
                             result.shapes.push((feature.id, shape_id));
                         }
@@ -129,7 +145,36 @@ impl ShapeCache {
             // Evaluate exactly once. The previous version fell through to a
             // second eval_feature() call in the error branch, which created
             // (and leaked) backend shapes twice for every failing feature.
-            match eval_feature(&feature.kind, current, &named, &history, backend) {
+            // A fillet or chamfer is told which edges to work on, resolved from
+            // its edge set against the body it consumes.
+            let edge_signatures = match &feature.kind {
+                FeatureKind::Fillet { edges, .. } | FeatureKind::Chamfer { edges, .. } => {
+                    let topology = match current {
+                        Some(shape) => backend.topology(shape).unwrap_or_default(),
+                        None => Default::default(),
+                    };
+                    let references = current_feature.and_then(|id| named_edge_refs.get(&id));
+                    let axis = edges.axis().and_then(|axis_id| {
+                        part.features
+                            .iter()
+                            .find(|candidate| candidate.id == axis_id)
+                            .and_then(|candidate| match &candidate.kind {
+                                FeatureKind::Construction { direction, .. } => unit(*direction),
+                                _ => None,
+                            })
+                    });
+                    naming::resolve_edge_set(edges, &topology, references, axis)
+                }
+                _ => Vec::new(),
+            };
+            match eval_feature(
+                &feature.kind,
+                current,
+                &named,
+                &history,
+                backend,
+                &edge_signatures,
+            ) {
                 Ok(Some(new_shape)) => {
                     // Name the new topology before any later feature can consume
                     // it: its faces inherit the reference of the source face
@@ -159,6 +204,7 @@ impl ShapeCache {
                         tool_refs.as_ref(),
                     );
                     let refs = naming::RefMap::new(&topology, &face_refs);
+                    let edge_refs = naming::derive_edge_refs(&topology, &face_refs);
 
                     let previous = self.entries.insert(
                         feature.id,
@@ -166,6 +212,7 @@ impl ShapeCache {
                             hash,
                             shape: new_shape,
                             refs: refs.clone(),
+                            edge_refs: edge_refs.clone(),
                         },
                     );
                     // Release the superseded shape; otherwise the backend
@@ -177,6 +224,7 @@ impl ShapeCache {
                     }
                     named.insert(feature.id, new_shape);
                     named_refs.insert(feature.id, refs.clone());
+                    named_edge_refs.insert(feature.id, edge_refs);
                     history.push((feature.id, new_shape));
                     if is_construction {
                         if feature.visible {
@@ -186,6 +234,7 @@ impl ShapeCache {
                         // Boolean / fillet / transform update the active body.
                         current = Some(new_shape);
                         current_refs = Some(refs);
+                        current_feature = Some(feature.id);
                         current_visible = feature.visible;
                         result.shapes.push((feature.id, new_shape));
                     }
@@ -261,6 +310,12 @@ impl Default for ShapeCache {
     }
 }
 
+/// Unit vector, or `None` when the vector is degenerate.
+fn unit(v: [f64; 3]) -> Option<[f64; 3]> {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    (length > 1e-9).then(|| [v[0] / length, v[1] / length, v[2] / length])
+}
+
 /// Evaluate features in order; each feature consumes the previous body unless noted.
 pub fn rebuild_part(part: &Part, backend: &mut dyn GeometryBackend) -> RebuildResult {
     let mut cache = ShapeCache::new();
@@ -273,6 +328,7 @@ fn eval_feature(
     named: &HashMap<Uuid, ShapeId>,
     history: &[(Uuid, ShapeId)],
     backend: &mut dyn GeometryBackend,
+    edge_signatures: &[String],
 ) -> Result<Option<ShapeId>, String> {
     match kind {
         FeatureKind::Box { size } => backend
@@ -325,17 +381,17 @@ fn eval_feature(
                 .map(Some)
                 .map_err(|e| e.to_string())
         }
-        FeatureKind::Fillet { radius } => {
+        FeatureKind::Fillet { radius, .. } => {
             let base = current.ok_or_else(|| "fillet needs a body".to_string())?;
             backend
-                .fillet_all(base, *radius)
+                .fillet_edges(base, *radius, edge_signatures)
                 .map(Some)
                 .map_err(|e| e.to_string())
         }
-        FeatureKind::Chamfer { distance } => {
+        FeatureKind::Chamfer { distance, .. } => {
             let base = current.ok_or_else(|| "chamfer needs a body".to_string())?;
             backend
-                .chamfer_all(base, *distance)
+                .chamfer_edges(base, *distance, edge_signatures)
                 .map(Some)
                 .map_err(|e| e.to_string())
         }
@@ -605,7 +661,7 @@ mod tests {
     fn box_and_fillet(radius: f64) -> Vec<Feature> {
         vec![
             Feature::new("Base", FeatureKind::Box { size: [10.0, 10.0, 10.0] }),
-            Feature::new("Round", FeatureKind::Fillet { radius }),
+            Feature::new("Round", FeatureKind::Fillet { radius, edges: Default::default() }),
         ]
     }
 
@@ -614,10 +670,10 @@ mod tests {
     /// Boolean, Sew, Loft, Boundary, Thicken and Translate.
     #[test]
     fn feature_hash_covers_all_parameters() {
-        let base = Feature::new("F", FeatureKind::Fillet { radius: 1.0 });
+        let base = Feature::new("F", FeatureKind::Fillet { radius: 1.0, edges: Default::default() });
 
         let mut other_radius = base.clone();
-        other_radius.kind = FeatureKind::Fillet { radius: 2.0 };
+        other_radius.kind = FeatureKind::Fillet { radius: 2.0, edges: Default::default() };
         assert_ne!(
             compute_feature_hash(&base),
             compute_feature_hash(&other_radius),
@@ -740,7 +796,7 @@ mod tests {
         let first_body = *first.shapes.last().unwrap();
         let calls_after_first = backend.fillet_calls;
 
-        part.features[1].kind = FeatureKind::Fillet { radius: 4.0 };
+        part.features[1].kind = FeatureKind::Fillet { radius: 4.0, edges: Default::default() };
         let second = cache.rebuild_part_incremental(&part, &mut backend);
         let second_body = *second.shapes.last().unwrap();
 
@@ -775,7 +831,7 @@ mod tests {
     fn removed_features_release_their_kernel_shapes() {
         let mut backend = MockBackend::default();
         let mut cache = ShapeCache::new();
-        let round = Feature::new("Round", FeatureKind::Fillet { radius: 1.0 });
+        let round = Feature::new("Round", FeatureKind::Fillet { radius: 1.0, edges: Default::default() });
         let round_id = round.id;
         let mut part = part_with(vec![
             Feature::new("Base", FeatureKind::Box { size: [10.0, 10.0, 10.0] }),
