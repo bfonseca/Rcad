@@ -1,12 +1,13 @@
 //! OpenCascade backend powered by [`cadrum`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use cadrum::{DVec3 as CVec3, Edge, Solid, Tessellation};
+use cadrum::{DVec3 as CVec3, Edge, Solid, Surface, SurfaceKind, Tessellation};
 use glam::DVec3;
 use rcad_geom::{
-    BooleanOp, GeomError, GeomResult, GeometryBackend, Profile2D, ShapeId, TriangleMesh,
+    naming, BooleanOp, EdgeFacts, FaceFacts, GeomError, GeomResult, GeometryBackend, NamedEdge,
+    NamedFace, Profile2D, ShapeId, TriangleMesh,
 };
 
 pub struct OcctBackend {
@@ -68,7 +69,12 @@ impl OcctBackend {
         let owned: Vec<Solid> = solids.into_iter().cloned().collect();
         let mesh = Solid::mesh(&owned, Tessellation::default())
             .map_err(|e| GeomError::Backend(e.to_string()))?;
-        Ok(triangle_mesh_from_cadrum(&mesh))
+        let mut result = triangle_mesh_from_cadrum(&mesh);
+        // OpenCascade identifies faces and edges by address, which changes in
+        // every process. The document needs names that do not.
+        result.face_names = stable_face_names(&owned);
+        result.edges = stable_edges(&owned);
+        Ok(result)
     }
 }
 
@@ -98,9 +104,167 @@ fn triangle_mesh_from_cadrum(mesh: &cadrum::Mesh) -> TriangleMesh {
             .collect(),
         indices: mesh.indices.iter().map(|&i| i as u32).collect(),
         // OpenCascade already computes triangle -> face; keep it so a face can
-        // be tagged with a project colour.
+        // be tagged with a project colour. It is the address of the face, so it
+        // only identifies the face inside this process; `mesh_of` fills in the
+        // stable names separately.
         face_ids: mesh.face_ids.clone(),
+        ..Default::default()
     }
+}
+
+/// One line describing the surface a face lies on. The parameters are part of
+/// the face name, because two cylinders of different radii are different faces.
+fn describe_surface(surface: Option<Surface>) -> String {
+    let Some(surface) = surface else {
+        return "other".to_string();
+    };
+    match surface.kind {
+        SurfaceKind::Plane => "plane".to_string(),
+        SurfaceKind::Cylinder { radius } => {
+            format!("cylinder(r{})", naming::length_text(radius))
+        }
+        SurfaceKind::Cone { radius, semi_angle } => format!(
+            "cone(r{},a{})",
+            naming::length_text(radius),
+            naming::length_text(semi_angle)
+        ),
+        SurfaceKind::Sphere { radius } => format!("sphere(r{})", naming::length_text(radius)),
+        SurfaceKind::Torus {
+            major_radius,
+            minor_radius,
+        } => format!(
+            "torus(r{},m{})",
+            naming::length_text(major_radius),
+            naming::length_text(minor_radius)
+        ),
+    }
+}
+
+fn edge_polyline(edge: &Edge) -> Vec<CVec3> {
+    edge.approximation_segments(Tessellation::default())
+}
+
+fn polyline_length(points: &[CVec3]) -> f64 {
+    points.windows(2).map(|pair| (pair[1] - pair[0]).length()).sum()
+}
+
+/// The point halfway along the polyline, measured by arc length.
+fn polyline_midpoint(points: &[CVec3]) -> CVec3 {
+    match points {
+        [] => CVec3::ZERO,
+        [only] => *only,
+        _ => {
+            let half = polyline_length(points) * 0.5;
+            let mut travelled = 0.0;
+            for pair in points.windows(2) {
+                let segment = (pair[1] - pair[0]).length();
+                if travelled + segment >= half {
+                    let t = if segment > 0.0 {
+                        (half - travelled) / segment
+                    } else {
+                        0.0
+                    };
+                    return pair[0] + (pair[1] - pair[0]) * t;
+                }
+                travelled += segment;
+            }
+            points[points.len() - 1]
+        }
+    }
+}
+
+/// Stable name for every face of these solids, keyed by the process-local face
+/// id that also appears in the tessellation.
+fn stable_face_names(solids: &[Solid]) -> BTreeMap<u64, NamedFace> {
+    let mut named: Vec<(u64, NamedFace)> = Vec::new();
+    for solid in solids {
+        for face in solid.iter_face() {
+            let surface = face.surface();
+            let kind = describe_surface(surface);
+            let center = face.center();
+            // Only a planar face has one meaningful normal. On a curved face
+            // the normal at the centre depends on where the projection lands,
+            // which is not a property of the geometry.
+            let normal = match surface.map(|surface| surface.kind) {
+                Some(SurfaceKind::Plane) => {
+                    let (_, normal) = face.project(center);
+                    (normal.length() > 0.0).then(|| normal.normalize().to_array())
+                }
+                _ => None,
+            };
+            let edges: Vec<&Edge> = face.iter_edge().collect();
+            let perimeter = edges.iter().map(|edge| polyline_length(&edge_polyline(edge))).sum();
+            let facts = FaceFacts {
+                kind: &kind,
+                area: face.area(),
+                center: center.to_array(),
+                normal,
+                edge_count: edges.len(),
+                perimeter,
+            };
+            named.push((
+                face.id(),
+                NamedFace {
+                    name: naming::face_signature(&facts),
+                    label: naming::face_label(&facts),
+                },
+            ));
+        }
+    }
+    let mut faces: Vec<NamedFace> = named.iter().map(|(_, face)| face.clone()).collect();
+    naming::disambiguate_faces(&mut faces);
+    named
+        .into_iter()
+        .zip(faces)
+        .map(|((id, _), face)| (id, face))
+        .collect()
+}
+
+/// Stable name for every edge of these solids, with the geometry and polyline
+/// the interface needs to draw and pick them.
+fn stable_edges(solids: &[Solid]) -> Vec<NamedEdge> {
+    let mut edges = Vec::new();
+    for solid in solids {
+        for edge in solid.iter_edge() {
+            let points = edge_polyline(edge);
+            let length = polyline_length(&points);
+            let start = edge.start_point();
+            let end = edge.end_point();
+            let closed = (end - start).length() <= Edge::precision_distance();
+            let midpoint = polyline_midpoint(&points);
+            let kind = if points.len() <= 2 {
+                "line"
+            } else if closed {
+                "circle"
+            } else {
+                "curve"
+            };
+            let facts = EdgeFacts {
+                kind,
+                length,
+                start: start.to_array(),
+                end: end.to_array(),
+                midpoint: midpoint.to_array(),
+                closed,
+            };
+            edges.push(NamedEdge {
+                name: naming::edge_signature(&facts),
+                label: naming::edge_label(&facts),
+                kernel_id: edge.id(),
+                start: start.to_array(),
+                end: end.to_array(),
+                midpoint: midpoint.to_array(),
+                length,
+                closed,
+                points: points
+                    .iter()
+                    .map(|point| [point.x as f32, point.y as f32, point.z as f32])
+                    .collect(),
+            });
+        }
+    }
+    naming::disambiguate_edges(&mut edges);
+    edges
 }
 
 impl GeometryBackend for OcctBackend {
@@ -363,5 +527,109 @@ mod tests {
         );
         let distinct: std::collections::HashSet<u64> = mesh.face_ids.iter().copied().collect();
         assert_eq!(distinct.len(), 6, "a cube has six faces");
+    }
+
+    fn box_mesh() -> TriangleMesh {
+        let mut backend = OcctBackend::new();
+        let id = backend.box_solid(dvec3(10.0, 20.0, 30.0)).unwrap();
+        backend.tessellate(id).unwrap()
+    }
+
+    fn face_names(mesh: &TriangleMesh) -> std::collections::BTreeSet<String> {
+        mesh.face_names
+            .values()
+            .map(|face| face.name.clone())
+            .collect()
+    }
+
+    fn edge_names(mesh: &TriangleMesh) -> std::collections::BTreeSet<String> {
+        mesh.edges.iter().map(|edge| edge.name.clone()).collect()
+    }
+
+    #[test]
+    fn a_box_has_six_named_faces_and_twelve_named_edges() {
+        let mesh = box_mesh();
+
+        assert_eq!(mesh.face_names.len(), 6, "one name per cube face");
+        assert_eq!(face_names(&mesh).len(), 6, "the six names are distinct");
+        assert_eq!(mesh.edges.len(), 12, "a cube has twelve edges");
+        assert_eq!(edge_names(&mesh).len(), 12, "the twelve names are distinct");
+
+        for face in mesh.face_names.values() {
+            assert!(
+                face.label.contains("plane"),
+                "a cube face is a plane: {}",
+                face.label
+            );
+        }
+        for edge in &mesh.edges {
+            assert!(edge.name.starts_with("E:"), "edge name: {}", edge.name);
+            assert_eq!(edge.points.len(), 2, "a cube edge is a single line");
+            assert!((edge.length - 10.0).abs() < 1e-9
+                || (edge.length - 20.0).abs() < 1e-9
+                || (edge.length - 30.0).abs() < 1e-9);
+        }
+    }
+
+    /// The whole point of the change: what identifies a face must be the
+    /// geometry, not the kernel address. Two independent builds of the same box
+    /// produce the same names, and the names carry the face areas (200, 300 and
+    /// 600 mm2 on this box) rather than anything address-like.
+    #[test]
+    fn names_are_derived_from_the_geometry_and_repeat_across_builds() {
+        let first = box_mesh();
+        let second = box_mesh();
+
+        assert_eq!(face_names(&first), face_names(&second));
+        assert_eq!(edge_names(&first), edge_names(&second));
+
+        let names = face_names(&first);
+        for area in ["a200.0000", "a300.0000", "a600.0000"] {
+            assert!(
+                names.iter().any(|name| name.contains(area)),
+                "no face carries {area}: {names:?}"
+            );
+        }
+        for name in &names {
+            assert!(
+                !name.contains("1398"),
+                "a raw TShape address leaked into a face name: {name}"
+            );
+        }
+    }
+
+    /// Every triangle must point at a face that has a stable name, otherwise
+    /// the viewport would silently fall back to grey.
+    #[test]
+    fn every_triangle_face_id_has_a_stable_name() {
+        let mesh = box_mesh();
+        let distinct: std::collections::HashSet<u64> = mesh.face_ids.iter().copied().collect();
+        for face_id in distinct {
+            assert!(
+                mesh.face_names.contains_key(&face_id),
+                "triangle face id {face_id} has no stable name"
+            );
+        }
+        for triangle in 0..mesh.triangle_count() {
+            assert!(mesh.face_name(triangle).is_some());
+        }
+    }
+
+    /// A drilled hole adds a cylindrical face, and its name says so.
+    #[test]
+    fn a_cylindrical_face_is_named_as_one() {
+        let mut backend = OcctBackend::new();
+        let block = backend.box_solid(dvec3(40.0, 30.0, 8.0)).unwrap();
+        let tool = backend.cylinder(5.0, 20.0).unwrap();
+        let drilled = backend.boolean(block, tool, BooleanOp::Subtract).unwrap();
+        let mesh = backend.tessellate(drilled).unwrap();
+
+        assert!(
+            mesh.face_names
+                .values()
+                .any(|face| face.name.starts_with("F:cylinder(r5.0000)")),
+            "the bore face should be named after its cylinder: {:?}",
+            face_names(&mesh)
+        );
     }
 }

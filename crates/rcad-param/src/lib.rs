@@ -594,6 +594,7 @@ mod tests {
             normals: vec![[0.0, 0.0, 1.0]; 3],
             indices: vec![0, 1, 2],
             face_ids: vec![face_id],
+            ..Default::default()
         }
     }
 

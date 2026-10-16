@@ -3,9 +3,15 @@
 //! Application code talks only to this crate. Concrete kernels live in
 //! `rcad-occt` (OpenCascade via cadrum) and optionally `rcad-truck`.
 
+use std::collections::BTreeMap;
+
 use glam::{DVec3, Vec3};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub mod naming;
+
+pub use naming::{EdgeFacts, FaceFacts, NamedEdge, NamedFace};
 
 /// Opaque handle to a BREP shape owned by a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -16,7 +22,8 @@ pub struct ShapeId(pub u64);
 /// in the document can never match one by accident.
 pub const NO_FACE_ID: u64 = u64::MAX;
 
-/// Triangle mesh for viewport display and physics proxies.
+/// Triangle mesh for viewport display and physics proxies, plus the topology
+/// names that let a document refer to its faces and edges.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TriangleMesh {
     pub positions: Vec<[f32; 3]>,
@@ -24,9 +31,18 @@ pub struct TriangleMesh {
     pub indices: Vec<u32>,
     /// Kernel face id for every triangle, one entry per triangle
     /// (indices.len() / 3). Empty when the backend does not report face ids,
-    /// in which case no triangle can be colour-matched.
+    /// in which case no triangle can be colour-matched. Process-local: use
+    /// [`TriangleMesh::face_name`] for anything that is stored.
     #[serde(default)]
     pub face_ids: Vec<u64>,
+    /// Stable, geometry-derived name for every distinct kernel face id in this
+    /// mesh. This is what a document stores, and it is the same in every
+    /// process for the same geometry.
+    #[serde(default)]
+    pub face_names: BTreeMap<u64, NamedFace>,
+    /// Topology edges of the shape, with their stable names and polylines.
+    #[serde(default)]
+    pub edges: Vec<NamedEdge>,
 }
 
 impl TriangleMesh {
@@ -43,6 +59,39 @@ impl TriangleMesh {
         self.face_ids.get(triangle).copied()
     }
 
+    /// Stable name of the face triangle `triangle` belongs to.
+    ///
+    /// `None` when the backend did not attribute the triangle (construction
+    /// geometry carries [`NO_FACE_ID`]) or did not report face ids at all.
+    pub fn face_name(&self, triangle: usize) -> Option<&str> {
+        self.face(triangle).map(|face| face.name.as_str())
+    }
+
+    /// Human label of the face triangle `triangle` belongs to.
+    pub fn face_label(&self, triangle: usize) -> Option<&str> {
+        self.face(triangle).map(|face| face.label.as_str())
+    }
+
+    fn face(&self, triangle: usize) -> Option<&NamedFace> {
+        let face_id = self.face_id(triangle)?;
+        if face_id == NO_FACE_ID {
+            return None;
+        }
+        self.face_names.get(&face_id)
+    }
+
+    /// Whether the mesh contains a face with this stable name.
+    pub fn has_face_name(&self, name: &str) -> bool {
+        self.face_names
+            .values()
+            .any(|face| face.name == name)
+    }
+
+    /// The edge with this stable name, if the shape has it.
+    pub fn edge_by_name(&self, name: &str) -> Option<&NamedEdge> {
+        self.edges.iter().find(|edge| edge.matches(name))
+    }
+
     /// Make `face_ids` as long as the triangle list, tagging any triangle the
     /// backend did not attribute with [`NO_FACE_ID`]. Keeping the two lists the
     /// same length means the viewport can index one by the other.
@@ -57,7 +106,9 @@ impl TriangleMesh {
     ///
     /// Construction geometry is appended to the solid display mesh, and its
     /// face ids come from different shapes: tagging it with [`NO_FACE_ID`]
-    /// keeps it out of the face-colour lookup.
+    /// keeps it out of the face-colour lookup. Its names and edges are
+    /// deliberately not merged either, so a construction plane can never be
+    /// mistaken for a face of the model.
     pub fn append(&mut self, other: &TriangleMesh, face_id: u64) {
         self.normalize_face_ids();
         let offset = self.positions.len() as u32;
@@ -176,6 +227,7 @@ mod tests {
             normals: vec![[0.0, 0.0, 1.0]; 3],
             indices: vec![0, 1, 2],
             face_ids: face.into_iter().collect(),
+            ..Default::default()
         }
     }
 
