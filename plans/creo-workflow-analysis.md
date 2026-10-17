@@ -4,6 +4,12 @@
 
 This document provides a comprehensive analysis of the PTC Creo Parametric working method and maps it to the current rcad codebase. It identifies gaps, required improvements, and creates a detailed implementation plan to clone Creo's working method while respecting rcad's architecture (modular crates, rcad.toml config, no top ribbon, vertical toolbar + adaptive history overlay).
 
+> **Atualização (2026-10-17):** este documento é um **snapshot de 2026-10-12**. A tabela §2.1
+> sobrestima o estado de vários componentes e a §2.2 lista lacunas que entretanto foram
+> resolvidas. Para o estado real e para o ciclo em curso, ver
+> [foundation-plan.md](foundation-plan.md), a secção “Reconciliação de estado” em
+> [implementation-tasks.md](implementation-tasks.md) e o `README.md`.
+
 ---
 
 ## 1. PTC Creo Parametric Working Method - Core Concepts
@@ -157,33 +163,33 @@ Each mate = constraint equation reducing DOF between components
 | Component | Status | Details |
 |-----------|--------|---------|
 | **Project Structure** | ✅ Complete | Modular crates, Cargo workspace, MessagePack serialization |
-| **rcad.toml Config** | ✅ Defined | Tolerances, surface colors, external tables, startup, trail log, MCP |
-| **Geometry Kernel** | ✅ Complete | OCCT via cadrum, trait-based (rcad-geom), box/cylinder/extrude/revolve/boolean/fillet/chamfer/sew/loft/boundary/thicken |
+| **rcad.toml Config** | ⚠️ Partial | Loaded by the app; surface colours, recent projects and auto-open work. Tolerances/globals/functions are parsed but not applied; external tables, trail log and MCP sections are not wired |
+| **Geometry Kernel** | ⚠️ Partial | OCCT via cadrum: box/cylinder/extrude/revolve/boolean/fillet/chamfer/sew/thicken are real; loft/boundary are approximate (extrude of the first profile); shell/sweep/hole/pattern/mirror/draft/rib are absent. Profiles are polygonal (foundation B) |
 | **Parametric Rebuild** | ✅ Complete | rcad-param rebuild_part(), feature evaluation order, dirty tracking |
-| **Feature Tree** | ✅ Basic | Feature struct with id, name, kind, suppressed flag |
+| **Feature Tree** | ⚠️ Basic | Feature struct plus the overlay UI (suppress, context menu, markers, drag-reorder). `parent_features`/`child_features` are never computed and Insert Here/Rollback are markers only |
 | **Sketcher** | ✅ Advanced | Points, lines, circles, arcs, splines, 14 constraint types, Intent Manager (weak/strong), DOF analysis, constraint status, trim/extend/offset/mirror/pattern |
-| **Skeletons** | ✅ Complete | Skeleton parts, Publish Geometry, Copy Geometry, External Ref status (UpToDate/OutOfDate/Broken) |
-| **Underlay** | ✅ Complete | Image import, scale calibration (2 pts + distance), opacity, lock, rotation, snap-to-feature, world↔pixel |
-| **Assembly** | ✅ Foundation | Component instances, basic mates (coincident/concentric/distance), extended mates, sub-assemblies, exploded views, solver (iterative + slvs placeholder) |
+| **Skeletons** | ⚠️ Crate only | `rcad-skeleton` exposes Skeleton parts, Publish/Copy Geometry and External Ref status, but it is not connected to the app UI |
+| **Underlay** | ⚠️ Crate only | `rcad-underlay` models the image, scale calibration and world↔pixel; the viewport does not draw underlays and there is no import dialog |
+| **Assembly** | ⚠️ Crate only | Component instances, 3 persisted mate kinds, extended-mate APIs, exploded views and an iterative solver (origin-based, not B-Rep). No assembly UI, rendering or B-Rep mates |
 | **Undo/Redo** | ✅ Complete | UndoStack with project cloning |
 | **Keyboard Shortcuts** | ✅ Complete | Comprehensive shortcut system with F1 dialog |
-| **Viewport** | ✅ Basic | egui + wgpu, orbit/pan/zoom, standard views, picking |
+| **Viewport** | ⚠️ Basic | egui + wgpu, orbit/pan/zoom, standard views, CPU picking. The 3D solids are drawn with `egui::Painter` (no depth buffer); the native WGPU pipeline is foundation A |
 
 ### 2.2 What's Missing (Gaps vs Creo)
 | Area | Gap | Priority |
 |------|-----|----------|
-| **UI Layout** | Top menu bar exists; no vertical toolbar; no adaptive history overlay with blur | 🔴 Critical |
-| **Feature Tree UX** | Basic list; no Parent/Child visualization; no Insert Here mode; no drag-reorder; no rollback | 🔴 Critical |
-| **rcad.toml Integration** | Config file exists but not loaded/used in rcad-app | 🔴 Critical |
-| **Surface Color Rendering** | Colors defined in rcad.toml but not applied in viewport | 🟠 High |
+| **UI Layout** | Vertical toolbar and history overlay exist; the top menu bar is still there, the overlay has no adaptive blur, and Insert Here/Rollback are not honoured by the rebuild | 🔴 Critical |
+| **Feature Tree UX** | Overlay exists with drag-reorder and markers, but Parent/Child is never computed, Insert Here/Rollback are not honoured by the rebuild, and drag-reorder has no dependency validation | 🔴 Critical |
+| **rcad.toml Integration** | Loaded and used for colours/recent projects; tolerances, globals, functions and external tables are not applied | 🟠 High |
+| **Surface Color Rendering** | Done (face colours resolved through stable names + project manifest) | ✅ Done |
 | **External Tables** | rcad-table crate exists but not connected to features/parts | 🟠 High |
 | **Trail Logging** | Defined in rcad.toml but not implemented | 🟠 High |
 | **File Associations** | Extensions defined but not registered | 🟡 Medium |
-| **MCP Server** | Crate exists but minimal implementation | 🟡 Medium |
-| **Project Initialization** | No recent projects, no auto-create on first run | 🟡 Medium |
+| **MCP Server** | Implemented on stdio with 13 tools and 3 resources; no assembly tools, prompts or TCP | 🟡 Medium |
+| **Project Initialization** | Done: project gate, recent projects and auto-open; OS file associations still missing | ✅ Done |
 | **Reference Geometry in Sketch** | Projection exists but UI for "One-Side/Both-Sides" missing | 🟡 Medium |
 | **Dashboard-style Feature Creation** | Features added via sidebar buttons, not contextual dashboard | 🟡 Medium |
-| **Assembly Mate Solver** | Basic solver only; needs robust slvs integration | 🟡 Medium |
+| **Assembly Mate Solver** | Iterative solver over instance origins, not B-Rep references; only 3 mate kinds persisted; no UI | 🟡 Medium |
 | **Feature Edit Definition** | No dialog to edit feature parameters after creation | 🟡 Medium |
 | **Suppress/Resume UX** | Basic suppress exists but no visual state in tree | 🟢 Low |
 | **Rollback** | Not implemented | 🟢 Low |
@@ -1703,6 +1709,10 @@ Store in Part.published[]               Select published entities
 ---
 
 ## 6. Implementation Priority & Dependencies
+
+> **Nota (2026-10-17):** as prioridades 1–3 desta lista (toolbar/overlay, rcad.toml, feature
+> tree) estão em grande parte feitas; o próximo ciclo é a **Fundação** (render → curvas
+> analíticas → referências/pai-filho), descrita em [foundation-plan.md](foundation-plan.md).
 
 ### Priority 1 (Must Have - Core UX)
 1. **Vertical Toolbar + Adaptive History Overlay** (UI-1)

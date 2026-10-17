@@ -3,17 +3,17 @@ name: CAD Rust rcad
 overview: Plano para o CAD paramétrico open-source rcad em Rust (desktop-first), no repositório GitHub já criado, modular, reutilizando kernels e solvers OSS existentes, com MVP utilizável em ~6 meses focado em modelação + skeletons + engenharia reversa por imagem, e roadmap pós-MVP para assemblagens, mecanismos, colisões, timeline e CAE.
 todos:
   - id: scaffold-workspace
-     content: Clonar https://github.com/bfonseca/Rcad em ~/Projectos/Rcad; workspace Cargo, crates modulares e CI basico
-     status: completed
-   - id: fase-a-viewport-occt
-      content: "Fase A: egui+wgpu viewport, rcad-doc, integracao OCCT tessellate + STEP/STL"
-      status: completed
-    - id: fase-b-parametric-skeleton
-      content: "Fase B: sketch+constraints, features solidas/superficies, feature tree, skeletons"
-      status: completed
-  - id: fase-c-underlay
-    content: "Fase C: import imagem com escala, underlay no plano de sketch"
+    content: Clonar https://github.com/bfonseca/Rcad em ~/Projectos/Rcad; workspace Cargo, crates modulares e CI basico
     status: completed
+  - id: fase-a-viewport-occt
+    content: "Fase A: egui+wgpu viewport, rcad-doc, integracao OCCT tessellate + STEP/STL"
+    status: completed
+  - id: fase-b-parametric-skeleton
+    content: "Fase B: sketch+constraints, features solidas/superficies, feature tree, skeletons (multi-body ainda nao)"
+    status: completed
+  - id: fase-c-underlay
+    content: "Fase C: import imagem com escala, underlay no plano de sketch (crate rcad-underlay apenas; nao ligada a app)"
+    status: pending
   - id: fase-d-assembly
     content: "Fase D: assemblagens com mates basicos via rust_slvs"
     status: pending
@@ -24,11 +24,11 @@ todos:
     content: Reservar APIs/crates para mechanism, collision, animation, CAE (pos-6-meses)
     status: pending
   - id: ui-vertical-toolbar
-    content: "UI: barra vertical dockable (icones/texto) + arvore historico overlay com blur wgpu"
-    status: pending
+    content: "UI: barra vertical dockable (icones/texto) feita; falta overlay adaptativo com blur e remover a barra de menus"
+    status: in progress
   - id: rcad-toml-integration
-    content: "Integracao rcad.toml no rcad-app (parser tolerancias, cores RGB, tabelas externas)"
-    status: pending
+    content: "Integracao rcad.toml no rcad-app: manifesto lido, cores aplicadas, recentes/auto-open feitos; tolerancias, variaveis, funcoes e tabelas ainda nao aplicadas"
+    status: in progress
   - id: surface-color-rendering
     content: "Aplicar mapeamento de cores RGB por tipo de superficie no viewport"
     status: completed
@@ -37,11 +37,53 @@ todos:
     status: pending
   - id: project-model
     content: "Modelo de projeto: pasta do projeto, tolerancias, variaveis e funcoes globais; sem projeto ativo nao se cria peca/assembly/skeleton"
-    status: pending
+    status: completed
   - id: project-color-scheme
     content: "Esquema de cores: nomes/ids definidos nas configuracoes da app (instalacao), valores RGB definidos por projeto em rcad.toml"
     status: completed
+  - id: foundation-render
+    content: "Fundacao A: viewport WGPU com depth/MSAA/sombreado/arestas e tessellacao configuravel (plans/foundation-plan.md)"
+    status: pending
+  - id: foundation-analytic-geometry
+    content: "Fundacao B: Profile2D analitico com loops e furos, migracao de documentos e primitivas OCCT (plans/foundation-plan.md)"
+    status: pending
+  - id: foundation-references
+    content: "Fundacao C: grafo pai/filho, Insert Here/Rollback reais, edit definition e roles em falta (plans/foundation-plan.md)"
+    status: pending
+  - id: foundation-performance
+    content: "Fundacao D: baseline de performance, picking BVH/GPU, cache de tessellacao e orcamentos"
+    status: pending
 isProject: false
+
+---
+
+## Estado real (2026-10-17) — ler primeiro
+
+> **O plano ativo é o ciclo de fundação:** [plans/foundation-plan.md](plans/foundation-plan.md)
+> (A render → B curvas analíticas → C referências/pai-filho, com D performance a acompanhar).
+> Este documento continua a ser o **âmbito de produto de longo prazo**. As marcações ✅ do
+> corpo abaixo são **históricas** e sobrestimam o estado em vários pontos; a tabela seguinte é
+> a fotografia real no commit `b898185`.
+
+| Área | Estado real |
+|---|---|
+| Projeto, `rcad.toml`, recentes, auto-open, cores por projeto | ✅ Feito. Tolerâncias, variáveis globais, funções e tabelas externas são lidas mas **ainda não aplicadas** |
+| Barra vertical + painel de histórico | ✅ Feito (tabs, colapsar, ícones/texto, dock, suppress, Insert Here/Rollback **marcadores**, drag-reorder, parâmetros/relações). ❌ Falta o overlay com blur, remover a barra de menus e honrar Insert Here/Rollback no rebuild |
+| Sketcher | ✅ Feito: desenho com rato, constraints, dimensões, DOF por rank, tabela de constraints, Free DOF, DXF/SVG, undo |
+| Nomes estáveis e reparação de referências | ✅ Feito (com catálogo de roles ainda incompleto nalgumas features) |
+| Underlay | ⚠️ Só crate (`rcad-underlay`); não está ligada à app |
+| Skeletons | ⚠️ Só crate (`rcad-skeleton`); sem UI |
+| Assembly | ⚠️ Só crate; solver alinha origens, não B-Rep; só 3 mates persistem; sem UI |
+| Renderer 3D | ❌ Ainda é o `egui::Painter` (sem depth); é o Bloco A da fundação |
+| Curvas/furos no sólido | ❌ `Profile2D` polígonal; círculos/arcos não chegam ao kernel; Bloco B |
+| Pai/filho, Insert Here/Rollback reais, Edit Definition | ❌ Parcial; Bloco C |
+| Multi-body | ❌ Campos no documento, sem uso |
+| Desenho 2D, trail log, associações de ficheiros | ❌ Não implementados |
+
+### Fase A/B/C do corpo (histórico)
+
+As secções “Fase A/B/C” abaixo dizem **CONCLUÍDA**; isso refere-se ao núcleo de modelação e
+sketch da altura, não ao estado atual. Usar a tabela acima como fonte de verdade.
 
 ---
 ## Confirmação do âmbito

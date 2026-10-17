@@ -28,6 +28,11 @@ isProject: false
 
 # rcad — CAD paramétrico open-source em Rust
 
+> **Histórico (2026-10-12).** Este ficheiro é o plano inicial do Cursor. O plano ativo do
+> próximo ciclo é [plans/foundation-plan.md](../../plans/foundation-plan.md) (render →
+> curvas analíticas → referências/pai-filho). Ver também a “Reconciliação de estado” em
+> [plans/implementation-tasks.md](../../plans/implementation-tasks.md).
+
 ## Confirmação do âmbito
 
 

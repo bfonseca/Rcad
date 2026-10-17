@@ -8,15 +8,18 @@ rcad is a parametric CAD application designed for mechanical engineering and pro
 
 - **Parametric modeling** - Feature-based design with constraints
 - **Sketcher** - 2D constraint-based sketching with Intent Manager (weak/strong dimensions)
-- **3D operations** - Extrude, revolve, boolean operations, fillet/chamfer, sew/thicken, loft, boundary
-- **Skeletons (Top-Down)** - Publish/Copy Geometry workflow à la Creo
-- **Image Underlay** - Scaled image tracing for reverse engineering
-- **Assembly** - Multi-part assemblies with constraints (in progress)
-- **Modern UI** - Built with egui for fast, responsive interface (vertical toolbar + adaptive history overlay planned)
+- **3D operations** - Extrude and revolve (with sketch placement), boolean (backend + MCP),
+  fillet/chamfer by edge set, sew/thicken; loft/boundary are approximate for now
+- **Skeletons (Top-Down)** - Publish/Copy Geometry model exists in `rcad-skeleton` (not wired to the UI yet)
+- **Image Underlay** - Scaled-image model exists in `rcad-underlay` (not drawn yet)
+- **Assembly** - `rcad-assembly` crate only: no assembly UI, rendering or B-Rep mates yet
+- **Modern UI** - egui with a vertical toolbar and a model-tree overlay; the 3D viewport still
+  uses egui's 2D painter, and a native WGPU pipeline is the current foundation priority
 - **Cross-platform** - Runs on Linux, macOS, and Windows
-- **MCP Server** - AI integration via Model Context Protocol (planned)
-- **Project manifest** - `rcad.toml` for tolerances, surface colors, external tables
-- **Trail logging** - JSON Lines audit trail for debugging/replay
+- **MCP Server** - `rcad-mcp` (stdio, tools + resources; prompts and TCP planned)
+- **Project manifest** - `rcad.toml`: the app loads it, applies surface colours and keeps recent
+  projects; tolerances, global variables and project functions are parsed but not applied yet
+- **Trail logging** - defined in `rcad.toml`, not implemented yet
 
 ## Architecture
 
@@ -59,7 +62,7 @@ rcad/
 
 ### Prerequisites
 
-- Rust 1.75+ (install via [rustup](https://rustup.rs/))
+- Rust 1.85+ (install via [rustup](https://rustup.rs/)) — the workspace uses edition 2024
 - System dependencies for OCCT:
   - **Ubuntu/Debian**: `sudo apt-get install libocct-dev libglib2.0-dev`
   - **Fedora**: `sudo dnf install occt-devel glib2-devel`
@@ -115,31 +118,44 @@ cargo clippy --workspace
 - Constraint solving with iterative relaxation + SolveSpace backend (optional)
 
 ### Part Design
-- Extrude (with draft, offset, symmetric)
-- Revolve
-- Fillet/Chamfer
-- Shell
-- Boolean operations (union, cut, intersect)
-- Patterns (linear, circular)
-- Mirror
-- **Surfaces**: Extrude Surface, Loft, Boundary, Sew, Thicken (surface → solid)
+Implemented and wired to the UI:
+- Extrude and Revolve with a sketch plane and association with the Sketch feature
+- Fillet/Chamfer by edge set, with the Creo rule modes (References / All / Outer / Inner /
+  Vertical / Horizontal) and a dihedral angle computed in the kernel
+- Box primitive
 
-### Skeletons (Top-Down Design)
+Implemented in the backend/model but **not yet exposed in the UI** (the toolbar buttons are
+still `TODO` stubs):
+- Boolean operations (union, cut, intersect)
+- Extrude Surface, Sew, Thicken
+- Loft and Boundary are currently **approximate** (they extrude the first profile); real
+  loft/sweep belongs to the foundation cycle
+
+**Not implemented yet:** Shell, Draft, Hole, Pattern, Mirror, Rib, Sweep, Cosmetic Thread.
+The foundation plan (`plans/foundation-plan.md`) covers the viewport, real analytic curves and
+the reference/dependency layer before these features are added.
+
+### Skeletons (Top-Down Design) — crate only
+The `rcad-skeleton` crate exposes the Publish/Copy Geometry model and the
+UpToDate / OutOfDate / Broken status, but it is **not connected to the application UI yet**.
 - Create skeleton parts with datum planes, axes, points, curves
 - **Publish Geometry** - Select and name reference entities
 - **Copy Geometry** - Consume published geometry in child parts with associativity
 - **External References** - Visual status: UpToDate / OutOfDate / Broken
 
-### Image Underlay (Reverse Engineering)
+### Image Underlay (Reverse Engineering) — crate only
+The `rcad-underlay` crate models the image, plane, scale calibration and world↔pixel
+conversions, but the viewport does not draw underlays yet and there is no import dialog.
 - Import PNG/JPEG/SVG as underlay on sketch plane
 - Scale calibration: two points + real distance
 - Opacity, lock, rotation, display order
 - Snap-to-feature for manual tracing
 
-### Assembly (In Progress)
-- Mate constraints (coincident, concentric, distance)
-- Part instances with transformations
-- Hierarchy management
+### Assembly — crate only (not wired)
+`rcad-assembly` has component instances, transforms and an iterative mate solver, but no
+assembly UI, no assembly rendering, and only three mate kinds are persisted in the document
+(Coincident, Concentric, Distance). The official PTC 11 constraints are not implemented yet.
+The solver currently aligns instance origins, not B-Rep references.
 
 ### Import/Export
 - STEP (AP203/AP214/AP242) via OCCT
@@ -259,25 +275,39 @@ extra SDK or SVG rasteriser is needed.
 
 ## Roadmap
 
-See [instructions.md](instructions.md) for detailed plan and milestones.
+The **active plan is the foundation cycle**: [plans/foundation-plan.md](plans/foundation-plan.md).
+It covers, in order, the WGPU viewport, real analytic curves/holes in the kernel, and the
+reference/parent-child dependency layer, with performance measured throughout. Features such as
+Hole, Pattern, Shell, Mirror, assembly and drawings are deliberately postponed until that base
+is solid.
 
-### Current Status (Phase E - In Progress)
-- [x] Keyboard shortcuts system
-- [x] Shortcuts dialog (F1)
-- [x] Standard view shortcuts (1-7, Home)
-- [x] Core modeling (sketch, features, skeletons, underlay)
-- [x] Project manifest (rcad.toml)
-- [x] STEP/STL export through OCCT (wired to the real kernel)
-- [x] MCP server (`rcad-mcp`) with modelling tools and resources
-- [x] CI workflow (`.github/workflows/ci.yml`)
-- [x] Committed icon sprites so a fresh clone builds
-- [ ] Assembly mates (Phase D)
-- [ ] UI polish: vertical toolbar + adaptive history overlay
-- [ ] rcad.toml integration in app
-- [ ] Trail logging (JSON Lines)
-- [ ] File extension registration
-- [ ] Documentation and example models
-- [ ] `good first issue` labels per crate
+See [instructions.md](instructions.md) for the long-term product scope and
+[plans/implementation-tasks.md](plans/implementation-tasks.md) for the historical task backlog
+and its state reconciliation.
+
+### Current Status (verified 2026-10-17, commit `b898185`)
+- [x] Project gate and `rcad.toml` manifest (project folder, per-project surface colours,
+      recent projects, auto-open last; tolerances, global variables and project functions are
+      parsed and edited but not applied yet)
+- [x] Vertical toolbar with tabs, collapse, icon-only mode and left/right docking
+- [x] Model tree overlay with search, context menu, suppression, visibility, Insert Here /
+      Rollback markers, drag-reorder and Parameters/Relations dialog
+- [x] Sketch editor: mouse drawing, constraints, dimensions, DOF analysis, constraint table,
+      free-DOF highlight, DXF/SVG import, sketch undo/redo
+- [x] Stable face/edge names, persistent references, repair list and substitution
+- [x] STEP/STL export through OCCT; STEP import in the kernel (not in the UI)
+- [x] MCP server (`rcad-mcp`, stdio, 13 tools + 3 resources; no prompts/TCP)
+- [x] CI workflow (`.github/workflows/ci.yml`): build + test blocking, clippy/fmt advisory
+- [x] 280 tests passing and a warning-free `cargo check --workspace --all-targets`
+- [ ] **3D viewport rendered with WGPU** (depth, MSAA, shaded-with-edges) — foundation A
+- [ ] **Analytic sketch curves and holes reaching the B-Rep** — foundation B
+- [ ] **Parent/child dependency graph, real Insert Here/Rollback, Edit Definition** — foundation C
+- [ ] Adaptive history overlay with blur (the overlay is solid today)
+- [ ] Assembly UI and the 11 PTC placement constraints
+- [ ] Underlay / skeleton / external-table integration in the app
+- [ ] Trail logging (JSON Lines) and OS file associations
+- [ ] Drawings 2D (HLR, associative dimensions, GD&T)
+- [ ] Documentation images (`docs/`) and `good first issue` labels per crate
 
 ### Post-MVP
 - [ ] Mechanisms and motion (`rcad-mechanism`)

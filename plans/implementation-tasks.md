@@ -2,13 +2,48 @@
 
 ---
 
+> **Plano ativo (2026-10-17):** o próximo ciclo é a **Fundação** — ver
+> [foundation-plan.md](foundation-plan.md) (A render → B geometria analítica →
+> C referências/pai-filho, com D performance a acompanhar). O bloco de handover
+> abaixo é o registo da última sessão de sketch; mantém-se como histórico e não
+> substitui o plano de fundação.
+>
+> **Antes de trabalhar numa fase, lê a “Reconciliação de estado”:** há checkboxes
+> abertos que já estão implementados e fases marcadas como pendentes que já estão
+> feitas.
+
+---
+
+## Reconciliação de estado (2026-10-17, commit `b898185`)
+
+| Fase | Estado real |
+|---|---|
+| Phase 0 — Project Model | ⚠️ **Parcial**: gate de projeto, manifesto, recentes, auto-open e cores feitos; tolerâncias/variáveis/funções/tabelas não aplicadas; associações de ficheiros não |
+| Phase 1 — Vertical toolbar + history overlay | ⚠️ **Parcial**: toolbar com tabs/dock/colapso e painel de histórico com suppress/contexto/Insert Here/Rollback **marcadores**/drag-reorder feitos; falta blur adaptativo, remover a barra de menus e honrar Insert Here/Rollback no rebuild |
+| Phase 2 — rcad.toml | ⚠️ **Parcial**: manifesto lido/gravado, Options dialog, cores e recentes feitos; tolerâncias não passam ao solver/kernel, tabelas externas não carregam, sem watcher, sem spawn MCP |
+| Phase 3 — Feature tree | ⚠️ **Parcial**: campos de dados e diálogo Parameters/Relations feitos; `parent_features`/`child_features` nunca calculados; rename/copy/paste/delete-com-deps e edit-definition geométrico não |
+| Phase 4 — Intent Manager & Sketch | ✅ **Quase completa**: 36 itens marcados; faltam posição/orientação do texto de cota, region detection, projection modes e setas de DOF por entidade |
+| Phase 5 — Skeleton workflow | ❌ **Crate only**: `rcad-skeleton` existe mas sem UI; tarefas por fazer |
+| Phase 6 — Surface colors | ✅ **Resolvida por outro desenho**: cores por face com nomes estáveis (secção 0.3 “Resolved”); os itens abaixo descrevem o desenho antigo (`Body.surface_type`) e são históricos |
+| Phase 7 — External tables | ❌ Pendente: `rcad-table` lê CSV/XLSX mas não está ligada a features/partes |
+| Phase 8 — Trail logging | ❌ Pendente: `trail_log` existe no TOML mas não há logger |
+| Phase 9 — Project init & file associations | ⚠️ **Parcial**: gate de projeto, recentes e auto-open feitos; associações OS não |
+| Phase 10 — MCP | ⚠️ **Parcial**: 13 tools + 3 resources em stdio; sem `mcp_rs`, prompts, TCP ou tools de assembly |
+
+> Regra: os checkboxes abaixo mantêm-se como **registo histórico** até serem
+> reconciliados individualmente. A fonte de verdade do próximo ciclo é
+> [foundation-plan.md](foundation-plan.md).
+
+---
+
 ## ESTADO E PRÓXIMOS PASSOS (handover - ler primeiro)
 
 **Arranque sugerido numa sessão nova (basta colar isto):**
 
 > No repositório /home/bruno/Documentos/deepseek-harness/default-workspace/rcad,
-> lê o bloco de handover no topo de plans/implementation-tasks.md e continua o
-> trabalho a partir dos "Próximo, por esta ordem". No fim corre
+> lê a “Reconciliação de estado” e o plano ativo plans/foundation-plan.md. O próximo
+> ciclo é a Fundação (A render → B geometria analítica → C referências/pai-filho, com D
+> performance); começa pelo A0 salvo instrução contrária do utilizador. No fim corre
 > cargo test --workspace e cargo check --workspace --all-targets (zero avisos),
 > e faz commit em main e push. Vai dizendo o que fizeste e o que ficou por fazer.
 
@@ -60,6 +95,9 @@ dropdowns de retângulo/círculo/polígono, ferramenta de dimensões dinâmica c
 colocação do texto e orientação, polyline com snap e fecho, saída por clique
 direito, cruz só nas ferramentas de construção e shortcuts calados enquanto se
 escreve.
+
+> **Nota (2026-10-17):** esta lista era o próximo passo do ciclo de sketch. O próximo ciclo é a
+> **Fundação** ([foundation-plan.md](foundation-plan.md)); a lista abaixo fica como backlog de sketch.
 
 **Próximo, por esta ordem:**
 
@@ -234,7 +272,7 @@ Based on the approved plan in `plans/creo-workflow-analysis.md`, this document b
 - [ ] **4.2.2** Enhance `ReferenceGeometry` with `projection_mode`, `source_feature`, `source_body`, `is_associative`, `status`
 - [x] **4.2.3** Implement `project_references(entities, mode, source_feature)` — "Project Refs" projects the selected edges and face boundaries; no projection-mode enum yet
 - [ ] **4.2.4** Implement `update_references(project)` for associative updates
-- [ ] **4.2.4** Create Reference Geometry Panel in Sketch mode
+- [ ] **4.2.6** Create Reference Geometry Panel in Sketch mode
 - [ ] **4.2.5** Auto-projection on sketch creation (pre-selected entities)
 
 ### 4.3 Sketch Plane Selection Workflow
@@ -315,6 +353,10 @@ Based on the approved plan in `plans/creo-workflow-analysis.md`, this document b
 ---
 
 ## Phase 6: Surface Color Rendering 🟠
+
+> **Estado (2026-10-17): implementado por outro desenho.** As cores por face já são
+> resolvidas por nome estável + `rcad.toml` (ver secção 0.3 “Resolved” e o viewport).
+> Os itens 6.1–6.5 descrevem o desenho antigo (`Body.surface_type`) e ficam como histórico.
 
 - [ ] **6.1** Add `surface_type: Option<String>` to `Body` struct (rcad-doc)
 - [ ] **6.2** Add "Surface Type" dropdown in feature creation dashboards
