@@ -797,6 +797,7 @@ mod tests {
                     x_direction: [1.0, 0.0, 0.0],
                     reference: None,
                 }),
+                sketch: None,
             },
         ));
 
@@ -919,6 +920,7 @@ mod tests {
                     x_direction: [1.0, 0.0, 0.0],
                     reference: None,
                 }),
+                sketch: None,
             },
         ));
 
@@ -970,6 +972,7 @@ mod tests {
                     x_direction: [1.0, 0.0, 0.0],
                     reference: Some(top.clone()),
                 }),
+                sketch: None,
             },
         ));
 
@@ -1003,6 +1006,7 @@ mod tests {
                     x_direction: [1.0, 0.0, 0.0],
                     reference: Some("face(never|seen)".to_string()),
                 }),
+                sketch: None,
             },
         ));
 

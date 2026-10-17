@@ -200,6 +200,9 @@ impl FloatingBar {
                                 self.group_button(ui, Group::Circles, "sketch-circle-center", theme, on_action);
                                 self.group_button(ui, Group::Polygons, "sketch-polygon", theme, on_action);
                                 self.sketch_tool_button(ui, "sketch-arc-3point", "3-point arc", SketchTool::Arc3Point, theme, on_action);
+                                self.sketch_tool_button(ui, "sketch-arc-tangent", "Tangent arc from a line end", SketchTool::ArcTangent, theme, on_action);
+                                self.sketch_tool_button(ui, "sketch-ellipse", "Conic", SketchTool::Conic, theme, on_action);
+                                self.sketch_tool_button(ui, "sketch-text", "Text", SketchTool::Text, theme, on_action);
                                 self.sketch_tool_button(ui, "sketch-spline", "Spline (Enter to finish)", SketchTool::Spline, theme, on_action);
                                 self.sketch_tool_button(ui, "sketch-point", "Point (P)", SketchTool::Point, theme, on_action);
                             });

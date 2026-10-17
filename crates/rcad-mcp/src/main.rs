@@ -231,7 +231,12 @@ impl Server {
                 let part = self.active_part_mut().map_err(tool_failure)?;
                 let feature_name = arg_str(&args, "name")
                     .unwrap_or_else(|| rcad_features::unique_feature_name(part, "Extrude"));
-                let id = rcad_features::add_extrude(part, &feature_name, profile, height, None);
+                // An optional Sketch feature id makes the extrusion associative:
+                // editing the sketch later updates the solid.
+                let source = arg_str(&args, "sketch")
+                    .and_then(|text| uuid::Uuid::parse_str(text.trim()).ok());
+                let id =
+                    rcad_features::add_extrude(part, &feature_name, profile, height, None, source);
                 Ok(format!(
                     "Added extrude '{feature_name}' ({id}) of height {height}."
                 ))
@@ -249,7 +254,16 @@ impl Server {
                 let part = self.active_part_mut().map_err(tool_failure)?;
                 let feature_name = arg_str(&args, "name")
                     .unwrap_or_else(|| rcad_features::unique_feature_name(part, "Revolve"));
-                let id = rcad_features::add_revolve(part, &feature_name, profile, angle, None);
+                let source = arg_str(&args, "sketch")
+                    .and_then(|text| uuid::Uuid::parse_str(text.trim()).ok());
+                let id = rcad_features::add_revolve(
+                    part,
+                    &feature_name,
+                    profile,
+                    angle,
+                    None,
+                    source,
+                );
                 Ok(format!(
                     "Added revolve '{feature_name}' ({id}) by {angle} degrees."
                 ))

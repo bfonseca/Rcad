@@ -86,6 +86,11 @@ impl ShapeCache {
         let mut current_visible = true;
         let mut first_dirty_idx = None;
         let mut visible_shapes: Vec<ShapeId> = Vec::new();
+        // The plane each sketch's orientation reference resolves to, so an
+        // extrude built from that sketch follows the plane the sketch is on and
+        // not a snapshot of it.
+        let mut resolved_sketch_planes: HashMap<Uuid, rcad_doc::SketchPlacement> =
+            HashMap::new();
 
         for (idx, feature) in part.features.iter().enumerate() {
             if feature.suppressed || part.suppressed.contains(&feature.id) {
@@ -94,6 +99,47 @@ impl ShapeCache {
 
             let is_construction = matches!(feature.kind, FeatureKind::Construction { .. });
             let hash = compute_feature_hash(feature);
+
+            // A sketch is history, not geometry, but its two positioning
+            // references are resolved here: a reference that is gone belongs in
+            // the repair list, and one that resolves says which plane the
+            // features built from the sketch should follow.
+            if let FeatureKind::Sketch { sketch } = &feature.kind {
+                if let Some(reference) =
+                    sketch.reference(rcad_sketch::SketchReferenceRole::Orientation)
+                {
+                    let resolved = reference.reference.as_deref().and_then(|reference| {
+                        resolve_placement(
+                            reference,
+                            part,
+                            current,
+                            backend,
+                            current_feature.and_then(|id| named_refs.get(&id)),
+                        )
+                    });
+                    match resolved {
+                        Some(placement) => {
+                            resolved_sketch_planes.insert(feature.id, placement);
+                        }
+                        None => {
+                            if let Some(text) = &reference.reference {
+                                result.lost_references.push(rcad_doc::LostReference {
+                                    feature: feature.id,
+                                    feature_name: feature.name.clone(),
+                                    reference: text.clone(),
+                                    last_location: Some(reference.origin),
+                                    last_description: Some(format!(
+                                        "sketch plane at ({}, {}, {})",
+                                        reference.origin[0],
+                                        reference.origin[1],
+                                        reference.origin[2]
+                                    )),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
 
             // Reuse cached shapes only while nothing upstream has changed.
             // Once one feature is dirty, every later feature must be
@@ -148,39 +194,108 @@ impl ShapeCache {
             // A fillet or chamfer is told which edges to work on, resolved from
             // its edge set against the body it consumes. `references_only` is
             // what tells a set whose picks vanished from the rule modes.
-            // The plane a profile lies on, resolved from its reference when it
-            // has one, so the feature follows the face or datum it was drawn on.
-            let plane = match &feature.kind {
-                FeatureKind::Extrude { placement, .. } | FeatureKind::Revolve { placement, .. } => {
-                    placement.as_ref().map(|planes| {
-                        let resolved = planes.reference.as_deref().and_then(|reference| {
-                            resolve_placement(
-                                reference,
-                                part,
-                                current,
-                                backend,
-                                current_feature.and_then(|id| named_refs.get(&id)),
-                            )
-                        });
-                        if resolved.is_none() {
-                            if let Some(reference) = &planes.reference {
-                                result.lost_references.push(rcad_doc::LostReference {
-                                    feature: feature.id,
-                                    feature_name: feature.name.clone(),
-                                    reference: reference.clone(),
-                                    last_location: Some(planes.origin),
-                                    last_description: Some(format!(
-                                        "sketch plane at ({}, {}, {})",
-                                        planes.origin[0], planes.origin[1], planes.origin[2]
-                                    )),
-                                });
-                            }
-                        }
-                        resolved.unwrap_or_else(|| planes.clone())
-                    })
-                }
+            // Whether this feature is built from a stored sketch, and the
+            // sketch's index, so the profile and the plane can be re-read from
+            // it instead of using the copy the feature was created with.
+            let sketch_source = match &feature.kind {
+                FeatureKind::Extrude { sketch, .. } | FeatureKind::Revolve { sketch, .. } => *sketch,
                 _ => None,
             };
+            // The plane a profile lies on, resolved from its reference when it
+            // has one, so the feature follows the face or datum it was drawn on.
+            // A feature built from a sketch takes its plane from the sketch
+            // instead, further down.
+            let mut plane = if sketch_source.is_some() {
+                None
+            } else {
+                match &feature.kind {
+                    FeatureKind::Extrude { placement, .. }
+                    | FeatureKind::Revolve { placement, .. } => {
+                        placement.as_ref().map(|planes| {
+                            let resolved = planes.reference.as_deref().and_then(|reference| {
+                                resolve_placement(
+                                    reference,
+                                    part,
+                                    current,
+                                    backend,
+                                    current_feature.and_then(|id| named_refs.get(&id)),
+                                )
+                            });
+                            if resolved.is_none() {
+                                if let Some(reference) = &planes.reference {
+                                    result.lost_references.push(rcad_doc::LostReference {
+                                        feature: feature.id,
+                                        feature_name: feature.name.clone(),
+                                        reference: reference.clone(),
+                                        last_location: Some(planes.origin),
+                                        last_description: Some(format!(
+                                            "sketch plane at ({}, {}, {})",
+                                            planes.origin[0], planes.origin[1], planes.origin[2]
+                                        )),
+                                    });
+                                }
+                            }
+                            resolved.unwrap_or_else(|| planes.clone())
+                        })
+                    }
+                    _ => None,
+                }
+            };
+
+            // A feature built from a sketch re-reads it: the profile comes from
+            // the sketch and the plane from the sketch's resolved reference, so
+            // editing the sketch (or moving the plane it sits on) updates the
+            // solid. The stored profile stays as the last known copy.
+            let mut kind = feature.kind.clone();
+            if let Some(source) = sketch_source {
+                match part
+                    .features
+                    .iter()
+                    .find(|candidate| candidate.id == source)
+                    .map(|candidate| &candidate.kind)
+                {
+                    Some(FeatureKind::Sketch { sketch }) => {
+                        let fresh = sketch.to_profile();
+                        let fallback = rcad_doc::SketchPlacement {
+                            origin: sketch.plane_origin,
+                            normal: sketch.plane_normal,
+                            x_direction: sketch.plane_x_axis,
+                            reference: sketch
+                                .reference(rcad_sketch::SketchReferenceRole::Orientation)
+                                .and_then(|reference| reference.reference.clone()),
+                        };
+                        match fresh {
+                            Some(fresh) => {
+                                match &mut kind {
+                                    FeatureKind::Extrude { profile, .. }
+                                    | FeatureKind::Revolve { profile, .. } => *profile = fresh,
+                                    _ => {}
+                                }
+                                plane = Some(
+                                    resolved_sketch_planes
+                                        .get(&source)
+                                        .cloned()
+                                        .unwrap_or(fallback),
+                                );
+                            }
+                            None => {
+                                result.errors.push(format!(
+                                    "{}: the sketch it is built from has no closed profile",
+                                    feature.name
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    _ => {
+                        result.errors.push(format!(
+                            "{}: the sketch it is built from is gone",
+                            feature.name
+                        ));
+                        continue;
+                    }
+                }
+            }
 
             let references_only = matches!(
                 &feature.kind,
@@ -232,7 +347,7 @@ impl ShapeCache {
                 continue;
             }
             match eval_feature(
-                &feature.kind,
+                &kind,
                 current,
                 &named,
                 &history,
@@ -691,6 +806,11 @@ mod tests {
         solid_mesh: TriangleMesh,
         /// Mesh the mock kernel returns for construction geometry.
         construction_mesh: TriangleMesh,
+        /// The last profile the mock was asked to extrude, and the plane it was
+        /// swept from: enough to see whether a feature re-read its sketch.
+        last_extrude_profile: Option<Profile2D>,
+        last_extrude_origin: Option<DVec3>,
+        last_extrude_normal: Option<DVec3>,
     }
 
     impl MockBackend {
@@ -718,7 +838,22 @@ mod tests {
             Ok(self.insert())
         }
 
-        fn extrude_profile(&mut self, _profile: &Profile2D, _height: f64) -> GeomResult<ShapeId> {
+        fn extrude_profile(&mut self, profile: &Profile2D, _height: f64) -> GeomResult<ShapeId> {
+            self.last_extrude_profile = Some(profile.clone());
+            Ok(self.insert())
+        }
+
+        fn extrude_profile_placed(
+            &mut self,
+            profile: &Profile2D,
+            _height: f64,
+            origin: DVec3,
+            _x_direction: DVec3,
+            normal: DVec3,
+        ) -> GeomResult<ShapeId> {
+            self.last_extrude_profile = Some(profile.clone());
+            self.last_extrude_origin = Some(origin);
+            self.last_extrude_normal = Some(normal);
             Ok(self.insert())
         }
 
@@ -845,17 +980,220 @@ mod tests {
             placement: None,
             profile: hole_profile,
             height: 5.0,
+            sketch: None,
         };
         let mut without_hole = base.clone();
         without_hole.kind = FeatureKind::Extrude {
             placement: None,
             profile,
             height: 5.0,
+            sketch: None,
         };
         assert_ne!(
             compute_feature_hash(&with_hole),
             compute_feature_hash(&without_hole),
             "profile holes are not part of the feature hash"
+        );
+    }
+
+
+    /// A sketch placed on a datum plane, and the extrude built from it: the
+    /// rebuild re-reads the sketch, so an edited sketch updates the solid.
+    #[test]
+    fn an_extrude_rereads_the_sketch_it_came_from() {
+        use rcad_sketch::{Sketch, SketchReference, SketchReferenceRole};
+
+        let mut sketch = Sketch::new("Sketch1");
+        sketch.add_rectangle(0.0, 0.0, 10.0, 5.0);
+        sketch.set_references(
+            SketchReference {
+                reference: None,
+                label: "XY".to_string(),
+                role: SketchReferenceRole::Orientation,
+                origin: [0.0; 3],
+                direction: [1.0, 0.0, 0.0],
+            },
+            SketchReference {
+                reference: None,
+                label: "CYS (origin)".to_string(),
+                role: SketchReferenceRole::Automatic,
+                origin: [0.0; 3],
+                direction: [0.0, 0.0, 1.0],
+            },
+        );
+        let sketch_feature = Feature::new("Sketch1", FeatureKind::Sketch { sketch });
+        let source = sketch_feature.id;
+        let stale = rcad_geom::Profile2D {
+            outer: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            holes: Vec::new(),
+        };
+        let extrude = Feature::new(
+            "Extrude1",
+            FeatureKind::Extrude {
+                profile: stale,
+                height: 5.0,
+                placement: None,
+                sketch: Some(source),
+            },
+        );
+
+        let mut backend = MockBackend::default();
+        let result = rebuild_part(&part_with(vec![sketch_feature, extrude]), &mut backend);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let profile = backend
+            .last_extrude_profile
+            .expect("the sketch profile was extruded");
+        assert_eq!(profile.outer.len(), 4, "the stale profile was used");
+        let highest = profile
+            .outer
+            .iter()
+            .map(|point| point[0])
+            .fold(f64::MIN, f64::max);
+        assert!((highest - 10.0).abs() < 1e-9, "{highest}");
+    }
+
+    /// The sketch's reference is re-resolved on every rebuild: a sketch on a
+    /// datum plane follows the plane when it moves.
+    #[test]
+    fn a_sketch_follows_the_plane_it_is_placed_on() {
+        use rcad_sketch::{Sketch, SketchReference, SketchReferenceRole};
+
+        let plane = Feature::new(
+            "Front",
+            FeatureKind::Construction {
+                kind: ConstructionKind::Plane,
+                origin: [0.0, 0.0, 10.0],
+                direction: [0.0, 0.0, 1.0],
+            },
+        );
+        let plane_id = plane.id;
+        let mut sketch = Sketch::new("Sketch1");
+        sketch.add_rectangle(0.0, 0.0, 10.0, 5.0);
+        sketch.set_references(
+            SketchReference {
+                reference: Some(plane_id.to_string()),
+                label: "Front".to_string(),
+                role: SketchReferenceRole::Orientation,
+                origin: [0.0, 0.0, 10.0],
+                direction: [1.0, 0.0, 0.0],
+            },
+            SketchReference {
+                reference: None,
+                label: "CYS (origin)".to_string(),
+                role: SketchReferenceRole::Automatic,
+                origin: [0.0; 3],
+                direction: [0.0, 0.0, 1.0],
+            },
+        );
+        let sketch_feature = Feature::new("Sketch1", FeatureKind::Sketch { sketch });
+        let source = sketch_feature.id;
+        let extrude = Feature::new(
+            "Extrude1",
+            FeatureKind::Extrude {
+                profile: rcad_geom::Profile2D {
+                    outer: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                    holes: Vec::new(),
+                },
+                height: 5.0,
+                placement: None,
+                sketch: Some(source),
+            },
+        );
+
+        let mut first = MockBackend::default();
+        let part = part_with(vec![plane, sketch_feature, extrude]);
+        let result = rebuild_part(&part, &mut first);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let origin = first.last_extrude_origin.expect("a placed extrude");
+        assert!((origin.z - 10.0).abs() < 1e-9, "{origin:?}");
+
+        // Move the plane: the sketch and the extrude follow it.
+        let mut moved = part.clone();
+        moved.features[0].kind = FeatureKind::Construction {
+            kind: ConstructionKind::Plane,
+            origin: [0.0, 0.0, 20.0],
+            direction: [0.0, 0.0, 1.0],
+        };
+        let mut second = MockBackend::default();
+        let result = rebuild_part(&moved, &mut second);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let origin = second.last_extrude_origin.expect("a placed extrude");
+        assert!((origin.z - 20.0).abs() < 1e-9, "{origin:?}");
+    }
+
+    /// A sketch whose plane reference is gone is listed for repair.
+    #[test]
+    fn a_sketch_reports_a_reference_that_is_gone() {
+        use rcad_sketch::{Sketch, SketchReference, SketchReferenceRole};
+
+        let plane = Feature::new(
+            "Front",
+            FeatureKind::Construction {
+                kind: ConstructionKind::Plane,
+                origin: [0.0, 0.0, 10.0],
+                direction: [0.0, 0.0, 1.0],
+            },
+        );
+        let plane_id = plane.id;
+        let mut sketch = Sketch::new("Sketch1");
+        sketch.add_rectangle(0.0, 0.0, 10.0, 5.0);
+        sketch.set_references(
+            SketchReference {
+                reference: Some(plane_id.to_string()),
+                label: "Front".to_string(),
+                role: SketchReferenceRole::Orientation,
+                origin: [0.0, 0.0, 10.0],
+                direction: [1.0, 0.0, 0.0],
+            },
+            SketchReference {
+                reference: None,
+                label: "CYS (origin)".to_string(),
+                role: SketchReferenceRole::Automatic,
+                origin: [0.0; 3],
+                direction: [0.0, 0.0, 1.0],
+            },
+        );
+        let sketch_feature = Feature::new("Sketch1", FeatureKind::Sketch { sketch });
+        let sketch_id = sketch_feature.id;
+        // The plane is deleted from the tree; the sketch stays.
+        let _ = plane;
+        let part = part_with(vec![sketch_feature]);
+
+        let mut backend = MockBackend::default();
+        let result = rebuild_part(&part, &mut backend);
+
+        let entry = result
+            .lost_references
+            .iter()
+            .find(|entry| entry.feature == sketch_id)
+            .expect("the sketch reference is reported");
+        assert_eq!(entry.reference, plane_id.to_string());
+        assert!(entry.last_description.as_deref().unwrap_or("").contains("sketch plane"));
+    }
+
+    /// A feature built from a sketch that is no longer there fails with a
+    /// sentence naming it, instead of building from a stale profile.
+    #[test]
+    fn an_extrude_from_a_missing_sketch_says_so() {
+        let extrude = Feature::new(
+            "Extrude1",
+            FeatureKind::Extrude {
+                profile: rcad_geom::Profile2D {
+                    outer: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                    holes: Vec::new(),
+                },
+                height: 5.0,
+                placement: None,
+                sketch: Some(Uuid::new_v4()),
+            },
+        );
+        let mut backend = MockBackend::default();
+        let result = rebuild_part(&part_with(vec![extrude]), &mut backend);
+        assert!(
+            result.errors.iter().any(|error| error.contains("is gone")),
+            "{:?}",
+            result.errors
         );
     }
 

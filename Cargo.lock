@@ -3479,6 +3479,7 @@ dependencies = [
  "rcad-doc",
  "rcad-geom",
  "rcad-occt",
+ "rcad-sketch",
  "rmp-serde",
  "thiserror 2.0.21",
  "uuid",

@@ -47,6 +47,8 @@ const DIMENSION: Color32 = Color32::from_rgb(130, 230, 150);
 const WEAK: Color32 = Color32::from_rgb(160, 160, 160);
 const DRIVEN: Color32 = Color32::from_rgb(120, 190, 210);
 const FREE_POINT: Color32 = Color32::from_rgb(255, 130, 130);
+/// An entity that still has a degree of freedom, when the highlight is on.
+const FREE_ENTITY: Color32 = Color32::from_rgb(255, 190, 100);
 const PREVIEW: Color32 = Color32::from_rgb(255, 210, 90);
 const TEXT: Color32 = Color32::from_rgb(235, 235, 235);
 const REFERENCE: Color32 = Color32::from_rgb(130, 145, 170);
@@ -80,6 +82,13 @@ pub enum SketchTool {
     Polygon(u8),
     /// Three clicks: the start, the end, and a point the arc passes through.
     Arc3Point,
+    /// Click a line near the end the arc should start on, then the arc's end.
+    /// The arc leaves that end along the line, so it is tangent by construction.
+    ArcTangent,
+    /// Three clicks (start, end, shoulder); the rho comes from the strip.
+    Conic,
+    /// Click where the text goes and type it.
+    Text,
     /// Click the control points, then Enter to finish the spline.
     Spline,
     /// The dynamic dimension tool: pick one or two things, then place the text.
@@ -134,6 +143,9 @@ impl SketchTool {
             SketchTool::Polygon(6) => "Hexagon",
             SketchTool::Polygon(_) => "Polygon",
             SketchTool::Arc3Point => "3-Point Arc",
+            SketchTool::ArcTangent => "Tangent Arc",
+            SketchTool::Conic => "Conic",
+            SketchTool::Text => "Text",
             SketchTool::Spline => "Spline",
             SketchTool::Dimension => "Dimension",
             SketchTool::Trim => "Trim",
@@ -159,6 +171,9 @@ impl SketchTool {
                 | SketchTool::CircleTangent
                 | SketchTool::Polygon(_)
                 | SketchTool::Arc3Point
+                | SketchTool::ArcTangent
+                | SketchTool::Conic
+                | SketchTool::Text
                 | SketchTool::Spline
         )
     }
@@ -196,6 +211,11 @@ impl SketchTool {
             SketchTool::CircleTangent => "Click two lines; the radius comes from the strip.",
             SketchTool::Polygon(_) => "Click the centre, then a vertex.",
             SketchTool::Arc3Point => "Click the start, the end, then a point on the arc.",
+            SketchTool::ArcTangent => {
+                "Click a line near the end the arc starts on, then the arc's end."
+            }
+            SketchTool::Conic => "Click the start, the end, then a point the curve passes through.",
+            SketchTool::Text => "Click where the text goes, then type it.",
             SketchTool::Spline => "Click the control points, then Enter to finish.",
             SketchTool::Dimension => {
                 "Click a line or point, then the second one or the empty space for the text."
@@ -210,7 +230,7 @@ impl SketchTool {
 }
 
 /// What one click did, so the caller can report it and rebuild afterwards.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SketchEdit {
     /// The first click of a two-click tool: the geometry is not complete yet.
     Pending,
@@ -224,7 +244,13 @@ pub enum SketchEdit {
     Rectangle([Uuid; 4]),
     Circle(Uuid),
     Arc(Uuid),
+    Conic(Uuid),
     Spline(Uuid),
+    /// Text was added to the sketch at that place.
+    Text(Uuid),
+    /// The text tool wants a string at this point: the application opens its
+    /// in-place editor and then calls add_text.
+    TextAt([f64; 2]),
     /// The two clicks were on top of each other; the first one is kept.
     TooSmall,
     /// The tool cannot make anything of these picks; the sentence says why.
@@ -247,7 +273,9 @@ impl SketchEdit {
                 | SketchEdit::Rectangle(_)
                 | SketchEdit::Circle(_)
                 | SketchEdit::Arc(_)
+                | SketchEdit::Conic(_)
                 | SketchEdit::Spline(_)
+                | SketchEdit::Text(_)
         )
     }
 }
@@ -257,13 +285,40 @@ impl SketchEdit {
 ///
 /// This is the whole mouse state. Keeping it out of `RcadApp` means the
 /// interaction rules can be tested directly.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SketchDraft {
     tool: SketchTool,
     points: Vec<[f64; 2]>,
     /// The points the polyline has already created in the sketch.
     chain: Vec<Uuid>,
     entities: Vec<Uuid>,
+    /// The line and tangency point the tangent-arc tool is building from.
+    tangent: Option<TangentArcSpan>,
+    /// The rho the conic tool gives the next curve.
+    conic_rho: f64,
+}
+
+/// Where the tangent-arc tool starts: a line, the end of it, and the direction
+/// the arc leaves along.
+#[derive(Debug, Clone)]
+pub struct TangentArcSpan {
+    pub line: Uuid,
+    pub point: Uuid,
+    pub start: [f64; 2],
+    pub direction: [f64; 2],
+}
+
+impl Default for SketchDraft {
+    fn default() -> Self {
+        Self {
+            tool: SketchTool::Select,
+            points: Vec::new(),
+            chain: Vec::new(),
+            entities: Vec::new(),
+            tangent: None,
+            conic_rho: 0.5,
+        }
+    }
 }
 
 impl SketchDraft {
@@ -292,6 +347,43 @@ impl SketchDraft {
         self.points.clear();
         self.chain.clear();
         self.entities.clear();
+        self.tangent = None;
+    }
+
+    /// The rho the conic tool gives its next curve.
+    pub fn conic_rho(&self) -> f64 {
+        self.conic_rho
+    }
+
+    /// Set the rho the conic tool gives its next curve.
+    pub fn set_conic_rho(&mut self, rho: f64) {
+        self.conic_rho = rho.clamp(0.05, 0.95);
+    }
+
+    /// Start the tangent arc on a line end: the arc leaves along the line.
+    pub fn begin_arc_tangent(
+        &mut self,
+        line: Uuid,
+        point: Uuid,
+        start: [f64; 2],
+        direction: [f64; 2],
+    ) {
+        self.tool = SketchTool::ArcTangent;
+        self.points.clear();
+        self.chain.clear();
+        self.tangent = Some(TangentArcSpan {
+            line,
+            point,
+            start,
+            direction,
+        });
+        self.points.push(start);
+        self.entities = vec![line];
+    }
+
+    /// The line end the tangent arc starts from.
+    pub fn tangent_arc(&self) -> Option<&TangentArcSpan> {
+        self.tangent.as_ref()
     }
 
     /// Escape or a right-click: drop the collected clicks or picks, then leave
@@ -305,8 +397,10 @@ impl SketchDraft {
             self.points.clear();
             self.chain.clear();
             self.entities.clear();
+            self.tangent = None;
             return true;
         }
+        self.tangent = None;
         if self.tool != SketchTool::Select {
             self.tool = SketchTool::Select;
             return true;
@@ -470,12 +564,54 @@ impl SketchDraft {
                     }
                 }
             }
+            SketchTool::Conic => {
+                self.points.push(point);
+                if self.points.len() < 3 {
+                    return SketchEdit::Pending;
+                }
+                let (start, end, shoulder) = (self.points[0], self.points[1], self.points[2]);
+                if (end[0] - start[0]).hypot(end[1] - start[1]) < 1e-9 {
+                    self.points.pop();
+                    return SketchEdit::TooSmall;
+                }
+                // The weight that makes the curve pass through the shoulder:
+                // reversing the rational quadratic at t = 1/2.
+                let rho = self.conic_rho.clamp(0.05, 0.95);
+                let control = [
+                    (2.0 * shoulder[0] * (1.0 + rho) - (start[0] + end[0])) / (2.0 * rho),
+                    (2.0 * shoulder[1] * (1.0 + rho) - (start[1] + end[1])) / (2.0 * rho),
+                ];
+                let a = sketch.add_point(start[0], start[1]);
+                let c = sketch.add_point(control[0], control[1]);
+                let b = sketch.add_point(end[0], end[1]);
+                let conic = sketch.add_conic(a, c, b, rho);
+                self.points.clear();
+                SketchEdit::Conic(conic)
+            }
+            SketchTool::Text => {
+                // The application opens its editor; the sketch gets the text
+                // once the user has typed it.
+                self.points.clear();
+                SketchEdit::TextAt(point)
+            }
             SketchTool::Spline => {
                 self.points.push(point);
                 SketchEdit::Pending
             }
             _ => SketchEdit::NotDrawing,
         }
+    }
+
+    /// Finish the text tool: add the text where the click put it.
+    pub fn finish_text(
+        &mut self,
+        sketch: &mut Sketch,
+        position: [f64; 2],
+        content: &str,
+        height: f64,
+    ) -> SketchEdit {
+        self.points.clear();
+        SketchEdit::Text(sketch.add_text(position, height, content))
     }
 
     /// Finish the spline the spline tool has been collecting (Enter).
@@ -726,6 +862,74 @@ pub fn arc_through_points(
     })
 }
 
+/// The arc that leaves \`start\` along \`direction\` and ends at \`end\`.
+///
+/// The centre sits on the normal to the tangent through the start, so the arc is
+/// tangent to whatever gave \`direction\` (the line the user picked). None when
+/// the two points coincide or the end lies on the tangent itself.
+pub fn tangent_arc(
+    start: [f64; 2],
+    direction: [f64; 2],
+    end: [f64; 2],
+) -> Option<([f64; 2], f64, f64, f64)> {
+    let length = direction[0].hypot(direction[1]);
+    if length < 1e-9 {
+        return None;
+    }
+    let (dx, dy) = (direction[0] / length, direction[1] / length);
+    let (vx, vy) = (end[0] - start[0], end[1] - start[1]);
+    if vx.hypot(vy) < 1e-9 {
+        return None;
+    }
+    let mut normal = [-dy, dx];
+    let mut radius = (vx * vx + vy * vy) / (2.0 * (vx * normal[0] + vy * normal[1]));
+    if !radius.is_finite() || radius.abs() < 1e-9 {
+        return None;
+    }
+    if radius < 0.0 {
+        radius = -radius;
+        normal = [-normal[0], -normal[1]];
+    }
+    let centre = [start[0] + normal[0] * radius, start[1] + normal[1] * radius];
+    let start_angle = (start[1] - centre[1]).atan2(start[0] - centre[0]);
+    let end_angle = (end[1] - centre[1]).atan2(end[0] - centre[0]);
+    let mut sweep = end_angle - start_angle;
+    while sweep > std::f64::consts::PI {
+        sweep -= std::f64::consts::TAU;
+    }
+    while sweep < -std::f64::consts::PI {
+        sweep += std::f64::consts::TAU;
+    }
+    // The tangent of a counter-clockwise arc at its start is the radial turned
+    // left; go the other way round when that does not point along \`direction\`.
+    let radial = [start[0] - centre[0], start[1] - centre[1]];
+    let counter_clockwise = [-radial[1], radial[0]];
+    let tangent = if sweep >= 0.0 {
+        counter_clockwise
+    } else {
+        [-counter_clockwise[0], -counter_clockwise[1]]
+    };
+    if tangent[0] * dx + tangent[1] * dy < 0.0 {
+        sweep = if sweep >= 0.0 {
+            sweep - std::f64::consts::TAU
+        } else {
+            sweep + std::f64::consts::TAU
+        };
+    }
+    Some((centre, radius, start_angle, start_angle + sweep))
+}
+
+/// Where \`point\` lands when dropped perpendicular on the line through \`a\` and \`b\`.
+pub fn foot_on_line(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> Option<[f64; 2]> {
+    let direction = [b[0] - a[0], b[1] - a[1]];
+    let length_squared = direction[0] * direction[0] + direction[1] * direction[1];
+    if length_squared < 1e-18 {
+        return None;
+    }
+    let t = ((point[0] - a[0]) * direction[0] + (point[1] - a[1]) * direction[1]) / length_squared;
+    Some([a[0] + direction[0] * t, a[1] + direction[1] * t])
+}
+
 /// Where a screen position lands in the sketch, or None when the ray misses
 /// the sketch plane (an edge-on view has no answer).
 pub fn screen_to_sketch(
@@ -869,10 +1073,23 @@ pub fn constraint_glyphs(sketch: &Sketch) -> Vec<ConstraintGlyph> {
             | Constraint::Angle { .. }
             | Constraint::LineDistance { .. }
             | Constraint::HorizontalDistance { .. }
-            | Constraint::VerticalDistance { .. } => {}
+            | Constraint::VerticalDistance { .. }
+            | Constraint::Radius { .. }
+            | Constraint::Diameter { .. }
+            | Constraint::PointLineDistance { .. }
+            | Constraint::LineCurveDistance { .. } => {}
         }
     }
     glyphs
+}
+
+/// Whether a dimension on a circle or an arc reports its radius or its
+/// diameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DimensionSize {
+    #[default]
+    Radius,
+    Diameter,
 }
 
 /// How a dimension is drawn and what it measures.
@@ -894,6 +1111,26 @@ pub enum DimensionKind {
     LineDistance {
         first: ([f64; 2], [f64; 2]),
         second: ([f64; 2], [f64; 2]),
+    },
+    /// The radius or the diameter of a circle or an arc.
+    Radial {
+        centre: [f64; 2],
+        rim: [f64; 2],
+        diameter: bool,
+    },
+    /// The perpendicular distance from a point to a line.
+    PointDistance {
+        point: [f64; 2],
+        foot: [f64; 2],
+        line: ([f64; 2], [f64; 2]),
+    },
+    /// The gap between a line and the tangent of a circle or an arc.
+    TangentDistance {
+        line: ([f64; 2], [f64; 2]),
+        centre: [f64; 2],
+        radius: f64,
+        touch: [f64; 2],
+        foot: [f64; 2],
     },
 }
 
@@ -950,6 +1187,37 @@ pub fn line_distance(first: ([f64; 2], [f64; 2]), second: ([f64; 2], [f64; 2])) 
         return 0.0;
     }
     ((second.0[0] - first.0[0]) * dy - (second.0[1] - first.0[1]) * dx).abs() / length
+}
+
+/// The centre and radius of a circle or an arc.
+fn curve_geometry(sketch: &Sketch, id: Uuid) -> Option<([f64; 2], f64)> {
+    if let Some(circle) = sketch.circles.iter().find(|circle| circle.id == id) {
+        return Some((point_of(sketch, circle.center)?, circle.radius));
+    }
+    let arc = sketch.arcs.iter().find(|arc| arc.id == id)?;
+    Some((point_of(sketch, arc.center)?, arc.radius))
+}
+
+/// The direction a radius dimension points in when the user did not place it:
+/// the middle of an arc, or +X of a circle.
+fn curve_radial_direction(sketch: &Sketch, id: Uuid) -> [f64; 2] {
+    if let Some(arc) = sketch.arcs.iter().find(|arc| arc.id == id) {
+        let mut end = arc.end_angle;
+        while end < arc.start_angle {
+            end += std::f64::consts::TAU;
+        }
+        let angle = (arc.start_angle + end) * 0.5;
+        return [angle.cos(), angle.sin()];
+    }
+    [1.0, 0.0]
+}
+
+/// The direction from a centre towards the text, when the text was placed.
+fn direction_to(centre: [f64; 2], target: Option<[f64; 2]>) -> Option<[f64; 2]> {
+    let target = target?;
+    let direction = [target[0] - centre[0], target[1] - centre[1]];
+    let length = direction[0].hypot(direction[1]);
+    (length > 1e-9).then(|| [direction[0] / length, direction[1] / length])
 }
 
 /// Every dimension the sketch holds, ready to draw.
@@ -1015,6 +1283,111 @@ pub fn dimensions(sketch: &Sketch) -> Vec<DimensionAnnotation> {
                         a: pa,
                         b: pb,
                         orientation: DimensionOrientation::Vertical,
+                    },
+                    *value,
+                    measured,
+                    format_length(shown),
+                )
+            }
+            Constraint::Radius { curve, value } => {
+                let Some((centre, radius)) = curve_geometry(sketch, *curve) else {
+                    continue;
+                };
+                let direction = direction_to(centre, text_position)
+                    .unwrap_or_else(|| curve_radial_direction(sketch, *curve));
+                let rim = [
+                    centre[0] + direction[0] * radius,
+                    centre[1] + direction[1] * radius,
+                ];
+                let measured = radius;
+                let shown = if driving { *value } else { measured };
+                (
+                    DimensionKind::Radial {
+                        centre,
+                        rim,
+                        diameter: false,
+                    },
+                    *value,
+                    measured,
+                    format!("R{}", format_length(shown)),
+                )
+            }
+            Constraint::Diameter { curve, value } => {
+                let Some((centre, radius)) = curve_geometry(sketch, *curve) else {
+                    continue;
+                };
+                let direction = direction_to(centre, text_position)
+                    .unwrap_or_else(|| curve_radial_direction(sketch, *curve));
+                let rim = [
+                    centre[0] + direction[0] * radius,
+                    centre[1] + direction[1] * radius,
+                ];
+                let measured = radius * 2.0;
+                let shown = if driving { *value } else { measured };
+                (
+                    DimensionKind::Radial {
+                        centre,
+                        rim,
+                        diameter: true,
+                    },
+                    *value,
+                    measured,
+                    format!("Ø{}", format_length(shown)),
+                )
+            }
+            Constraint::PointLineDistance { point, line, value } => {
+                let (Some(p), Some((a, b))) =
+                    (point_of(sketch, *point), line_points(sketch, *line))
+                else {
+                    continue;
+                };
+                let Some(foot) = foot_on_line(p, a, b) else {
+                    continue;
+                };
+                let measured = (p[0] - foot[0]).hypot(p[1] - foot[1]);
+                let shown = if driving { *value } else { measured };
+                (
+                    DimensionKind::PointDistance {
+                        point: p,
+                        foot,
+                        line: (a, b),
+                    },
+                    *value,
+                    measured,
+                    format_length(shown),
+                )
+            }
+            Constraint::LineCurveDistance { line, curve, value } => {
+                let (Some((a, b)), Some((centre, radius))) =
+                    (line_points(sketch, *line), curve_geometry(sketch, *curve))
+                else {
+                    continue;
+                };
+                let Some(foot) = foot_on_line(centre, a, b) else {
+                    continue;
+                };
+                let distance = (centre[0] - foot[0]).hypot(centre[1] - foot[1]);
+                let measured = (distance - radius).max(0.0);
+                let direction = if distance > 1e-9 {
+                    [
+                        (foot[0] - centre[0]) / distance,
+                        (foot[1] - centre[1]) / distance,
+                    ]
+                } else {
+                    [0.0, 1.0]
+                };
+                let touch = [
+                    centre[0] + direction[0] * radius,
+                    centre[1] + direction[1] * radius,
+                ];
+                let shown = if driving { *value } else { measured };
+                (
+                    DimensionKind::TangentDistance {
+                        line: (a, b),
+                        centre,
+                        radius,
+                        touch,
+                        foot,
                     },
                     *value,
                     measured,
@@ -1088,6 +1461,12 @@ pub enum DimensionScreenKind {
     },
     /// The perpendicular between two lines.
     LineDistance { from: Pos2, to: Pos2 },
+    /// A radius or diameter: from the centre (or the far rim) to the rim.
+    Radial { from: Pos2, to: Pos2 },
+    /// The perpendicular from a point to a line.
+    PointDistance { point: Pos2, foot: Pos2 },
+    /// The gap between a line and a circle's tangent.
+    TangentDistance { from: Pos2, to: Pos2 },
 }
 
 /// The screen geometry of a dimension: what to draw and where the text goes.
@@ -1238,6 +1617,53 @@ pub fn dimension_screen_geometry(
                 text,
             })
         }
+        DimensionKind::Radial {
+            centre,
+            rim,
+            diameter,
+        } => {
+            let centre = to_screen(*centre)?;
+            let rim = to_screen(*rim)?;
+            let radius = (rim - centre).length();
+            if radius < 1e-3 {
+                return None;
+            }
+            let direction = (rim - centre) / radius;
+            let text = placed.unwrap_or(rim + direction * 14.0);
+            let from = if *diameter {
+                centre - direction * radius
+            } else {
+                centre
+            };
+            Some(DimensionScreen {
+                kind: DimensionScreenKind::Radial { from, to: rim },
+                text,
+            })
+        }
+        DimensionKind::PointDistance { point, foot, .. } => {
+            let point = to_screen(*point)?;
+            let foot = to_screen(*foot)?;
+            let text = placed.unwrap_or_else(|| {
+                let middle = Pos2::new((point.x + foot.x) * 0.5, (point.y + foot.y) * 0.5);
+                middle + Vec2::new(12.0, -12.0)
+            });
+            Some(DimensionScreen {
+                kind: DimensionScreenKind::PointDistance { point, foot },
+                text,
+            })
+        }
+        DimensionKind::TangentDistance { touch, foot, .. } => {
+            let from = to_screen(*touch)?;
+            let to = to_screen(*foot)?;
+            let text = placed.unwrap_or_else(|| {
+                let middle = Pos2::new((from.x + to.x) * 0.5, (from.y + to.y) * 0.5);
+                middle + Vec2::new(12.0, 0.0)
+            });
+            Some(DimensionScreen {
+                kind: DimensionScreenKind::TangentDistance { from, to },
+                text,
+            })
+        }
     }
 }
 
@@ -1283,8 +1709,13 @@ pub fn dimension_hit_test(
                 }
                 distance
             }
-            DimensionScreenKind::LineDistance { from, to } => {
+            DimensionScreenKind::LineDistance { from, to }
+            | DimensionScreenKind::Radial { from, to }
+            | DimensionScreenKind::TangentDistance { from, to } => {
                 distance_to_segment(pos, from, to).min(pos.distance(screen.text))
+            }
+            DimensionScreenKind::PointDistance { point, foot } => {
+                distance_to_segment(pos, point, foot).min(pos.distance(screen.text))
             }
         };
         if distance <= threshold && best.map_or(true, |(_, best)| distance < best) {
@@ -1314,43 +1745,7 @@ pub fn move_point(sketch: &mut Sketch, point: Uuid, to: [f64; 2]) -> bool {
 /// freedom away without saying where the point goes, so they do not anchor it:
 /// a fully dimensioned rectangle can still slide until one corner is fixed.
 pub fn free_points(sketch: &Sketch) -> Vec<Uuid> {
-    let mut held: std::collections::HashSet<Uuid> = sketch
-        .constraints
-        .iter()
-        .filter_map(|constraint| match constraint {
-            Constraint::Fixed { point } => Some(*point),
-            _ => None,
-        })
-        .collect();
-
-    // A coincidence or a midpoint can pull another point into the anchored
-    // set, so this runs to a fixed point rather than once.
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for constraint in &sketch.constraints {
-            match constraint {
-                Constraint::Coincident { a, b } => {
-                    if held.contains(a) && held.insert(*b) {
-                        changed = true;
-                    }
-                    if held.contains(b) && held.insert(*a) {
-                        changed = true;
-                    }
-                }
-                Constraint::Midpoint { point, line } => {
-                    if let Some(line) = sketch.lines.iter().find(|candidate| candidate.id == *line)
-                    {
-                        if held.contains(&line.a) && held.contains(&line.b) && held.insert(*point) {
-                            changed = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
+    let held = sketch.anchored_points();
     sketch
         .points
         .iter()
@@ -1538,8 +1933,36 @@ pub struct ToolParams {
     pub offset_distance: f64,
     pub pattern_count: usize,
     pub pattern_spacing: f64,
+    /// Whether the pattern repeats along a line or around a point.
+    pub pattern_mode: PatternMode,
+    /// Total sweep of a circular pattern, in degrees.
+    pub pattern_angle: f64,
     /// Radius of a circle drawn tangent to two lines.
     pub circle_radius: f64,
+    /// Middle weight of the conic tool: 0.5 is a parabola.
+    pub conic_rho: f64,
+    /// Height of a text note, in sketch units.
+    pub text_height: f64,
+}
+
+/// How the pattern tool repeats the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PatternMode {
+    /// Along the line that is clicked, at the strip's spacing.
+    #[default]
+    Linear,
+    /// Around the point that is clicked, spread over the strip's sweep.
+    Circular,
+}
+
+impl ToolParams {
+    /// The label of the pattern mode, for the strip's toggle.
+    pub fn pattern_mode_label(mode: PatternMode) -> &'static str {
+        match mode {
+            PatternMode::Linear => "Linear",
+            PatternMode::Circular => "Circular",
+        }
+    }
 }
 
 impl Default for ToolParams {
@@ -1548,7 +1971,11 @@ impl Default for ToolParams {
             offset_distance: 5.0,
             pattern_count: 3,
             pattern_spacing: 10.0,
+            pattern_mode: PatternMode::Linear,
+            pattern_angle: 360.0,
             circle_radius: 10.0,
+            conic_rho: 0.5,
+            text_height: 5.0,
         }
     }
 }
@@ -1655,27 +2082,42 @@ pub fn command_step(
             if selection.is_empty() {
                 return Err("Select the geometry to pattern first.".to_string());
             }
-            let line = sketch
-                .lines
-                .iter()
-                .find(|line| line.id == hit.id)
-                .ok_or_else(|| "Pick a line to give the pattern direction.".to_string())?;
-            let (from, to) = (
-                point_of(sketch, line.a)
-                    .ok_or_else(|| "The direction line has no start point.".to_string())?,
-                point_of(sketch, line.b)
-                    .ok_or_else(|| "The direction line has no end point.".to_string())?,
-            );
-            let direction = [to[0] - from[0], to[1] - from[1]];
-            let created = sketch
-                .linear_pattern(
-                    selection,
-                    direction,
-                    params.pattern_spacing,
-                    params.pattern_count.max(2),
-                )
-                .map_err(|error| error.to_string())?;
-            Ok(format!("{} patterned entities created.", created.len()))
+            let count = params.pattern_count.max(2);
+            match params.pattern_mode {
+                PatternMode::Linear => {
+                    let line = sketch
+                        .lines
+                        .iter()
+                        .find(|line| line.id == hit.id)
+                        .ok_or_else(|| "Pick a line to give the pattern direction.".to_string())?;
+                    let (from, to) = (
+                        point_of(sketch, line.a)
+                            .ok_or_else(|| "The direction line has no start point.".to_string())?,
+                        point_of(sketch, line.b)
+                            .ok_or_else(|| "The direction line has no end point.".to_string())?,
+                    );
+                    let direction = [to[0] - from[0], to[1] - from[1]];
+                    let created = sketch
+                        .linear_pattern(selection, direction, params.pattern_spacing, count)
+                        .map_err(|error| error.to_string())?;
+                    Ok(format!("{} patterned entities created.", created.len()))
+                }
+                PatternMode::Circular => {
+                    if hit.kind != SketchEntityKind::Point {
+                        return Err("Circular pattern: click the centre point.".to_string());
+                    }
+                    let centre = point_of(sketch, hit.id)
+                        .ok_or_else(|| "The centre point is gone.".to_string())?;
+                    let step = params.pattern_angle.to_radians() / count as f64;
+                    let created = sketch
+                        .circular_pattern(selection, centre, step, count)
+                        .map_err(|error| error.to_string())?;
+                    Ok(format!(
+                        "{} patterned entities created around the point.",
+                        created.len()
+                    ))
+                }
+            }
         }
         other => Err(format!("{} does not pick entities.", other.label())),
     }
@@ -1716,6 +2158,47 @@ impl ConstraintAction {
 ///
 /// A constraint that would be nonsense for the selection is refused with a
 /// sentence naming what to select instead, so the button can explain itself.
+
+/// A short name for the constraint table: what the constraint is, and for a
+/// dimension its value.
+pub fn constraint_label(constraint: &Constraint) -> String {
+    match constraint {
+        Constraint::Coincident { .. } => "Coincident".to_string(),
+        Constraint::Distance { value, .. } => {
+            format!("Distance {}", format_length(*value))
+        }
+        Constraint::Horizontal { .. } => "Horizontal".to_string(),
+        Constraint::Vertical { .. } => "Vertical".to_string(),
+        Constraint::Fixed { .. } => "Fixed".to_string(),
+        Constraint::Tangent { .. } => "Tangent".to_string(),
+        Constraint::Symmetric { .. } => "Symmetric".to_string(),
+        Constraint::EqualRadius { .. } => "Equal radius".to_string(),
+        Constraint::EqualLength { .. } => "Equal length".to_string(),
+        Constraint::Parallel { .. } => "Parallel".to_string(),
+        Constraint::Perpendicular { .. } => "Perpendicular".to_string(),
+        Constraint::Midpoint { .. } => "Midpoint".to_string(),
+        Constraint::Concentric { .. } => "Concentric".to_string(),
+        Constraint::Angle { value, .. } => format!("Angle {}°", format_length(*value)),
+        Constraint::LineDistance { value, .. } => {
+            format!("Line distance {}", format_length(*value))
+        }
+        Constraint::HorizontalDistance { value, .. } => {
+            format!("Horizontal distance {}", format_length(*value))
+        }
+        Constraint::VerticalDistance { value, .. } => {
+            format!("Vertical distance {}", format_length(*value))
+        }
+        Constraint::Radius { value, .. } => format!("Radius {}", format_length(*value)),
+        Constraint::Diameter { value, .. } => format!("Diameter {}", format_length(*value)),
+        Constraint::PointLineDistance { value, .. } => {
+            format!("Point-line distance {}", format_length(*value))
+        }
+        Constraint::LineCurveDistance { value, .. } => {
+            format!("Tangent distance {}", format_length(*value))
+        }
+    }
+}
+
 pub fn apply_constraint(
     sketch: &mut Sketch,
     selection: &[Uuid],
@@ -1884,6 +2367,8 @@ pub struct OverlayState<'a> {
     /// The dimension whose value is being edited in place: its number is not
     /// drawn, the editor shows itself.
     pub editing_dimension: Option<usize>,
+    /// Draw the entities that still have a degree of freedom in another colour.
+    pub show_free_dof: bool,
 }
 
 /// Draw the open sketch: its geometry, its constraints, its dimensions, the
@@ -1897,11 +2382,20 @@ pub fn draw_sketch_overlay(
     let painter = ui.painter_at(rect);
     let plane = state.plane;
     let sketch = state.sketch;
+    // Which entities are still free, when the highlight is on: computed once
+    // for the whole frame.
+    let unconstrained: std::collections::HashSet<Uuid> = if state.show_free_dof {
+        sketch.find_unconstrained_entities().into_iter().collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let style = |id: Uuid| -> (Color32, f32) {
         if state.selection.contains(&id) {
             (SELECTED, 2.6)
         } else if state.hovered == Some(id) {
             (HOVERED, 2.6)
+        } else if unconstrained.contains(&id) {
+            (FREE_ENTITY, 2.0)
         } else {
             (GEOMETRY, 1.8)
         }
@@ -1948,6 +2442,19 @@ pub fn draw_sketch_overlay(
             for shape in Shape::dashed_line(&samples, Stroke::new(1.0_f32, colour), 4.0, 3.0) {
                 painter.add(shape);
             }
+        }
+    }
+
+    // Conics: rational quadratics, sampled for the screen.
+    for conic in &sketch.conics {
+        let samples: Vec<Pos2> = sketch
+            .conic_points(conic.id, 48)
+            .iter()
+            .filter_map(|point| sketch_to_screen(rect, camera, plane, *point))
+            .collect();
+        if samples.len() >= 2 {
+            let (colour, width) = style(conic.id);
+            painter.add(Shape::line(samples, Stroke::new(width, colour)));
         }
     }
 
@@ -2019,6 +2526,29 @@ pub fn draw_sketch_overlay(
         if free.contains(&point.id) {
             painter.circle_stroke(screen, 5.0, Stroke::new(1.0_f32, FREE_POINT));
         }
+    }
+
+    // Text notes: the interface font, sized by the sketch height.
+    for text in &sketch.texts {
+        let Some(screen) = sketch_to_screen(rect, camera, plane, text.position) else {
+            continue;
+        };
+        let size = sketch_to_screen(
+            rect,
+            camera,
+            plane,
+            [text.position[0] + text.height, text.position[1]],
+        )
+        .map(|edge| (edge - screen).length())
+        .unwrap_or(12.0)
+        .clamp(4.0, 90.0);
+        painter.text(
+            screen,
+            Align2::LEFT_BOTTOM,
+            &text.content,
+            FontId::proportional(size),
+            TEXT,
+        );
     }
 
     // Constraint markers, staggered when several share a place.
@@ -2178,6 +2708,62 @@ pub fn draw_sketch_overlay(
                     }
                 }
             }
+            SketchTool::ArcTangent => {
+                if let Some(span) = state.draft.tangent_arc() {
+                    if let Some((centre, radius, start_angle, end_angle)) =
+                        tangent_arc(span.start, span.direction, cursor)
+                    {
+                        let mut end = end_angle;
+                        while end < start_angle {
+                            end += std::f64::consts::TAU;
+                        }
+                        let samples: Vec<Pos2> = (0..=48)
+                            .filter_map(|step| {
+                                let angle = start_angle + (end - start_angle) * step as f64 / 48.0;
+                                screen([
+                                    centre[0] + radius * angle.cos(),
+                                    centre[1] + radius * angle.sin(),
+                                ])
+                            })
+                            .collect();
+                        if samples.len() >= 2 {
+                            painter.add(Shape::line(samples, Stroke::new(1.4_f32, PREVIEW)));
+                        }
+                    }
+                }
+            }
+            SketchTool::Conic => match state.draft.pending_points() {
+                [start] => {
+                    if let (Some(a), Some(b)) = (screen(*start), screen(cursor)) {
+                        painter.line_segment([a, b], Stroke::new(1.0_f32, PREVIEW));
+                    }
+                }
+                [start, end] => {
+                    // The preview uses the same shoulder the click would.
+                    let rho = state.draft.conic_rho();
+                    let control = [
+                        (2.0 * cursor[0] * (1.0 + rho) - (start[0] + end[0])) / (2.0 * rho),
+                        (2.0 * cursor[1] * (1.0 + rho) - (start[1] + end[1])) / (2.0 * rho),
+                    ];
+                    let samples: Vec<Pos2> = (0..=32)
+                        .filter_map(|step| {
+                            let t = step as f64 / 32.0;
+                            let b0 = (1.0 - t) * (1.0 - t);
+                            let b1 = 2.0 * (1.0 - t) * t * rho;
+                            let b2 = t * t;
+                            let denominator = (b0 + b1 + b2).max(1e-12);
+                            screen([
+                                (b0 * start[0] + b1 * control[0] + b2 * end[0]) / denominator,
+                                (b0 * start[1] + b1 * control[1] + b2 * end[1]) / denominator,
+                            ])
+                        })
+                        .collect();
+                    if samples.len() >= 2 {
+                        painter.add(Shape::line(samples, Stroke::new(1.4_f32, PREVIEW)));
+                    }
+                }
+                _ => {}
+            },
             SketchTool::Arc3Point => match state.draft.pending_points() {
                 [first] => {
                     if let (Some(a), Some(b)) = (screen(*first), screen(cursor)) {
@@ -2343,6 +2929,43 @@ fn draw_dimension(
                 painter.line_segment([centre, *last], thin);
                 painter.circle_filled(*first, 2.0, colour);
                 painter.circle_filled(*last, 2.0, colour);
+            }
+        }
+        DimensionScreenKind::Radial { from, to } => {
+            let direction = to - from;
+            let length = direction.length();
+            if length < 1e-3 {
+                return;
+            }
+            let along = direction / length;
+            let normal = Vec2::new(-along.y, along.x);
+            painter.line_segment([from, to], body);
+            // An arrow at the rim, pointing outwards.
+            let back = to - along * 8.0;
+            painter.line_segment([to, back + normal * 3.0], body);
+            painter.line_segment([to, back - normal * 3.0], body);
+        }
+        DimensionScreenKind::PointDistance { point, foot } => {
+            painter.line_segment([point, foot], body);
+            painter.circle_filled(point, 2.5, colour);
+            let direction = point - foot;
+            let length = direction.length();
+            if length > 1e-3 {
+                let normal = Vec2::new(-direction.y / length, direction.x / length);
+                painter.line_segment([foot + normal * 5.0, foot - normal * 5.0], body);
+            }
+        }
+        DimensionScreenKind::TangentDistance { from, to } => {
+            painter.line_segment([from, to], body);
+            painter.circle_filled(from, 2.0, colour);
+            let direction = to - from;
+            let length = direction.length();
+            if length > 1e-3 {
+                let along = direction / length;
+                let normal = Vec2::new(-along.y, along.x);
+                let back = to - along * 8.0;
+                painter.line_segment([to, back + normal * 3.0], body);
+                painter.line_segment([to, back - normal * 3.0], body);
             }
         }
         DimensionScreenKind::LineDistance { from, to } => {
@@ -2928,6 +3551,166 @@ mod tests {
         let point = sketch.point(id).unwrap();
         assert_eq!([point.x, point.y], [5.0, 7.0]);
         assert!(!move_point(&mut sketch, Uuid::new_v4(), [0.0, 0.0]));
+    }
+
+    #[test]
+    fn a_tangent_arc_leaves_its_line_along_it() {
+        // Start at (10, 0), tangent towards +X, end at (20, 10).
+        let (centre, radius, start_angle, end_angle) =
+            tangent_arc([10.0, 0.0], [1.0, 0.0], [20.0, 10.0]).expect("an arc");
+        let start = [
+            centre[0] + radius * start_angle.cos(),
+            centre[1] + radius * start_angle.sin(),
+        ];
+        assert!(
+            (start[0] - 10.0).abs() < 1e-6 && (start[1]).abs() < 1e-6,
+            "{start:?}"
+        );
+        let end = [
+            centre[0] + radius * end_angle.cos(),
+            centre[1] + radius * end_angle.sin(),
+        ];
+        assert!(
+            (end[0] - 20.0).abs() < 1e-6 && (end[1] - 10.0).abs() < 1e-6,
+            "{end:?}"
+        );
+        // The tangent at the start runs along +X: the radial turned left.
+        let radial = [start[0] - centre[0], start[1] - centre[1]];
+        let tangent = if end_angle > start_angle {
+            [-radial[1], radial[0]]
+        } else {
+            [radial[1], -radial[0]]
+        };
+        let length = tangent[0].hypot(tangent[1]);
+        assert!(
+            (tangent[0] / length - 1.0).abs() < 1e-6,
+            "the arc does not leave along the line: {tangent:?}"
+        );
+        // The end lies on the tangent line itself: no finite arc.
+        assert!(tangent_arc([10.0, 0.0], [1.0, 0.0], [30.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn the_conic_tool_passes_through_the_shoulder() {
+        let mut sketch = Sketch::new("test");
+        let mut draft = SketchDraft::default();
+        draft.begin(SketchTool::Conic);
+        draft.click(&mut sketch, [0.0, 0.0]);
+        draft.click(&mut sketch, [20.0, 0.0]);
+        assert!(matches!(
+            draft.click(&mut sketch, [10.0, 10.0]),
+            SketchEdit::Conic(_)
+        ));
+        assert_eq!(sketch.conics.len(), 1);
+        let points = sketch.conic_points(sketch.conics[0].id, 20);
+        let middle = points[10];
+        assert!((middle[0] - 10.0).abs() < 1e-6, "{middle:?}");
+        assert!((middle[1] - 10.0).abs() < 1e-6, "{middle:?}");
+        assert!((sketch.conics[0].rho - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_text_tool_asks_for_the_words() {
+        let mut sketch = Sketch::new("test");
+        let mut draft = SketchDraft::default();
+        draft.begin(SketchTool::Text);
+        assert_eq!(
+            draft.click(&mut sketch, [5.0, 5.0]),
+            SketchEdit::TextAt([5.0, 5.0])
+        );
+        assert!(
+            sketch.texts.is_empty(),
+            "the app adds the text after typing"
+        );
+        let edit = draft.finish_text(&mut sketch, [5.0, 5.0], "RCAD", 4.0);
+        assert!(matches!(edit, SketchEdit::Text(_)));
+        assert_eq!(sketch.texts.len(), 1);
+        assert_eq!(sketch.texts[0].content, "RCAD");
+    }
+
+    #[test]
+    fn a_circular_pattern_repeats_around_the_clicked_point() {
+        let mut sketch = Sketch::new("test");
+        let corners = sketch.add_rectangle(10.0, 0.0, 20.0, 5.0);
+        let selection = vec![sketch.lines[0].id, sketch.lines[1].id];
+        let centre = sketch.add_point(0.0, 0.0);
+        let params = ToolParams {
+            pattern_mode: PatternMode::Circular,
+            pattern_angle: 360.0,
+            pattern_count: 4,
+            ..ToolParams::default()
+        };
+        let hit = SketchHit {
+            id: centre,
+            kind: SketchEntityKind::Point,
+            distance: 0.0,
+        };
+        let message = command_step(
+            &mut sketch,
+            SketchTool::Pattern,
+            &mut Vec::new(),
+            &selection,
+            [0.0, 0.0],
+            Some(&hit),
+            &params,
+        )
+        .expect("a circular pattern");
+        assert!(message.contains("around the point"), "{message}");
+        // The rectangle's four lines plus three rotated copies of the two
+        // selected ones.
+        assert_eq!(sketch.lines.len(), 4 + 6);
+        let _ = corners;
+    }
+
+    #[test]
+    fn the_constraint_table_names_every_constraint() {
+        let mut sketch = Sketch::new("test");
+        let corners = sketch.add_rectangle(0.0, 0.0, 10.0, 5.0);
+        let circle = sketch.add_circle(0.0, 0.0, 3.0);
+        sketch.add_dimension_constraint(
+            Constraint::Radius {
+                curve: circle,
+                value: 3.0,
+            },
+            true,
+            true,
+            None,
+            DimensionOrientation::Aligned,
+        );
+        let labels: Vec<String> = sketch.constraints.iter().map(constraint_label).collect();
+        assert!(labels.contains(&"Horizontal".to_string()));
+        assert!(labels.contains(&"Radius 3".to_string()));
+        let _ = corners;
+    }
+
+    #[test]
+    fn the_new_dimensions_have_screen_geometry() {
+        let camera = top_camera();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let plane = xy_plane();
+        let mut sketch = Sketch::new("test");
+        let circle = sketch.add_circle(0.0, 0.0, 10.0);
+        sketch.add_dimension_constraint(
+            Constraint::Radius {
+                curve: circle,
+                value: 10.0,
+            },
+            true,
+            true,
+            Some([18.0, 0.0]),
+            DimensionOrientation::Aligned,
+        );
+        let dimensions = dimensions(&sketch);
+        assert_eq!(dimensions.len(), 1);
+        assert!(matches!(dimensions[0].kind, DimensionKind::Radial { .. }));
+        assert_eq!(dimensions[0].text, "R10");
+        let screen =
+            dimension_screen_geometry(rect, &camera, plane, &dimensions[0]).expect("on screen");
+        assert!(matches!(screen.kind, DimensionScreenKind::Radial { .. }));
+        assert_eq!(
+            dimension_hit_test(&sketch, rect, &camera, plane, screen.text, HIT_RADIUS),
+            Some(dimensions[0].constraint_index)
+        );
     }
 
     #[test]

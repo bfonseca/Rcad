@@ -12,72 +12,70 @@
 > cargo test --workspace e cargo check --workspace --all-targets (zero avisos),
 > e faz commit em main e push. Vai dizendo o que fizeste e o que ficou por fazer.
 
-**Onde estamos (última sessão):** o modo de edição de sketch foi revisto contra
-uma lista de dez pontos de UX; todos ficaram feitos, commitados e verdes, e os
-seis pontos da sessão anterior continuam feitos.
+**Onde estamos (última sessão):** os quatro pontos em falta do sketch
+(dimensões radiais/ponto-linha/tangentes, associatividade do sketch à feature,
+referências reparáveis e o resto dos comandos) ficaram feitos, commitados e
+verdes. O modo de edição revisto na sessão anterior continua a funcionar como
+ficou.
 
-**Feito nesta sessão (revisão do modo de edição de sketch):**
+**Feito nesta sessão (os quatro pontos em falta):**
 
-1. **Duas referências de posicionamento.** O sketch guarda
-   `references: Vec<SketchReference>`: a de orientação (o plano ou face onde foi
-   colocado, com a referência estável) e uma automática (o CYS na origem ou a
-   geometria de onde veio). Aparecem na faixa (`R1:` / `R2:`) e no viewport,
-   junto aos eixos do sketch.
-2. **Modo de edição com OK/Cancel e histórico.** `FeatureKind::Sketch { sketch }`
-   novo em `rcad-doc`: OK guarda o sketch como feature do histórico (o documento
-   serializa-o e o duplo-clique na árvore volta a abri-lo); Cancel sai sem
-   guardar; um sketch sem geometria não entra no histórico. Enquanto o sketch
-   está aberto nenhuma outra feature pode arrancar (a barra recusa Model,
-   Assembly e Analysis, e o extrude/revolve/box também), porque o corpo em que
-   se apoiariam ainda não existe. Sem sketch aberto, o extrude/revolve usa a
-   feature de sketch selecionada (ou a última).
-3. **Constrangimentos na barra de topo.** A barra flutuante mostra, além das
-   ferramentas de desenho, os dez constrangimentos (H, V, paralelo,
-   perpendicular, tangente, igual, simétrico, concêntrico, ponto médio,
-   coincidente) e ainda trim/extend/offset/mirror/pattern/Project Refs.
-4. **Dropdowns de retângulo, círculo e polígono.** O botão faz o modo comum (um
-   clique) e o menu dos modos (manter premido): retângulo por dois cantos,
-   centro+canto, ou três pontos (rodado); círculo centro+raio, diâmetro, ou
-   tangente a duas linhas (raio na faixa); triângulo, pentágono e hexágono
-   regulares.
-5. **Ferramenta de dimensões dinâmica.** Um clique numa linha (ou ponto)
-   escolhe; dois cliques em duas linhas dão ângulo (não paralelas) ou distância
-   (paralelas); entre dois pontos (o centro de um círculo/arco conta como ponto)
-   dá distância. O clique em espaço vazio coloca o texto onde o utilizador
-   clicou; uma linha inclinada pode ser cotada alinhada, horizontal ou vertical
-   (`Distance`, `HorizontalDistance` e `VerticalDistance` novas no crate).
-   Duplo-clique na dimensão abre o valor no local (sem janela) e Enter ou um
-   clique fora fecham.
-6. **Polyline e saída por clique direito.** Nova ferramenta de cadeia: cada
-   clique acrescenta um segmento, o cursor faz snap aos pontos da própria cadeia
-   e fechar sobre o primeiro ponto fecha o loop e sai da ferramenta. O clique
-   direito sai de qualquer ferramenta ou função mantendo a geometria criada.
-7. **Cursor e teclado.** A cruz (+) e a leitura de coordenadas só aparecem nas
-   ferramentas de construção; nas de seleção fica o cursor do sistema. Com um
-   campo de texto com foco (dimensão, nome, valor) nenhum shortcut de letra ou
-   dígito dispara — a verificação é global em `handle_shortcuts`.
+1. **As dimensões que faltavam.** Novas restrições `Radius`, `Diameter`,
+   `PointLineDistance` e `LineCurveDistance` (a distância de uma linha ao
+   **tangente** de um círculo/arco: distância ao centro menos o raio), com
+   solver, equações no DOF, desenho próprio no viewport (seta ao bordo para o
+   raio, perpendicular para o ponto-linha, seta até ao ponto de tangência) e a
+   ferramenta dinâmica: um círculo/arco sozinho dá raio ou diâmetro (alternador
+   **R/Ø** na faixa), um ponto e uma linha dão a distância perpendicular, uma
+   linha e uma curva dão a distância tangente. Uma dimensão driven passou a ser
+   ignorada pelo solver e pelo DOF para **todos** os tipos, não só Distance.
+2. **Associatividade do sketch à feature.** `Extrude` e `Revolve` guardam
+   `sketch: Option<Uuid>` (com serde default): o rebuild relê o perfil e o plano
+   do Sketch, por isso editar o sketch atualiza o sólido sem tocar na feature; o
+   OK atualiza também a cópia do perfil/plano que a feature guarda. O MCP aceita
+   um argumento opcional `sketch` nos `add_extrude`/`add_revolve`.
+3. **Referências do sketch reparáveis.** O rebuild resolve a referência de
+   orientação de cada Sketch (plano ou face), reporta as que se perderam com
+   local e descrição, e as features construídas a partir do sketch seguem o
+   plano resolvido (mover o datum move o sólido). A lista de reparação junta o
+   que vem do kernel ao que vem da malha, aceita aresta, face **ou plano** como
+   substituto e reescreve a referência do Sketch (ou o `placement` do
+   Extrude/Revolve).
+4. **Os restantes comandos.** **Arco tangente** (clica-se a linha perto do
+   extremo onde o arco começa e depois o fim; o arco sai ao longo da linha, com
+   coincidência no extremo), **cónica** (três cliques + rho: uma quadrática
+   racional guardada em `SketchConic`), **texto** (clique + campo no local;
+   desenhado com a fonte da interface, ainda **não** convertido em curvas para o
+   kernel), **importação DXF/SVG** (leitor simples no crate: LINE/CIRCLE/ARC/
+   LWPOLYLINE/POINT e line/circle/rect/polyline/polygon/path; menu Insert e
+   diálogo com caminho), **pattern circular** na faixa (centro = ponto clicado,
+   varredura configurável), **tabela de restrições** editável (janela com valor
+   e apagar) e **destaque de liberdade por entidade** (toggle "Free DOF": o que
+   ainda tem liberdade fica laranja, via `Sketch::find_unconstrained_entities`).
 
-**Feito na sessão anterior (não repetir):** desenhar com o rato (Point, Line,
-Rectangle, Circle, snap à grelha, Esc a recuar); restrições, dimensões e graus
-de liberdade no ecrã (glifos, três cores de dimensão, pontos livres, faixa do
-sketch); dimensões editáveis (driving/driven/promote/delete); arco de 3 pontos,
-spline, trim, extend, offset, mirror, pattern; arrastar pontos; projetar
-referências; undo/redo do sketch; DOF por posto (`analyze_dof_detailed`).
+**Feito na sessão anterior (não repetir):** revisão do modo de edição de sketch
+contra dez pontos de UX: duas referências de posicionamento, OK/Cancel e o
+sketch como feature do histórico, os dez constrangimentos na barra de topo,
+dropdowns de retângulo/círculo/polígono, ferramenta de dimensões dinâmica com
+colocação do texto e orientação, polyline com snap e fecho, saída por clique
+direito, cruz só nas ferramentas de construção e shortcuts calados enquanto se
+escreve.
 
 **Próximo, por esta ordem:**
 
-1. **Dimensões que faltam**: raio/diâmetro de um único círculo ou arco,
-   distância de um ponto a uma linha, e distâncias a geometria tangente.
-2. **Associatividade do sketch à feature**: o extrude/revolve guarda o perfil,
-   não uma referência à feature de sketch; editar o sketch depois não atualiza a
-   feature que dele nasceu.
-3. **Referências re-resolvidas**: as duas referências são guardadas e mostradas,
-   mas ainda não há repair list própria do sketch quando o plano ou a face se
-   move.
-4. **Restantes comandos**: arco tangente, cónica (rho), texto, importação
-   DXF/SVG e `circular_pattern` na interface.
-5. **Tabela de restrições** editável e destaque por entidade de liberdade
-   (`find_unconstrained_entities`).
+1. **Texto como geometria**: converter a fonte em contornos (e o mesmo para a
+   cónica/spline) para entrarem no perfil fechado que o kernel extrusa.
+2. **Associatividade das faces geradas**: o booleano e o round continuam presos
+   a referências de aresta; ligá-los às faces de origem é o passo seguinte.
+3. **Reparação até ao fim**: ao substituir a referência do sketch, mover também
+   o plano guardado nele (hoje o rebuild segue a referência, mas o plano
+   guardado só muda quando o sketch é reaberto).
+4. **O resto do desenho**: arco tangente a duas curvas e dirigido por
+   restrição, região automática (4.4.7), DXF com blocks/transformações e SVG com
+   transform.
+5. **Ver o `find_unconstrained_entities` a alimentar as setas de DOF (hoje só
+   colore as entidades) e a tabela de restrições a permitir editar os sujeitos,
+   não só o valor.
 
 **Feito antes (não repetir):** nomes estáveis de faces e arestas; referências
 persistentes por feature; seleção ordenada partilhada (viewport + árvore) com
@@ -99,10 +97,21 @@ são enviados com `git push origin main`.
   secção "Screenshots on a Wayland session"); sem isso o processo pendura-se.
 - `rcad-param` tem `rcad-occt` como *dev-dependency*, para os testes com kernel
   real (arestas, faces, fillets geométricos).
-- Duplicação conhecida a unificar: a regra de referências perdidas existe na app
-  (`lost_references`) e no kernel (`RebuildResult.lost_references`).
+- Referências perdidas: as duas fontes já se juntam. A app procura as arestas
+  em falta na malha (`lost_references(part, mesh)`) e o kernel devolve as que não
+  resolveu (`RebuildResult.lost_references`, hoje incluindo as do sketch e do
+  `placement`); a resposta do worker leva as duas e a lista final é
+  desduplicada por (feature, referência).
 - `Extrude`/`Revolve` sem `placement` mantêm o comportamento antigo (XY, eixo Z),
-  por compatibilidade com documentos antigos e com o MCP.
+  por compatibilidade com documentos antigos e com o MCP. O campo `sketch` é
+  `Option<Uuid>` com `serde(default)`, por isso os documentos antigos abrem com
+  `sketch: None` e não perdem nada.
+- Um nó de sketch no histórico não produz corpo: `eval_feature` devolve
+  `Ok(None)` e o corpo atual fica como estava. A feature seguinte (extrude ou
+  revolve) lê o perfil do sketch.
+- Texto, cónica e spline não entram no perfil que o kernel extrusa: o perfil vem
+  das linhas (e do contorno ordenado dos pontos). Pôr o texto em curvas é o
+  próximo passo.
 
 
 Based on the approved plan in `plans/creo-workflow-analysis.md`, this document breaks down each phase into actionable coding tasks.
@@ -238,15 +247,15 @@ Based on the approved plan in `plans/creo-workflow-analysis.md`, this document b
 
 ### 4.4 Additional Sketch Tools
 - [x] **4.4.1** Line Chain tool (continuous click-click-click, closes on the first point or a right-click)
-- [ ] **4.4.2** Tangent Arc tool
+- [x] **4.4.2** Tangent Arc tool — two clicks from a line end; tangent by construction
 - [x] **4.4.3** 3-Point Arc tool
-- [ ] **4.4.4** Conic tool (rho parameter)
-- [ ] **4.4.5** Text tool (TrueType as sketch geometry)
-- [ ] **4.4.6** Import DXF/SVG → sketch entities
+- [x] **4.4.4** Conic tool (rho parameter) — three clicks, the rho from the strip, stored as a rational quadratic
+- [x] **4.4.5** Text tool (TrueType as sketch geometry) — click and type, drawn with the UI font; not yet converted to curves for the kernel
+- [x] **4.4.6** Import DXF/SVG → sketch entities — lines, circles, arcs, polylines, rect and path
 - [ ] **4.4.7** Sketch Region auto-detection
 - [x] **4.4.8** Show DOF arrows toggle — a ring on every unanchored point plus the DOF strip; no arrow toggle
 - [x] **4.4.9** Highlight conflicts (red on over-constrained) — the strip shows the status and the redundancy count in red
-- [ ] **4.4.10** Constraint Table (spreadsheet view, editable)
+- [x] **4.4.10** Constraint Table (spreadsheet view, editable) — a window listing every constraint, with its value and a delete button
 - [x] **4.4.11** Drag Test (Shift+drag to test DOF) — drag a point with Select; no Shift required
 - [x] **4.4.12** Spline tool (click the control points, Enter to finish)
 - [x] **4.4.13** Trim / Extend / Offset by clicking entities
@@ -261,6 +270,12 @@ Based on the approved plan in `plans/creo-workflow-analysis.md`, this document b
 - [x] **4.4.22** Inline dimension editing: double-click opens the value in place; Enter or a click elsewhere commits
 - [x] **4.4.23** Right-click leaves any sketch tool keeping the geometry drawn
 - [x] **4.4.24** Crosshair only for construction tools; shortcuts suppressed while any text field has the keyboard
+- [x] **4.4.25** Radius and diameter dimensions for a single circle or arc, with an R/Ø toggle
+- [x] **4.4.26** Point-to-line distance and line-to-tangent distance dimensions
+- [x] **4.4.27** Extrude and revolve remember the Sketch feature and re-read its profile and plane
+- [x] **4.4.28** Sketch references are resolved on rebuild, listed for repair and substitutable
+- [x] **4.4.29** Circular pattern from the interface (clicked centre point, sweep in the strip)
+- [x] **4.4.30** Per-entity free-DOF highlight (Free DOF toggle) backed by `find_unconstrained_entities`
 
 ---
 
@@ -1105,4 +1120,60 @@ arc, point-to-line and tangent distances, associative extrude/revolve from a
 stored sketch (the profile is a snapshot), re-resolved sketch references with
 their own repair list, tangent arc/conic/text/DXF/SVG, circular pattern in the
 interface, an editable constraint table and per-entity free-DOF highlighting.
+
+
+### The four remaining sketch gaps: dimensions, association, repair and the rest of the commands
+
+- **Radius/diameter, point-line and tangent distances.** Four constraints in
+  `rcad-sketch`: `Radius` and `Diameter` (the value is the diameter; the solver
+  halves it), `PointLineDistance` (the point moves along the line normal) and
+  `LineCurveDistance` (the gap between a line and the tangent of a circle or an
+  arc: the perpendicular distance to the centre minus the radius). Each has its
+  solver arm, its DOF row, its dimension record (value, placed text,
+  orientation) and its viewport drawing. The dynamic dimension tool picks them
+  up: one curve gives a radius or a diameter (the R/Ø toggle in the strip), a
+  point with a line gives the perpendicular distance, a line with a curve gives
+  the tangent distance. Driven dimensions are now skipped by the solver and by
+  the DOF for every kind, not only for distances.
+- **Associative extrude and revolve.** `FeatureKind::Extrude` and
+  `FeatureKind::Revolve` carry `sketch: Option<EntityId>` (serde default). A
+  rebuild looks the Sketch feature up, re-reads its profile and uses the plane
+  its orientation reference resolves to, so editing the sketch or moving the
+  datum moves the solid. Saving the sketch (OK) also refreshes the profile and
+  placement the dependent features keep, and the MCP `add_extrude`/`add_revolve`
+  take an optional `sketch` feature id.
+- **Sketch references in the repair list.** The rebuild resolves a sketch's
+  orientation reference on every pass (a datum plane by feature id, a face
+  through the current body's reference map), reports what it cannot resolve
+  with the stored location and a sentence, and remembers the resolved plane for
+  the features built from the sketch. The worker now carries
+  `RebuildResult.lost_references` into the app, which merges them with the
+  mesh-based edge references and deduplicates. Substitution rewrites a Sketch's
+  orientation reference (label included) and an Extrude/Revolve placement, and
+  the repair bar accepts an edge, a face or a datum plane as the replacement.
+- **The remaining commands.** A tangent arc built from a line end (two clicks:
+  pick the line near the end, then the arc end; the arc leaves along the line and
+  is made coincident with that end). A conic (three clicks and the strip's rho,
+  stored as a rational quadratic in `SketchConic`, sampled for the screen). A
+  text note (click, type in the field that opens where the click landed; drawn
+  with the UI font, sized by the sketch height; not yet curves for the kernel).
+  DXF and SVG import (`sketch::import`: LINE/CIRCLE/ARC/LWPOLYLINE/POINT and
+  line/circle/rect/polyline/polygon/path, cubic and quadratic curves sampled,
+  elliptical arcs as lines; SVG Y flipped), reached from Insert → "Sketch file
+  (DXF/SVG)" with a path dialog. A circular pattern in the strip (clicked
+  centre point, sweep angle, count). An editable constraint table window (every
+  constraint, dimension values editable, delete) and a Free DOF toggle that
+  colours the entities `Sketch::find_unconstrained_entities` still lists.
+
+Tests added: the crate covers the four new constraints (solver, DOF, driven
+skip), conics, text, anchored points, `find_unconstrained_entities` and the DXF
+and SVG readers; `sketch_ui` covers the tangent-arc and conic helpers, the text
+tool's draft, the circular pattern command, the constraint labels and the radial
+screen geometry; `rcad-param` uses the mock backend to check that an extrude
+re-reads its sketch, that a sketch follows the datum plane it is placed on, that
+a lost sketch reference is reported and that a missing sketch fails loudly; the
+app covers editing a sketch and seeing the extrude follow, substituting a lost
+sketch reference, the tangent arc, the conic, the text editor, a file import,
+the constraint table, the radial/point-line/tangent dimension workflow and the
+free-DOF list.
 

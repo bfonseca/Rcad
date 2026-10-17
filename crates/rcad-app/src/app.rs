@@ -42,6 +42,9 @@ pub struct RebuildResponse {
     pub version: u64,
     pub mesh: TriangleMesh,
     pub errors: Vec<String>,
+    /// References the rebuild could not resolve: a plane or a face a feature
+    /// was placed on, or a sketch's own reference.
+    pub lost_references: Vec<rcad_doc::LostReference>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,9 +156,22 @@ pub struct RcadApp {
     dimension_picks: Vec<(Uuid, sketch_ui::SketchEntityKind)>,
     /// Which direction the next linear dimension measures along.
     dimension_orientation: DimensionOrientation,
+    /// Whether a radius or a diameter dimension is made from one curve.
+    dimension_size: sketch_ui::DimensionSize,
     /// The sketch point the mouse is dragging.
     dragging_point: Option<Uuid>,
-    /// Parameters the command tools read from the sketch strip.
+    /// Draw the sketch entities that still have a degree of freedom in another
+    /// colour.
+    show_free_dof: bool,
+    /// True while the constraint table window is open.
+    show_constraint_table: bool,
+    /// The import dialog: whether it is open, and the file being read.
+    show_import_dialog: bool,
+    import_path: String,
+    /// The text note being typed, if any.
+    sketch_text_editor: Option<SketchTextEditor>,
+    /// The pattern tool's mode and sweep, and the other command parameters the
+    /// strip shows.
     tool_params: sketch_ui::ToolParams,
     /// The viewport rectangle of the last frame, so the floating sketch
     /// controls and the tests can speak in screen coordinates.
@@ -240,6 +256,20 @@ pub enum SelectionQuery {
     SurfaceRing,
 }
 
+/// The in-place editor of a sketch text note: where it goes and what is being
+/// typed.
+#[derive(Debug, Clone)]
+pub struct SketchTextEditor {
+    /// The place in the sketch the text will sit at.
+    pub position: [f64; 2],
+    /// What the user has typed so far.
+    pub content: String,
+    /// Where the editor opens, in screen points.
+    pub at: egui::Pos2,
+    /// True until the field has taken the focus.
+    pub fresh: bool,
+}
+
 /// The in-place value editor of a sketch dimension.
 #[derive(Debug, Clone)]
 pub struct DimensionEditor {
@@ -289,6 +319,7 @@ impl RcadApp {
                         version: job.version,
                         mesh: res.display_mesh,
                         errors: res.errors,
+                        lost_references: res.lost_references,
                     });
                 }
             })
@@ -337,8 +368,14 @@ impl RcadApp {
             dimension_menu: None,
             dimension_menu_was_shown: false,
             sketch_feature: None,
+            show_free_dof: false,
             dimension_picks: Vec::new(),
             dimension_orientation: DimensionOrientation::default(),
+            dimension_size: sketch_ui::DimensionSize::default(),
+            show_constraint_table: false,
+            show_import_dialog: false,
+            import_path: String::new(),
+            sketch_text_editor: None,
             dragging_point: None,
             tool_params: sketch_ui::ToolParams::default(),
             viewport_rect: None,
@@ -702,6 +739,10 @@ impl RcadApp {
                         self.new_sketch();
                         ui.close();
                     }
+                    if ui.button("Sketch file (DXF/SVG)…").clicked() {
+                        self.show_import_dialog = true;
+                        ui.close();
+                    }
                     if ui.button("Box  B").clicked() {
                         self.add_box_feature();
                         ui.close();
@@ -881,6 +922,7 @@ impl RcadApp {
                                 .dimension_editor
                                 .as_ref()
                                 .map(|editor| editor.index),
+                            show_free_dof: self.show_free_dof,
                         },
                     );
                 }
@@ -976,6 +1018,13 @@ impl RcadApp {
                         if let Some(part) = self.get_active_part() {
                             self.lost_references = lost_references(part, &self.mesh);
                         }
+                        // The kernel also reports the placements and sketch
+                        // references it could not resolve; the two lists are
+                        // merged, without repeating an entry.
+                        self.lost_references.extend(response.lost_references);
+                        let mut seen = std::collections::HashSet::new();
+                        self.lost_references
+                            .retain(|entry| seen.insert((entry.feature, entry.reference.clone())));
                         describe_lost(&mut self.lost_references, &self.reference_memory);
                         // Frame the model the first time it appears: the app
                         // previously opened at a fixed camera distance.
@@ -1028,6 +1077,9 @@ impl RcadApp {
         // the in-place value editor.
         self.draw_dimension_menu(ctx);
         self.draw_dimension_editor(ctx);
+        self.draw_sketch_text_editor(ctx);
+        self.draw_import_dialog(ctx);
+        self.draw_constraint_table(ctx);
 
         // Process toolbar actions
         if let Some(action) = toolbar_action {
@@ -1565,18 +1617,22 @@ impl RcadApp {
         if self.lost_references.is_empty() {
             return;
         }
+        // The replacement is the selected edge, or the selected face or datum
+        // plane: a sketch placed on a plane is repaired with another plane, not
+        // with an edge.
         let replacement = self
             .selection
             .edge_references()
             .first()
-            .map(|reference| reference.to_string());
+            .map(|reference| reference.to_string())
+            .or_else(|| self.selection_plane_reference());
         let mut substitute: Option<(Uuid, String, String)> = None;
         let mut dismiss = false;
         egui::TopBottomPanel::bottom("lost_references").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new(format!(
-                        "{} lost reference(s) - pick an edge and substitute",
+                        "{} lost reference(s) - pick an edge, a face or a datum plane and substitute",
                         self.lost_references.len()
                     ))
                     .strong()
@@ -1598,7 +1654,9 @@ impl RcadApp {
                                 false,
                                 egui::Button::new(format!("Substitute {}", entry.reference)),
                             )
-                            .on_hover_text(format!("{hover}\nSelect an edge in the viewport first"))
+                            .on_hover_text(format!(
+                                "{hover}\nSelect an edge, a face or a datum plane in the viewport first"
+                            ))
                             .clicked(),
                     };
                     if clicked {
@@ -1645,6 +1703,25 @@ impl RcadApp {
                         return false;
                     };
                     *slot = replacement.to_string();
+                }
+                FeatureKind::Sketch { sketch } => {
+                    let Some(reference) = sketch.references.iter_mut().find(|reference| {
+                        reference.reference.as_deref() == Some(lost)
+                    }) else {
+                        return false;
+                    };
+                    reference.reference = Some(replacement.to_string());
+                    reference.label = replacement.to_string();
+                }
+                FeatureKind::Extrude {
+                    placement: Some(placement),
+                    ..
+                }
+                | FeatureKind::Revolve {
+                    placement: Some(placement),
+                    ..
+                } if placement.reference.as_deref() == Some(lost) => {
+                    placement.reference = Some(replacement.to_string());
                 }
                 _ => return false,
             }
@@ -2469,6 +2546,44 @@ impl RcadApp {
                     Some(name)
                 }
             };
+            // The extrude and revolve built from this sketch keep a copy of its
+            // profile and plane: bring them up to date now, so the document says
+            // what the rebuild will compute.
+            if let Some(source) = editing {
+                let fresh = sketch.to_profile();
+                let placement = SketchPlacement {
+                    origin: sketch.plane_origin,
+                    normal: sketch.plane_normal,
+                    x_direction: sketch.plane_x_axis,
+                    reference: sketch
+                        .reference(SketchReferenceRole::Orientation)
+                        .and_then(|reference| reference.reference.clone()),
+                };
+                for feature in &mut part.features {
+                    let (sketch_source, profile, feature_placement) = match &mut feature.kind {
+                        FeatureKind::Extrude {
+                            sketch,
+                            profile,
+                            placement,
+                            ..
+                        }
+                        | FeatureKind::Revolve {
+                            sketch,
+                            profile,
+                            placement,
+                            ..
+                        } => (sketch, profile, placement),
+                        _ => continue,
+                    };
+                    if *sketch_source != Some(source) {
+                        continue;
+                    }
+                    if let Some(fresh) = &fresh {
+                        *profile = fresh.clone();
+                    }
+                    *feature_placement = Some(placement.clone());
+                }
+            }
         }
         self.rebuild_active_part();
         self.last_error = None;
@@ -2502,11 +2617,12 @@ impl RcadApp {
         self.dimension_menu = None;
         self.dragging_point = None;
         self.dimension_picks.clear();
+        self.sketch_text_editor = None;
     }
 
     /// The sketch to sweep with an extrude or a revolve: the open one, else the
     /// selected Sketch feature, else the last one in the tree.
-    fn sketch_for_sweep(&self) -> Option<(Sketch, Option<SketchPlacement>)> {
+    fn sketch_for_sweep(&self) -> Option<(Sketch, Option<SketchPlacement>, Option<Uuid>)> {
         if let Some(sketch) = &self.sketch {
             let placement = self
                 .sketch_plane
@@ -2516,7 +2632,7 @@ impl RcadApp {
                     x_direction,
                     reference: self.sketch_plane_reference.clone(),
                 });
-            return Some((sketch.clone(), placement));
+            return Some((sketch.clone(), placement, self.sketch_feature));
         }
         let part = self.get_active_part()?;
         let selected = self.selection.items().iter().find_map(|item| match item {
@@ -2541,6 +2657,7 @@ impl RcadApp {
                 x_direction: sketch.plane_x_axis,
                 reference,
             }),
+            Some(chosen.id),
         ))
     }
 
@@ -2628,6 +2745,15 @@ impl RcadApp {
     pub fn escape(&mut self) {
         // Close what is open first: the editor or the menu is what the user is
         // looking at, and cancelling the sketch tool behind it would surprise.
+        if self.sketch_text_editor.is_some() {
+            self.cancel_sketch_text();
+            return;
+        }
+        if self.show_import_dialog || self.show_constraint_table {
+            self.show_import_dialog = false;
+            self.show_constraint_table = false;
+            return;
+        }
         if self.dimension_editor.is_some()
             || self.dimension_menu.is_some()
             || self.selected_dimension.is_some()
@@ -2727,6 +2853,8 @@ impl RcadApp {
 
         let tool = self.sketch_draft.tool();
         let mut consumed = false;
+        // Set when the text tool wants its editor opened after the borrow ends.
+        let mut text_at: Option<[f64; 2]> = None;
 
         // A click on a dimension belongs to the dimension, whatever tool is
         // active: dimensions are thin and would otherwise be hard to reach.
@@ -2794,6 +2922,7 @@ impl RcadApp {
                                 &picks,
                                 cursor,
                                 self.dimension_orientation,
+                                self.dimension_size,
                             ) {
                                 Ok(message) => {
                                     self.push_sketch_snapshot(before);
@@ -2806,6 +2935,93 @@ impl RcadApp {
                                     self.last_error = Some(message);
                                 }
                             }
+                        }
+                    }
+                }
+                consumed = true;
+            }
+            // The tangent arc leaves a line end along the line itself: two
+            // clicks, a line and then the end of the arc.
+            SketchTool::ArcTangent => {
+                if let Some(span) = self.sketch_draft.tangent_arc().cloned() {
+                    let before = sketch.clone();
+                    match sketch_ui::tangent_arc(span.start, span.direction, cursor) {
+                        Some((centre, radius, start_angle, end_angle)) => {
+                            let arc = sketch.add_arc(
+                                centre[0],
+                                centre[1],
+                                radius,
+                                start_angle,
+                                end_angle,
+                            );
+                            // The arc starts on the line end it was built from.
+                            if let Some(arc) =
+                                sketch.arcs.iter().find(|candidate| candidate.id == arc)
+                            {
+                                let start_point = arc.start_point;
+                                sketch.constraints.push(Constraint::Coincident {
+                                    a: start_point,
+                                    b: span.point,
+                                });
+                            }
+                            self.push_sketch_snapshot(before);
+                            if let Err(error) = sketch.solve() {
+                                self.last_error = Some(format!("Constraints: {error}"));
+                            }
+                            self.status = Some(format!(
+                                "Tangent arc drawn from the {} end.",
+                                sketch_ui::entity_label(&sketch, span.line)
+                            ));
+                            self.sketch_draft.begin(SketchTool::ArcTangent);
+                        }
+                        None => {
+                            self.last_error =
+                                Some("Click further from the line: the arc has no size.".to_string())
+                        }
+                    }
+                } else {
+                    let hit =
+                        sketch_ui::hit_test(&sketch, rect, &self.camera, plane, pos, HIT_RADIUS);
+                    // A click on the line or on one of its ends both pick it: the
+                    // end is what the arc will start from.
+                    let picked = match hit {
+                        Some(hit) if hit.kind == sketch_ui::SketchEntityKind::Line => sketch
+                            .lines
+                            .iter()
+                            .find(|candidate| candidate.id == hit.id)
+                            .cloned(),
+                        Some(hit) if hit.kind == sketch_ui::SketchEntityKind::Point => sketch
+                            .lines
+                            .iter()
+                            .find(|candidate| candidate.a == hit.id || candidate.b == hit.id)
+                            .cloned(),
+                        _ => None,
+                    };
+                    match picked {
+                        Some(line) => {
+                            let (Some(a), Some(b)) = (
+                                sketch_ui::point_of(&sketch, line.a),
+                                sketch_ui::point_of(&sketch, line.b),
+                            ) else {
+                                self.last_error = Some("That line has no ends.".to_string());
+                                self.sketch = Some(sketch);
+                                return true;
+                            };
+                            let near_a = (cursor[0] - a[0]).hypot(cursor[1] - a[1])
+                                <= (cursor[0] - b[0]).hypot(cursor[1] - b[1]);
+                            let (point_id, start, other) = if near_a {
+                                (line.a, a, b)
+                            } else {
+                                (line.b, b, a)
+                            };
+                            let direction = [start[0] - other[0], start[1] - other[1]];
+                            self.sketch_draft
+                                .begin_arc_tangent(line.id, point_id, start, direction);
+                            self.status = Some("Now click where the arc ends.".to_string());
+                        }
+                        None => {
+                            self.last_error =
+                                Some("Click the line the arc should leave from.".to_string())
                         }
                     }
                 }
@@ -2851,8 +3067,14 @@ impl RcadApp {
             // The drawing tools: the click is the corner, end, centre or
             // control point the tool was waiting for.
             _ => {
+                if tool == SketchTool::Conic {
+                    self.sketch_draft.set_conic_rho(self.tool_params.conic_rho);
+                }
                 let before = sketch.clone();
                 let edit = self.sketch_draft.click(&mut sketch, cursor);
+                if let SketchEdit::TextAt(position) = edit {
+                    text_at = Some(position);
+                }
                 if edit.added_geometry() {
                     self.push_sketch_snapshot(before);
                 }
@@ -2867,6 +3089,9 @@ impl RcadApp {
             }
         }
         self.sketch = Some(sketch);
+        if let Some(position) = text_at {
+            self.open_sketch_text_editor(position, pos);
+        }
         consumed
     }
 
@@ -2905,7 +3130,10 @@ impl RcadApp {
             }
             SketchEdit::Polygon(_) => self.status = Some("Polygon drawn.".to_string()),
             SketchEdit::Arc(_) => self.status = Some("Arc drawn.".to_string()),
+            SketchEdit::Conic(_) => self.status = Some("Conic drawn.".to_string()),
             SketchEdit::Spline(_) => self.status = Some("Spline drawn.".to_string()),
+            SketchEdit::Text(_) => self.status = Some("Text added.".to_string()),
+            SketchEdit::TextAt(_) => {}
             SketchEdit::TooSmall => {
                 self.last_error =
                     Some("That shape has no size: click further from the first point.".to_string())
@@ -3035,7 +3263,7 @@ impl RcadApp {
 
         // While the value field is open a click only takes the focus away from
         // it (which commits the value); it must not also draw or pick behind it.
-        if self.dimension_editor.is_some()
+        if (self.dimension_editor.is_some() || self.sketch_text_editor.is_some())
             && ui.input(|i| i.pointer.any_click())
         {
             return (true, cursor);
@@ -3506,6 +3734,277 @@ impl RcadApp {
     ///
     /// Shown only while a sketch is open, so the viewport keeps its room the
     /// rest of the time.
+    /// Open the in-place editor of a text note.
+    pub fn open_sketch_text_editor(&mut self, position: [f64; 2], at: egui::Pos2) {
+        self.sketch_text_editor = Some(SketchTextEditor {
+            position,
+            content: String::new(),
+            at,
+            fresh: true,
+        });
+        self.status = Some("Text: type it, then press Enter.".to_string());
+    }
+
+    /// Add the typed text to the sketch and close the editor.
+    pub fn commit_sketch_text(&mut self) {
+        let Some(editor) = self.sketch_text_editor.take() else {
+            return;
+        };
+        let content = editor.content.trim().to_string();
+        if content.is_empty() {
+            self.status = Some("Empty text: nothing was added.".to_string());
+            return;
+        }
+        let height = self.tool_params.text_height;
+        let Some(mut sketch) = self.sketch.take() else {
+            return;
+        };
+        let before = sketch.clone();
+        self.push_sketch_snapshot(before);
+        let edit = self
+            .sketch_draft
+            .finish_text(&mut sketch, editor.position, &content, height);
+        self.sketch = Some(sketch);
+        self.report_sketch_edit(&edit);
+    }
+
+    /// Drop the text being typed.
+    pub fn cancel_sketch_text(&mut self) {
+        if self.sketch_text_editor.take().is_some() {
+            self.status = Some("Text cancelled.".to_string());
+        }
+    }
+
+    /// The in-place text editor: a field floating where the click landed.
+    fn draw_sketch_text_editor(&mut self, ctx: &egui::Context) {
+        let Some(editor) = self.sketch_text_editor.as_ref() else {
+            return;
+        };
+        let at = editor.at;
+        let mut content = editor.content.clone();
+        let mut fresh = editor.fresh;
+        let mut commit = false;
+        let mut cancel = false;
+        egui::Area::new(egui::Id::new("rcad_sketch_text_editor"))
+            .fixed_pos(at + egui::vec2(8.0, 8.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut content)
+                        .desired_width(170.0)
+                        .hint_text("text")
+                        .font(egui::FontId::proportional(13.0)),
+                );
+                if fresh {
+                    response.request_focus();
+                    fresh = false;
+                }
+                if response.lost_focus() {
+                    commit = true;
+                }
+                ui.input(|input| {
+                    if input.key_pressed(egui::Key::Escape) {
+                        cancel = true;
+                    }
+                });
+            });
+        if let Some(editor) = self.sketch_text_editor.as_mut() {
+            editor.content = content;
+            editor.fresh = fresh;
+        }
+        if cancel {
+            self.cancel_sketch_text();
+        } else if commit {
+            self.commit_sketch_text();
+        }
+    }
+
+    /// Import a DXF or an SVG file into the open sketch.
+    pub fn import_sketch_file(&mut self, path: &Path) -> Result<String, String> {
+        if self.sketch.is_none() {
+            return Err("Start a sketch before importing geometry into it.".to_string());
+        }
+        let content = std::fs::read_to_string(path)
+            .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let mut sketch = self.sketch.take().expect("checked above");
+        let before = sketch.clone();
+        let result = sketch.import_sketch(&content, &extension);
+        match result {
+            Ok(added) => {
+                self.push_sketch_snapshot(before);
+                let _ = sketch.solve();
+                self.sketch = Some(sketch);
+                let message = format!(
+                    "{added} entities imported from {}.",
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("the file")
+                );
+                self.last_error = None;
+                self.status = Some(message.clone());
+                Ok(message)
+            }
+            Err(error) => {
+                self.sketch = Some(sketch);
+                self.last_error = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    /// The import dialog, with a path field.
+    fn draw_import_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_import_dialog {
+            return;
+        }
+        let mut open = self.show_import_dialog;
+        let mut path = self.import_path.clone();
+        let mut import = false;
+        egui::Window::new("Import sketch geometry")
+            .id(egui::Id::new("rcad_import_dialog"))
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("DXF or SVG file path:");
+                ui.add(egui::TextEdit::singleline(&mut path).desired_width(460.0));
+                ui.label(
+                    "Lines, circles, arcs, polylines and paths are imported. Text and dimensions are skipped.",
+                );
+                if ui.button("Import").clicked() {
+                    import = true;
+                }
+            });
+        self.show_import_dialog = open;
+        self.import_path = path;
+        if import {
+            let file = std::path::PathBuf::from(self.import_path.trim());
+            let _ = self.import_sketch_file(&file);
+            self.show_import_dialog = false;
+        }
+    }
+
+    /// One row of the constraint table: what the constraint is, its value when
+    /// it is a dimension, and whether that dimension drives.
+    pub fn constraint_table_rows(&self) -> Vec<(String, Option<f64>, bool)> {
+        let Some(sketch) = self.sketch.as_ref() else {
+            return Vec::new();
+        };
+        sketch
+            .constraints
+            .iter()
+            .enumerate()
+            .map(|(index, constraint)| {
+                (
+                    sketch_ui::constraint_label(constraint),
+                    sketch.dimension_value(index),
+                    sketch.dimension_is_driving(index).unwrap_or(true),
+                )
+            })
+            .collect()
+    }
+
+    /// Delete one constraint by its index in the sketch, for the table.
+    pub fn delete_sketch_constraint(&mut self, index: usize) -> bool {
+        let Some(mut sketch) = self.sketch.take() else {
+            return false;
+        };
+        let before = sketch.clone();
+        if !sketch.remove_constraint(index) {
+            self.sketch = Some(sketch);
+            return false;
+        }
+        self.push_sketch_snapshot(before);
+        let _ = sketch.solve();
+        self.sketch = Some(sketch);
+        self.status = Some("Constraint deleted.".to_string());
+        true
+    }
+
+    /// Give a dimension a new value, for the table.
+    pub fn set_sketch_constraint_value(&mut self, index: usize, value: f64) -> bool {
+        let Some(mut sketch) = self.sketch.take() else {
+            return false;
+        };
+        let before = sketch.clone();
+        if !sketch.set_dimension_value(index, value) {
+            self.sketch = Some(sketch);
+            return false;
+        }
+        self.push_sketch_snapshot(before);
+        let _ = sketch.solve();
+        self.sketch = Some(sketch);
+        true
+    }
+
+    /// The editable constraint table: every constraint, its value, and a way to
+    /// delete it. The panel says how many there are; this says which.
+    fn draw_constraint_table(&mut self, ctx: &egui::Context) {
+        if !self.show_constraint_table {
+            return;
+        }
+        let rows = self.constraint_table_rows();
+        let mut open = self.show_constraint_table;
+        let mut delete: Option<usize> = None;
+        let mut change: Option<(usize, f64)> = None;
+        egui::Window::new("Constraints")
+            .id(egui::Id::new("rcad_constraint_table"))
+            .resizable(true)
+            .default_width(380.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if rows.is_empty() {
+                    ui.label("The sketch has no constraints yet.");
+                    return;
+                }
+                egui::Grid::new("rcad_constraint_rows")
+                    .num_columns(3)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for (index, (label, value, driving)) in rows.iter().enumerate() {
+                            ui.label(label);
+                            match value {
+                                Some(value) => {
+                                    let mut edited = *value;
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut edited)
+                                                .speed(0.1)
+                                                .range(0.01..=100000.0),
+                                        )
+                                        .changed()
+                                    {
+                                        change = Some((index, edited));
+                                    }
+                                }
+                                None => {
+                                    ui.label("");
+                                }
+                            }
+                            if ui.small_button("Delete").clicked() {
+                                delete = Some(index);
+                            }
+                            if !driving {
+                                ui.label("driven");
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.label("Dimensions can be given a new value; any row can be deleted.");
+            });
+        self.show_constraint_table = open;
+        if let Some((index, value)) = change {
+            self.set_sketch_constraint_value(index, value);
+        }
+        if let Some(index) = delete {
+            self.delete_sketch_constraint(index);
+        }
+    }
+
     fn draw_sketch_panel(&mut self, ctx: &egui::Context) {
         let Some(sketch) = self.sketch.as_ref() else {
             return;
@@ -3639,6 +4138,23 @@ impl RcadApp {
                     ui.label(egui::RichText::new(reference_labels.join("  ·  ")).size(11.0))
                         .on_hover_text("The two references that position the sketch");
                 }
+                ui.separator();
+                ui.checkbox(&mut self.show_free_dof, "Free DOF")
+                    .on_hover_text("Draw the entities that still have freedom in orange");
+                if ui
+                    .button("Constraints…")
+                    .on_hover_text("Every constraint, with its value and a delete button")
+                    .clicked()
+                {
+                    self.show_constraint_table = true;
+                }
+                if ui
+                    .button("Import…")
+                    .on_hover_text("Import lines and curves from a DXF or SVG file")
+                    .clicked()
+                {
+                    self.show_import_dialog = true;
+                }
             });
             // Row 3: the dimension being looked at, how it measures, and the
             // tool parameters.
@@ -3695,12 +4211,69 @@ impl RcadApp {
                             self.dimension_orientation = value;
                         }
                     }
+                    ui.label(egui::RichText::new("Curve:").size(11.0));
+                    for (label, value) in [
+                        ("Radius", sketch_ui::DimensionSize::Radius),
+                        ("Diameter", sketch_ui::DimensionSize::Diameter),
+                    ] {
+                        if ui
+                            .selectable_label(self.dimension_size == value, label)
+                            .clicked()
+                        {
+                            self.dimension_size = value;
+                        }
+                    }
                     if picks > 0 {
                         ui.colored_label(
                             egui::Color32::from_rgb(255, 210, 90),
                             format!("{picks} picked: click empty space"),
                         );
                     }
+                }
+                if tool == SketchTool::Pattern {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Pattern:").size(11.0));
+                    for mode in [
+                        sketch_ui::PatternMode::Linear,
+                        sketch_ui::PatternMode::Circular,
+                    ] {
+                        if ui
+                            .selectable_label(
+                                self.tool_params.pattern_mode == mode,
+                                sketch_ui::ToolParams::pattern_mode_label(mode),
+                            )
+                            .clicked()
+                        {
+                            self.tool_params.pattern_mode = mode;
+                        }
+                    }
+                    if self.tool_params.pattern_mode == sketch_ui::PatternMode::Circular {
+                        ui.label(egui::RichText::new("Sweep°").size(11.0));
+                        ui.add(
+                            egui::DragValue::new(&mut self.tool_params.pattern_angle)
+                                .speed(1.0)
+                                .range(1.0..=360.0),
+                        );
+                    }
+                }
+                if tool == SketchTool::Conic {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Rho").size(11.0));
+                    ui.add(
+                        egui::DragValue::new(&mut self.tool_params.conic_rho)
+                            .speed(0.01)
+                            .range(0.05..=0.95),
+                    )
+                    .on_hover_text("0.5 is a parabola; lower is flatter, higher rounder");
+                }
+                if tool == SketchTool::Text {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Text height").size(11.0));
+                    ui.add(
+                        egui::DragValue::new(&mut self.tool_params.text_height)
+                            .speed(0.5)
+                            .range(0.5..=100.0),
+                    );
                 }
                 ui.separator();
                 ui.label(egui::RichText::new("Offset").size(11.0));
@@ -3770,6 +4343,29 @@ impl RcadApp {
             .collect();
         sketch.add_spline(&control, 3);
 
+        // A conic and a text note: the other two entities a sketch can hold.
+        let conic_start = sketch.add_point(-30.0, -28.0);
+        let conic_control = sketch.add_point(0.0, -40.0);
+        let conic_end = sketch.add_point(30.0, -28.0);
+        sketch.add_conic(conic_start, conic_control, conic_end, 0.5);
+        sketch.add_text([-32.0, 34.0], 4.0, "RCAD sketch");
+
+        // A radius dimension on the circle, so the radial kind is on screen.
+        if let Some(circle) = sketch.circles.first() {
+            let circle_id = circle.id;
+            let radius = circle.radius;
+            sketch.add_dimension_constraint(
+                rcad_sketch::Constraint::Radius {
+                    curve: circle_id,
+                    value: radius,
+                },
+                true,
+                true,
+                Some([16.0, 14.0]),
+                rcad_sketch::DimensionOrientation::Aligned,
+            );
+        }
+
         // A strong driving dimension, a weak one and a driven (reference) one,
         // so all three colours the viewport uses are visible.
         sketch.add_dimension(corners[0], corners[1], 60.0, true, true);
@@ -3799,13 +4395,13 @@ impl RcadApp {
             );
             return;
         }
-        let Some((sketch, placement)) = self.sketch_for_sweep() else {
+        let Some((sketch, placement, source)) = self.sketch_for_sweep() else {
             self.last_error = Some("There is no sketch to extrude.".to_string());
             return;
         };
         match sketch.to_profile() {
             Some(profile) => {
-                if let Err(e) = self.extrude_sketch_internal(profile, 10.0, placement) {
+                if let Err(e) = self.extrude_sketch_internal(profile, 10.0, placement, source) {
                     self.last_error = Some(format!("Extrude failed: {e}"));
                 }
             }
@@ -3822,13 +4418,13 @@ impl RcadApp {
             );
             return;
         }
-        let Some((sketch, placement)) = self.sketch_for_sweep() else {
+        let Some((sketch, placement, source)) = self.sketch_for_sweep() else {
             self.last_error = Some("There is no sketch to revolve.".to_string());
             return;
         };
         match sketch.to_profile() {
             Some(profile) => {
-                if let Err(e) = self.revolve_sketch_internal(profile, 360.0, placement) {
+                if let Err(e) = self.revolve_sketch_internal(profile, 360.0, placement, source) {
                     self.last_error = Some(format!("Revolve failed: {e}"));
                 }
             }
@@ -3876,6 +4472,7 @@ impl RcadApp {
         profile: rcad_geom::Profile2D,
         height: f64,
         placement: Option<SketchPlacement>,
+        source: Option<Uuid>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if profile.outer.len() < 3 {
             return Err("extrude needs a closed profile with at least 3 points".into());
@@ -3886,7 +4483,7 @@ impl RcadApp {
             // discarded it and appended a hard-coded 10 x 10 x height box, so
             // every sketch produced the same prism.
             let name = rcad_features::unique_feature_name(part, "Extrude");
-            rcad_features::add_extrude(part, &name, profile, height, placement);
+            rcad_features::add_extrude(part, &name, profile, height, placement, source);
             self.rebuild_active_part();
         }
         Ok(())
@@ -3897,12 +4494,13 @@ impl RcadApp {
         profile: rcad_geom::Profile2D,
         angle_deg: f64,
         placement: Option<SketchPlacement>,
+        source: Option<Uuid>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Save state before modifying
         self.undo_stack.push(self.project.clone());
         if let Some(part) = self.get_active_part_mut() {
             let name = rcad_features::unique_feature_name(part, "Revolve");
-            rcad_features::add_revolve(part, &name, profile, angle_deg, placement);
+            rcad_features::add_revolve(part, &name, profile, angle_deg, placement, source);
             self.rebuild_active_part();
         }
         Ok(())
@@ -4417,6 +5015,7 @@ impl Default for RcadApp {
                         version: job.version,
                         mesh: res.display_mesh,
                         errors: res.errors,
+                        lost_references: res.lost_references,
                     });
                 }
             })
@@ -4465,8 +5064,14 @@ impl Default for RcadApp {
             dimension_menu: None,
             dimension_menu_was_shown: false,
             sketch_feature: None,
+            show_free_dof: false,
             dimension_picks: Vec::new(),
             dimension_orientation: DimensionOrientation::default(),
+            dimension_size: sketch_ui::DimensionSize::default(),
+            show_constraint_table: false,
+            show_import_dialog: false,
+            import_path: String::new(),
+            sketch_text_editor: None,
             dragging_point: None,
             tool_params: sketch_ui::ToolParams::default(),
             viewport_rect: None,
@@ -4691,6 +5296,7 @@ fn place_dimension(
     picks: &[(Uuid, sketch_ui::SketchEntityKind)],
     at: [f64; 2],
     orientation: DimensionOrientation,
+    size: sketch_ui::DimensionSize,
 ) -> Result<String, String> {
     use sketch_ui::SketchEntityKind;
 
@@ -4756,9 +5362,130 @@ fn place_dimension(
                 format!("Length dimension: {}.", sketch_ui::format_length(value)),
             )
         }
+        [(id, kind @ (SketchEntityKind::Circle | SketchEntityKind::Arc))] => {
+            let curve = |sketch: &Sketch, id: Uuid| -> Option<([f64; 2], f64)> {
+                if let Some(circle) = sketch.circles.iter().find(|circle| circle.id == id) {
+                    let centre = sketch.point(circle.center)?;
+                    return Some(([centre.x, centre.y], circle.radius));
+                }
+                let arc = sketch.arcs.iter().find(|arc| arc.id == id)?;
+                let centre = sketch.point(arc.center)?;
+                Some(([centre.x, centre.y], arc.radius))
+            };
+            let (_, radius) = curve(sketch, *id).ok_or_else(|| "That curve is gone.".to_string())?;
+            let (constraint, description) = match size {
+                sketch_ui::DimensionSize::Radius => (
+                    Constraint::Radius {
+                        curve: *id,
+                        value: radius,
+                    },
+                    format!("Radius dimension: R{}.", sketch_ui::format_length(radius)),
+                ),
+                sketch_ui::DimensionSize::Diameter => (
+                    Constraint::Diameter {
+                        curve: *id,
+                        value: radius * 2.0,
+                    },
+                    format!("Diameter dimension: Ø{}.", sketch_ui::format_length(radius * 2.0)),
+                ),
+            };
+            let _ = kind;
+            (constraint, description)
+        }
         [(a, kind_a), (b, kind_b)] => {
             let first_line = line(sketch, *a);
             let second_line = line(sketch, *b);
+            // A line and a point: the perpendicular distance from the point to
+            // the line.
+            let point_of_pick = |sketch: &Sketch,
+                                 id: Uuid,
+                                 kind: SketchEntityKind|
+             -> Option<(Uuid, [f64; 2])> {
+                match kind {
+                    SketchEntityKind::Point => {
+                        let point = sketch.point(id)?;
+                        Some((point.id, [point.x, point.y]))
+                    }
+                    SketchEntityKind::Circle | SketchEntityKind::Arc => {
+                        entity_point(sketch, id, kind)
+                    }
+                    SketchEntityKind::Line => None,
+                }
+            };
+            let line_side = if first_line.is_some() && second_line.is_none() {
+                Some((*a, *b, *kind_b))
+            } else if second_line.is_some() && first_line.is_none() {
+                Some((*b, *a, *kind_a))
+            } else {
+                None
+            };
+            if let Some((line_id, other_id, other_kind)) = line_side {
+                let ends = line(sketch, line_id)
+                    .ok_or_else(|| "That line is gone.".to_string())?;
+                if other_kind == SketchEntityKind::Point {
+                    let (point_id, point) = point_of_pick(sketch, other_id, other_kind)
+                        .ok_or_else(|| "That point is gone.".to_string())?;
+                    let foot = sketch_ui::foot_on_line(point, ends.2, ends.3)
+                        .ok_or_else(|| "That line has no length.".to_string())?;
+                    let value = (point[0] - foot[0]).hypot(point[1] - foot[1]);
+                    if value < 1e-9 {
+                        return Err("The point is on the line: no distance to dimension.".to_string());
+                    }
+                    (
+                        Constraint::PointLineDistance {
+                            point: point_id,
+                            line: line_id,
+                            value,
+                        },
+                        format!(
+                            "Point-line distance: {}.",
+                            sketch_ui::format_length(value)
+                        ),
+                    )
+                } else if other_kind == SketchEntityKind::Circle
+                    || other_kind == SketchEntityKind::Arc
+                {
+                    let (centre, radius) = if let Some(circle) = sketch
+                        .circles
+                        .iter()
+                        .find(|circle| circle.id == other_id)
+                    {
+                        let centre = sketch
+                            .point(circle.center)
+                            .ok_or_else(|| "That curve is gone.".to_string())?;
+                        ([centre.x, centre.y], circle.radius)
+                    } else {
+                        let arc = sketch
+                            .arcs
+                            .iter()
+                            .find(|arc| arc.id == other_id)
+                            .ok_or_else(|| "That curve is gone.".to_string())?;
+                        let centre = sketch
+                            .point(arc.center)
+                            .ok_or_else(|| "That curve is gone.".to_string())?;
+                        ([centre.x, centre.y], arc.radius)
+                    };
+                    let foot = sketch_ui::foot_on_line(centre, ends.2, ends.3)
+                        .ok_or_else(|| "That line has no length.".to_string())?;
+                    let distance = (centre[0] - foot[0]).hypot(centre[1] - foot[1]);
+                    let value = (distance - radius).max(0.0);
+                    (
+                        Constraint::LineCurveDistance {
+                            line: line_id,
+                            curve: other_id,
+                            value,
+                        },
+                        format!(
+                            "Tangent distance: {}.",
+                            sketch_ui::format_length(value)
+                        ),
+                    )
+                } else {
+                    return Err(
+                        "Pick two points or two lines (or one line for its length).".to_string()
+                    );
+                }
+            } else {
             if let (Some(first), Some(second)) = (first_line, second_line) {
                 let d1 = [first.3[0] - first.2[0], first.3[1] - first.2[1]];
                 let d2 = [second.3[0] - second.2[0], second.3[1] - second.2[1]];
@@ -4825,10 +5552,11 @@ fn place_dimension(
                     constraint,
                     format!("Distance dimension: {}.", sketch_ui::format_length(value)),
                 )
-            } else {
-                return Err(
-                    "Pick two points or two lines (or one line for its length).".to_string()
-                );
+                } else {
+                    return Err(
+                        "Pick two points or two lines (or one line for its length).".to_string()
+                    );
+                }
             }
         }
         [] => return Err("Click a line or a point to dimension.".to_string()),
@@ -6308,6 +7036,390 @@ mod interaction_tests {
 
     /// With a sketch open the whole frame runs: plane, geometry, constraints,
     /// dimensions and the sketch strip, with no panic on the way.
+
+    /// The extrude remembers the sketch it came from, and follows it when the
+    /// sketch is edited.
+    #[test]
+    fn editing_a_sketch_updates_the_extrude_built_from_it() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(0.0, 0.0, 10.0, 5.0);
+        app.confirm_sketch();
+        let sketch_id = app.project.parts[0]
+            .features
+            .iter()
+            .find(|feature| matches!(feature.kind, FeatureKind::Sketch { .. }))
+            .expect("the sketch is in the tree")
+            .id;
+        app.extrude_sketch();
+
+        let extrude = app.project.parts[0]
+            .features
+            .iter()
+            .find(|feature| matches!(feature.kind, FeatureKind::Extrude { .. }))
+            .expect("an extrude");
+        let FeatureKind::Extrude {
+            sketch, profile, ..
+        } = &extrude.kind
+        else {
+            unreachable!()
+        };
+        assert_eq!(*sketch, Some(sketch_id), "the extrude does not name its sketch");
+        let highest = profile
+            .outer
+            .iter()
+            .map(|point| point[0])
+            .fold(f64::MIN, f64::max);
+        assert!((highest - 10.0).abs() < 1e-9, "{highest}");
+
+        // Edit the sketch: replace the rectangle with a bigger one.
+        app.edit_sketch_feature(sketch_id).expect("opens the sketch");
+        {
+            let mut sketch = app.sketch.take().expect("the sketch is open");
+            sketch.points.clear();
+            sketch.lines.clear();
+            sketch.constraints.clear();
+            sketch.constrained_constraints.clear();
+            sketch.add_rectangle(0.0, 0.0, 40.0, 20.0);
+            app.sketch = Some(sketch);
+        }
+        app.confirm_sketch();
+
+        let extrude = app.project.parts[0]
+            .features
+            .iter()
+            .find(|feature| matches!(feature.kind, FeatureKind::Extrude { .. }))
+            .expect("the extrude is still there");
+        let FeatureKind::Extrude {
+            profile,
+            placement,
+            ..
+        } = &extrude.kind
+        else {
+            unreachable!()
+        };
+        let highest = profile
+            .outer
+            .iter()
+            .map(|point| point[0])
+            .fold(f64::MIN, f64::max);
+        assert!(
+            (highest - 40.0).abs() < 1e-9,
+            "the extrude kept the old profile: {highest}"
+        );
+        assert!(placement.is_some(), "the plane was not refreshed");
+    }
+
+    /// A sketch's lost plane reference can be substituted like any other.
+    #[test]
+    fn a_lost_sketch_reference_can_be_substituted() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        let plane = app.project.parts[0]
+            .features
+            .iter()
+            .find(|feature| {
+                matches!(
+                    &feature.kind,
+                    FeatureKind::Construction {
+                        kind: ConstructionKind::Plane,
+                        ..
+                    }
+                )
+            })
+            .expect("a datum plane");
+        let plane_id = plane.id;
+        let plane_name = plane.name.clone();
+        app.selection.replace(Selected::Datum {
+            feature: plane_id,
+            label: plane_name,
+        });
+        app.new_sketch();
+        app.add_sketch_rectangle(0.0, 0.0, 10.0, 5.0);
+        app.confirm_sketch();
+        let sketch_id = app.project.parts[0]
+            .features
+            .iter()
+            .find(|feature| matches!(feature.kind, FeatureKind::Sketch { .. }))
+            .expect("the sketch is in the tree")
+            .id;
+
+        assert!(app.substitute_reference(sketch_id, &plane_id.to_string(), "another-plane"));
+
+        let replaced = app.project.parts[0]
+            .features
+            .iter()
+            .find(|feature| feature.id == sketch_id)
+            .and_then(|feature| match &feature.kind {
+                FeatureKind::Sketch { sketch } => sketch
+                    .reference(SketchReferenceRole::Orientation)
+                    .and_then(|reference| reference.reference.clone()),
+                _ => None,
+            });
+        assert_eq!(replaced, Some("another-plane".to_string()));
+    }
+
+    /// The tangent arc tool leaves a line end along the line.
+    #[test]
+    fn the_tangent_arc_tool_leaves_a_line_end() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        let endpoint = {
+            let sketch = app.sketch.as_mut().expect("a sketch");
+            let a = sketch.add_point(0.0, 0.0);
+            let b = sketch.add_point(20.0, 0.0);
+            sketch.add_line(a, b);
+            b
+        };
+        app.set_sketch_tool(SketchTool::ArcTangent);
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [20.0, 0.0]),
+            ClickMode::PLAIN
+        ));
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [30.0, 10.0]),
+            ClickMode::PLAIN
+        ));
+
+        let sketch = app.sketch.as_ref().expect("a sketch");
+        assert_eq!(sketch.arcs.len(), 1, "{:?}", app.last_error);
+        let arc = &sketch.arcs[0];
+        let centre = sketch.point(arc.center).expect("a centre");
+        let start = sketch.point(arc.start_point).expect("a start");
+        assert!((start.x - 20.0).abs() < 1e-6 && (start.y).abs() < 1e-6, "{start:?}");
+        // Tangent along X means the radius at the start is vertical.
+        assert!(
+            (start.x - centre.x).abs() < 1e-6,
+            "the arc is not tangent to the line at its start"
+        );
+        assert!(sketch.constraints.iter().any(|constraint| matches!(
+            constraint,
+            rcad_sketch::Constraint::Coincident { a, b }
+                if (*a == arc.start_point && *b == endpoint)
+                    || (*b == arc.start_point && *a == endpoint)
+        )));
+    }
+
+    /// The conic tool draws a curve through the third click.
+    #[test]
+    fn the_conic_tool_draws_a_curve_through_three_clicks() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.set_sketch_tool(SketchTool::Conic);
+        for point in [[0.0, 0.0], [20.0, 0.0], [10.0, 10.0]] {
+            assert!(app.sketch_click(
+                viewport_rect(),
+                screen_of(&app, point),
+                ClickMode::PLAIN
+            ));
+        }
+        let sketch = app.sketch.as_ref().expect("a sketch");
+        assert_eq!(sketch.conics.len(), 1, "{:?}", app.last_error);
+        let middle = sketch.conic_points(sketch.conics[0].id, 20)[10];
+        assert!((middle[0] - 10.0).abs() < 1e-6, "{middle:?}");
+        assert!((middle[1] - 10.0).abs() < 1e-6, "{middle:?}");
+    }
+
+    /// The text tool types a note in place.
+    #[test]
+    fn the_text_tool_types_a_note() {
+        let mut session = Session::new(RcadApp::default());
+        open_xy_sketch(&mut session.app);
+        session.app.set_sketch_tool(SketchTool::Text);
+        let at = screen_of(&session.app, [0.0, 0.0]);
+        assert!(session.app.sketch_click(viewport_rect(), at, ClickMode::PLAIN));
+        assert!(session.app.sketch_text_editor.is_some());
+        session.frame();
+        session.run_step(vec![egui::Event::Text("RCAD".to_string())]);
+        session.run_step(vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }]);
+        session.frame();
+
+        let sketch = session.app.sketch.as_ref().expect("a sketch");
+        assert!(session.app.sketch_text_editor.is_none(), "Enter did not commit");
+        assert_eq!(sketch.texts.len(), 1);
+        assert_eq!(sketch.texts[0].content, "RCAD");
+        assert!((sketch.texts[0].height - session.app.tool_params.text_height).abs() < 1e-9);
+    }
+
+    /// A DXF or SVG file imports into the open sketch.
+    #[test]
+    fn a_sketch_file_is_imported() {
+        let root = temp_project_dir();
+        std::fs::create_dir_all(&root).expect("a temp folder");
+        let path = root.join("shape.svg");
+        std::fs::write(
+            &path,
+            r#"<svg><line x1="0" y1="0" x2="10" y2="0"/><circle cx="5" cy="5" r="2"/></svg>"#,
+        )
+        .expect("write the file");
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+
+        let message = app.import_sketch_file(&path).expect("import");
+
+        assert!(message.contains("entities imported"), "{message}");
+        let sketch = app.sketch.as_ref().expect("a sketch");
+        assert_eq!(sketch.lines.len(), 1);
+        assert_eq!(sketch.circles.len(), 1);
+        assert!(app.sketch_undo.len() == 1, "the import is one undo step");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The constraint table lists every constraint, edits a value and deletes.
+    #[test]
+    fn the_constraint_table_lists_edits_and_deletes() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(0.0, 0.0, 50.0, 30.0);
+        let (a, b) = {
+            let sketch = app.sketch.as_ref().expect("a sketch");
+            (sketch.lines[0].a, sketch.lines[0].b)
+        };
+        app.sketch
+            .as_mut()
+            .expect("a sketch")
+            .add_dimension(a, b, 50.0, true, true);
+        assert_eq!(app.constraint_table_rows().len(), 5);
+        let index = app
+            .sketch
+            .as_ref()
+            .expect("a sketch")
+            .constraints
+            .iter()
+            .position(|constraint| matches!(constraint, rcad_sketch::Constraint::Distance { .. }))
+            .expect("the dimension");
+        assert!(
+            app.constraint_table_rows()
+                .iter()
+                .any(|(label, value, _)| label.starts_with("Distance") && value.is_some())
+        );
+
+        assert!(app.set_sketch_constraint_value(index, 60.0));
+        assert_eq!(
+            app.sketch
+                .as_ref()
+                .expect("a sketch")
+                .dimension_value(index),
+            Some(60.0)
+        );
+        assert!(app.delete_sketch_constraint(index));
+        assert_eq!(app.constraint_table_rows().len(), 4);
+    }
+
+    /// The dimension tool also measures radii, point-line and tangent distances.
+    #[test]
+    fn the_dimension_tool_measures_curves_points_and_tangents() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        {
+            let sketch = app.sketch.as_mut().expect("a sketch");
+            let a = sketch.add_point(-30.0, -10.0);
+            let b = sketch.add_point(30.0, -10.0);
+            sketch.add_line(a, b);
+            sketch.add_circle(0.0, 10.0, 5.0);
+            sketch.add_point(0.0, 0.0);
+        }
+        app.set_sketch_tool(SketchTool::Dimension);
+
+        // A circle on its own becomes a radius dimension.
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [5.0, 10.0]),
+            ClickMode::PLAIN
+        ));
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [20.0, 25.0]),
+            ClickMode::PLAIN
+        ));
+        let dimensions = sketch_ui::dimensions(app.sketch.as_ref().expect("a sketch"));
+        assert_eq!(dimensions.len(), 1, "{:?}", app.last_error);
+        assert!(matches!(
+            dimensions[0].kind,
+            sketch_ui::DimensionKind::Radial { .. }
+        ));
+        assert_eq!(dimensions[0].text, "R5");
+
+        // A line and a point: the perpendicular distance between them.
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [10.0, -10.0]),
+            ClickMode::PLAIN
+        ));
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [0.0, 0.0]),
+            ClickMode::PLAIN
+        ));
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [-20.0, 25.0]),
+            ClickMode::PLAIN
+        ));
+        let dimensions = sketch_ui::dimensions(app.sketch.as_ref().expect("a sketch"));
+        assert_eq!(dimensions.len(), 2);
+        assert!(
+            matches!(
+                dimensions[1].kind,
+                sketch_ui::DimensionKind::PointDistance { .. }
+            ),
+            "{:?}",
+            dimensions[1].kind
+        );
+        assert!((dimensions[1].value - 10.0).abs() < 1e-6, "{:?}", dimensions[1]);
+
+        // A line and a curve: the gap to the circle's tangent.
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [10.0, -10.0]),
+            ClickMode::PLAIN
+        ));
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [5.0, 10.0]),
+            ClickMode::PLAIN
+        ));
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [40.0, 25.0]),
+            ClickMode::PLAIN
+        ));
+        let dimensions = sketch_ui::dimensions(app.sketch.as_ref().expect("a sketch"));
+        assert_eq!(dimensions.len(), 3);
+        assert!(
+            matches!(
+                dimensions[2].kind,
+                sketch_ui::DimensionKind::TangentDistance { .. }
+            ),
+            "{:?}",
+            dimensions[2].kind
+        );
+        assert!((dimensions[2].value - 15.0).abs() < 1e-6, "{:?}", dimensions[2]);
+    }
+
+    /// The free-DOF highlight has entities to colour while the sketch is loose.
+    #[test]
+    fn the_free_dof_highlight_lists_the_loose_entities() {
+        let mut session = Session::new(RcadApp::default());
+        open_xy_sketch(&mut session.app);
+        session.app.add_sketch_rectangle(0.0, 0.0, 10.0, 10.0);
+        session.app.show_free_dof = true;
+        session.frame();
+        session.frame();
+
+        let sketch = session.app.sketch.as_ref().expect("a sketch");
+        // Four points and the four lines that use them are all free.
+        assert_eq!(sketch.find_unconstrained_entities().len(), 8);
+    }
+
     #[test]
     fn a_sketch_frame_draws_the_overlay_and_the_panel() {
         let mut session = Session::new(RcadApp::default());

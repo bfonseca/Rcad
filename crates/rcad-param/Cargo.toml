@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 rcad-geom.workspace = true
 rcad-doc.workspace = true
+rcad-sketch.workspace = true
 rmp-serde.workspace = true
 glam.workspace = true
 thiserror.workspace = true

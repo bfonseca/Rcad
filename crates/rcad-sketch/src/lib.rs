@@ -33,6 +33,13 @@ pub struct Sketch {
     pub circles: Vec<SketchCircle>,
     pub arcs: Vec<SketchArc>,
     pub splines: Vec<SketchSpline>,
+    /// Conics: rational quadratic curves from three control points and a rho.
+    #[serde(default)]
+    pub conics: Vec<SketchConic>,
+    /// Text notes placed in the sketch. They are drawn, but are not part of the
+    /// profile the kernel builds from the sketch.
+    #[serde(default)]
+    pub texts: Vec<SketchText>,
     pub constraints: Vec<Constraint>,
     /// Constraints with strength info for Intent Manager
     pub constrained_constraints: Vec<ConstrainedConstraint>,
@@ -120,6 +127,8 @@ impl Sketch {
             circles: Vec::new(),
             arcs: Vec::new(),
             splines: Vec::new(),
+            conics: Vec::new(),
+            texts: Vec::new(),
             constraints: Vec::new(),
             constrained_constraints: Vec::new(),
             reference_geometry: Vec::new(),
@@ -271,6 +280,60 @@ impl Sketch {
             weights: None,
         });
 
+        id
+    }
+
+    /// Add a conic from its three control points and its rho.
+    pub fn add_conic(&mut self, start: Uuid, control: Uuid, end: Uuid, rho: f64) -> Uuid {
+        let id = Uuid::new_v4();
+        self.conics.push(SketchConic {
+            id,
+            start,
+            control,
+            end,
+            rho: rho.clamp(0.05, 0.95),
+        });
+        id
+    }
+
+    /// Points along a conic, `samples` segments, as a rational quadratic Bézier.
+    pub fn conic_points(&self, id: Uuid, samples: usize) -> Vec<[f64; 2]> {
+        let Some(conic) = self.conics.iter().find(|conic| conic.id == id) else {
+            return Vec::new();
+        };
+        let (Some(p0), Some(p1), Some(p2)) = (
+            self.point(conic.start),
+            self.point(conic.control),
+            self.point(conic.end),
+        ) else {
+            return Vec::new();
+        };
+        let segments = samples.max(1);
+        (0..=segments)
+            .map(|step| {
+                let t = step as f64 / segments as f64;
+                let b0 = (1.0 - t) * (1.0 - t);
+                let b1 = 2.0 * (1.0 - t) * t * conic.rho;
+                let b2 = t * t;
+                let denominator = (b0 + b1 + b2).max(1e-12);
+                [
+                    (b0 * p0.x + b1 * p1.x + b2 * p2.x) / denominator,
+                    (b0 * p0.y + b1 * p1.y + b2 * p2.y) / denominator,
+                ]
+            })
+            .collect()
+    }
+
+    /// Add a text note at a point in the sketch.
+    pub fn add_text(&mut self, position: [f64; 2], height: f64, content: impl Into<String>) -> Uuid {
+        let id = Uuid::new_v4();
+        self.texts.push(SketchText {
+            id,
+            position,
+            height: height.max(0.5),
+            angle_deg: 0.0,
+            content: content.into(),
+        });
         id
     }
 
@@ -628,6 +691,34 @@ pub struct SketchSpline {
     pub weights: Option<Vec<f64>>,
 }
 
+/// A conic: a rational quadratic curve from `start` to `end`, pulled towards
+/// `control`, with `rho` as the middle weight.
+///
+/// `rho` 0.5 is a parabola, smaller values flatten the curve and larger values
+/// round it. The curve always passes through the start and the end, and through
+/// the shoulder point the user picked to place it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SketchConic {
+    pub id: Uuid,
+    pub start: Uuid,
+    pub control: Uuid,
+    pub end: Uuid,
+    pub rho: f64,
+}
+
+/// A text note in the sketch: a position, a height and the words.
+///
+/// The viewport draws it with the interface font. It is not yet converted to
+/// curves for the kernel, so it does not take part in the profile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SketchText {
+    pub id: Uuid,
+    pub position: [f64; 2],
+    pub height: f64,
+    pub angle_deg: f64,
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Constraint {
     Coincident { a: Uuid, b: Uuid },
@@ -651,6 +742,15 @@ pub enum Constraint {
     HorizontalDistance { a: Uuid, b: Uuid, value: f64 },
     /// The distance between two points measured along Y.
     VerticalDistance { a: Uuid, b: Uuid, value: f64 },
+    /// The radius of a circle or an arc.
+    Radius { curve: Uuid, value: f64 },
+    /// The diameter of a circle or an arc.
+    Diameter { curve: Uuid, value: f64 },
+    /// The perpendicular distance from a point to a line.
+    PointLineDistance { point: Uuid, line: Uuid, value: f64 },
+    /// The distance from a line to the tangent of a circle or an arc: the
+    /// perpendicular distance from the line to the centre, minus the radius.
+    LineCurveDistance { line: Uuid, curve: Uuid, value: f64 },
 }
 
 /// Which relationship [`align_lines`] should impose between two segments.
@@ -770,6 +870,59 @@ fn resize_segment(
         }
     }
 }
+
+/// The centre point and radius of a circle or an arc.
+fn curve_of(sketch: &Sketch, id: Uuid) -> Option<(Uuid, f64)> {
+    sketch
+        .circles
+        .iter()
+        .find(|circle| circle.id == id)
+        .map(|circle| (circle.center, circle.radius))
+        .or_else(|| {
+            sketch
+                .arcs
+                .iter()
+                .find(|arc| arc.id == id)
+                .map(|arc| (arc.center, arc.radius))
+        })
+}
+
+/// Set the radius of a circle or an arc, keeping an arc's endpoints on it.
+fn set_curve_radius(sketch: &mut Sketch, id: Uuid, radius: f64) {
+    if radius <= 1e-9 {
+        return;
+    }
+    if let Some(circle) = sketch.circles.iter_mut().find(|circle| circle.id == id) {
+        circle.radius = radius;
+        return;
+    }
+    let Some(arc) = sketch.arcs.iter().find(|arc| arc.id == id).cloned() else {
+        return;
+    };
+    let Some(centre) = sketch.point(arc.center).map(|point| [point.x, point.y]) else {
+        return;
+    };
+    if let Some(stored) = sketch.arcs.iter_mut().find(|candidate| candidate.id == id) {
+        stored.radius = radius;
+    }
+    let start = [
+        centre[0] + radius * arc.start_angle.cos(),
+        centre[1] + radius * arc.start_angle.sin(),
+    ];
+    let end = [
+        centre[0] + radius * arc.end_angle.cos(),
+        centre[1] + radius * arc.end_angle.sin(),
+    ];
+    if let Some(point) = sketch.point_mut(arc.start_point) {
+        point.x = start[0];
+        point.y = start[1];
+    }
+    if let Some(point) = sketch.point_mut(arc.end_point) {
+        point.x = end[0];
+        point.y = end[1];
+    }
+}
+
 fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
     for _ in 0..80 {
         let mut max_err = 0.0f64;
@@ -782,6 +935,10 @@ fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
             .map(|record| record.constraint.clone())
             .collect();
         for c in constraints {
+            // A driven (reference) dimension measures; it does not drive.
+            if is_dimension(&c) && driven.iter().any(|subject| same_subject(subject, &c)) {
+                continue;
+            }
             match c {
                 Constraint::Fixed { point } => {
                     if let Some(p) = sketch.point_mut(point) {
@@ -814,11 +971,6 @@ fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
                     }
                 }
                 Constraint::Distance { a, b, value } => {
-                    if driven.iter().any(|subject| {
-                        same_subject(subject, &Constraint::Distance { a, b, value })
-                    }) {
-                        continue;
-                    }
                     let (ax, ay, af) = {
                         let p = sketch.point(a).ok_or(SketchError::Unknown(a))?;
                         (p.x, p.y, p.fixed)
@@ -1278,6 +1430,98 @@ fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
                     }
                 }
 
+                Constraint::Radius { curve, value } => {
+                    let Some((_, current)) = curve_of(sketch, curve) else {
+                        continue;
+                    };
+                    max_err = max_err.max((current - value).abs());
+                    set_curve_radius(sketch, curve, value);
+                }
+                Constraint::Diameter { curve, value } => {
+                    let Some((_, current)) = curve_of(sketch, curve) else {
+                        continue;
+                    };
+                    max_err = max_err.max((current * 2.0 - value).abs());
+                    set_curve_radius(sketch, curve, value * 0.5);
+                }
+                Constraint::PointLineDistance { point, line, value } => {
+                    // The perpendicular distance from the point to the line.
+                    let endpoints = sketch
+                        .lines
+                        .iter()
+                        .find(|candidate| candidate.id == line)
+                        .and_then(|candidate| {
+                            Some((
+                                sketch.point(candidate.a)?.clone(),
+                                sketch.point(candidate.b)?.clone(),
+                            ))
+                        });
+                    let Some((start, end)) = endpoints else {
+                        continue;
+                    };
+                    let Some((px, py, fixed)) = sketch.point(point).map(|p| (p.x, p.y, p.fixed)) else {
+                        continue;
+                    };
+                    let (dx, dy) = (end.x - start.x, end.y - start.y);
+                    let length = dx.hypot(dy);
+                    if length < 1e-12 {
+                        continue;
+                    }
+                    let (nx, ny) = (-dy / length, dx / length);
+                    let signed = (px - start.x) * nx + (py - start.y) * ny;
+                    max_err = max_err.max((signed.abs() - value).abs());
+                    if fixed {
+                        continue;
+                    }
+                    let target = if signed < 0.0 { -value } else { value };
+                    let delta = target - signed;
+                    if let Some(point) = sketch.point_mut(point) {
+                        point.x = px + nx * delta;
+                        point.y = py + ny * delta;
+                    }
+                }
+                Constraint::LineCurveDistance { line, curve, value } => {
+                    // Slide the curve away from (or towards) the line until the
+                    // gap between them is the wanted one, measured on the
+                    // tangent: centre distance minus radius.
+                    let endpoints = sketch
+                        .lines
+                        .iter()
+                        .find(|candidate| candidate.id == line)
+                        .and_then(|candidate| {
+                            Some((
+                                sketch.point(candidate.a)?.clone(),
+                                sketch.point(candidate.b)?.clone(),
+                            ))
+                        });
+                    let Some((start, end)) = endpoints else {
+                        continue;
+                    };
+                    let Some((centre, radius)) = curve_of(sketch, curve) else {
+                        continue;
+                    };
+                    let Some((cx, cy, fixed)) = sketch.point(centre).map(|p| (p.x, p.y, p.fixed)) else {
+                        continue;
+                    };
+                    let (dx, dy) = (end.x - start.x, end.y - start.y);
+                    let length = dx.hypot(dy);
+                    if length < 1e-12 {
+                        continue;
+                    }
+                    let (nx, ny) = (-dy / length, dx / length);
+                    let signed = (cx - start.x) * nx + (cy - start.y) * ny;
+                    let wanted = value + radius;
+                    max_err = max_err.max((signed.abs() - wanted).abs());
+                    if fixed {
+                        continue;
+                    }
+                    let target = if signed < 0.0 { -wanted } else { wanted };
+                    let delta = target - signed;
+                    if let Some(point) = sketch.point_mut(centre) {
+                        point.x = cx + nx * delta;
+                        point.y = cy + ny * delta;
+                    }
+                }
                 Constraint::Midpoint { point, line } => {
                     // Point is midpoint of line
                     // First get line endpoints to avoid borrow conflicts
@@ -1412,6 +1656,34 @@ pub fn same_subject(left: &Constraint, right: &Constraint) -> bool {
             | Constraint::HorizontalDistance { a: a2, b: b2, .. }
             | Constraint::VerticalDistance { a: a2, b: b2, .. },
         ) => (a1 == a2 && b1 == b2) || (a1 == b2 && b1 == a2),
+        (
+            Constraint::Radius { curve: c1, .. } | Constraint::Diameter { curve: c1, .. },
+            Constraint::Radius { curve: c2, .. } | Constraint::Diameter { curve: c2, .. },
+        ) => c1 == c2,
+        (
+            Constraint::PointLineDistance {
+                point: p1,
+                line: l1,
+                ..
+            },
+            Constraint::PointLineDistance {
+                point: p2,
+                line: l2,
+                ..
+            },
+        ) => p1 == p2 && l1 == l2,
+        (
+            Constraint::LineCurveDistance {
+                line: l1,
+                curve: c1,
+                ..
+            },
+            Constraint::LineCurveDistance {
+                line: l2,
+                curve: c2,
+                ..
+            },
+        ) => l1 == l2 && c1 == c2,
         _ => false,
     }
 }
@@ -1426,6 +1698,10 @@ pub fn is_dimension(constraint: &Constraint) -> bool {
             | Constraint::LineDistance { .. }
             | Constraint::HorizontalDistance { .. }
             | Constraint::VerticalDistance { .. }
+            | Constraint::Radius { .. }
+            | Constraint::Diameter { .. }
+            | Constraint::PointLineDistance { .. }
+            | Constraint::LineCurveDistance { .. }
     )
 }
 
@@ -1611,6 +1887,12 @@ impl<'a> DofModel<'a> {
         }
 
         for constraint in &self.sketch.constraints {
+            // A driven (reference) dimension measures without constraining.
+            if is_dimension(constraint)
+                && driven.iter().any(|subject| same_subject(subject, constraint))
+            {
+                continue;
+            }
             match constraint {
                 Constraint::Fixed { point } => {
                     if let Some([x, y]) = self.point(variables, *point) {
@@ -1633,18 +1915,6 @@ impl<'a> DofModel<'a> {
                 }
                 Constraint::Distance { a, b, value } => {
                     if a == b {
-                        continue;
-                    }
-                    if driven.iter().any(|subject| {
-                        same_subject(
-                            subject,
-                            &Constraint::Distance {
-                                a: *a,
-                                b: *b,
-                                value: *value,
-                            },
-                        )
-                    }) {
                         continue;
                     }
                     if let (Some(pa), Some(pb)) =
@@ -1729,6 +1999,44 @@ impl<'a> DofModel<'a> {
                     }
                 }
 
+                Constraint::Radius { curve, value } => {
+                    if let Some(radius) = self.radius(variables, *curve) {
+                        rows.push(radius - value);
+                    }
+                }
+                Constraint::Diameter { curve, value } => {
+                    if let Some(radius) = self.radius(variables, *curve) {
+                        rows.push(2.0 * radius - value);
+                    }
+                }
+                Constraint::PointLineDistance { point, line, value } => {
+                    if let (Some(p), Some((a, b))) = (
+                        self.point(variables, *point),
+                        self.line(variables, *line),
+                    ) {
+                        let da = [b[0] - a[0], b[1] - a[1]];
+                        let length_squared = da[0] * da[0] + da[1] * da[1];
+                        if length_squared > 1e-18 {
+                            let cross = da[0] * (p[1] - a[1]) - da[1] * (p[0] - a[0]);
+                            rows.push(cross * cross / length_squared - value * value);
+                        }
+                    }
+                }
+                Constraint::LineCurveDistance { line, curve, value } => {
+                    if let (Some((a, b)), Some(centre), Some(radius)) = (
+                        self.line(variables, *line),
+                        self.curve_centre(variables, *curve),
+                        self.radius(variables, *curve),
+                    ) {
+                        let da = [b[0] - a[0], b[1] - a[1]];
+                        let length_squared = da[0] * da[0] + da[1] * da[1];
+                        if length_squared > 1e-18 {
+                            let cross = da[0] * (centre[1] - a[1]) - da[1] * (centre[0] - a[0]);
+                            let wanted = value + radius;
+                            rows.push(cross * cross / length_squared - wanted * wanted);
+                        }
+                    }
+                }
                 Constraint::EqualLength { a, b } => {
                     if let (Some((a1, a2)), Some((b1, b2))) =
                         (self.line(variables, *a), self.line(variables, *b))
@@ -1919,6 +2227,107 @@ impl Sketch {
     }
 
     /// Get sketch status: "under-constrained", "fully-constrained", "over-constrained"
+    /// The points nothing anchors: the ones the user can still drag around.
+    ///
+    /// A point is anchored when it is Fixed, when it coincides with one, or when
+    /// it is the midpoint of a line whose two ends are anchored. Horizontal,
+    /// Vertical, Distance, Parallel and the rest take freedom away without
+    /// saying where the point goes, so they do not anchor it.
+    pub fn anchored_points(&self) -> std::collections::HashSet<Uuid> {
+        let mut held: std::collections::HashSet<Uuid> = self
+            .constraints
+            .iter()
+            .filter_map(|constraint| match constraint {
+                Constraint::Fixed { point } => Some(*point),
+                _ => None,
+            })
+            .collect();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for constraint in &self.constraints {
+                match constraint {
+                    Constraint::Coincident { a, b } => {
+                        if held.contains(a) && held.insert(*b) {
+                            changed = true;
+                        }
+                        if held.contains(b) && held.insert(*a) {
+                            changed = true;
+                        }
+                    }
+                    Constraint::Midpoint { point, line } => {
+                        if let Some(line) = self.lines.iter().find(|candidate| candidate.id == *line)
+                        {
+                            if held.contains(&line.a)
+                                && held.contains(&line.b)
+                                && held.insert(*point)
+                            {
+                                changed = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        held
+    }
+
+    /// The entities that still have a degree of freedom, for the viewport
+    /// highlight: a point nothing anchors, a line with a free end, a curve whose
+    /// centre is free or whose radius no dimension fixes, a spline or a conic
+    /// with a free control point.
+    pub fn find_unconstrained_entities(&self) -> Vec<Uuid> {
+        let held = self.anchored_points();
+        let free = |id: Uuid| !held.contains(&id);
+        let mut entities = Vec::new();
+        for point in &self.points {
+            if free(point.id) {
+                entities.push(point.id);
+            }
+        }
+        for line in &self.lines {
+            if free(line.a) || free(line.b) {
+                entities.push(line.id);
+            }
+        }
+        for circle in &self.circles {
+            if free(circle.center) || !self.radius_is_dimensioned(circle.id) {
+                entities.push(circle.id);
+            }
+        }
+        for arc in &self.arcs {
+            if free(arc.center) || !self.radius_is_dimensioned(arc.id) {
+                entities.push(arc.id);
+            }
+        }
+        for spline in &self.splines {
+            if spline.control_points.iter().copied().any(free) {
+                entities.push(spline.id);
+            }
+        }
+        for conic in &self.conics {
+            if [conic.start, conic.control, conic.end]
+                .into_iter()
+                .any(free)
+            {
+                entities.push(conic.id);
+            }
+        }
+        entities
+    }
+
+    /// Whether a dimension fixes this curve's radius.
+    fn radius_is_dimensioned(&self, curve: Uuid) -> bool {
+        self.constraints.iter().any(|constraint| match constraint {
+            Constraint::Radius { curve: other, .. } | Constraint::Diameter { curve: other, .. } => {
+                *other == curve
+            }
+            Constraint::EqualRadius { a, b } => *a == curve || *b == curve,
+            _ => false,
+        })
+    }
+
     pub fn constraint_status(&self) -> &'static str {
         self.analyze_dof_detailed().status.as_str()
     }
@@ -2080,7 +2489,11 @@ impl Sketch {
             | Constraint::Angle { value, .. }
             | Constraint::LineDistance { value, .. }
             | Constraint::HorizontalDistance { value, .. }
-            | Constraint::VerticalDistance { value, .. } => Some(*value),
+            | Constraint::VerticalDistance { value, .. }
+            | Constraint::Radius { value, .. }
+            | Constraint::Diameter { value, .. }
+            | Constraint::PointLineDistance { value, .. }
+            | Constraint::LineCurveDistance { value, .. } => Some(*value),
             _ => None,
         }
     }
@@ -2152,7 +2565,11 @@ impl Sketch {
                 | Constraint::Angle { value: current, .. }
                 | Constraint::LineDistance { value: current, .. }
                 | Constraint::HorizontalDistance { value: current, .. }
-                | Constraint::VerticalDistance { value: current, .. },
+                | Constraint::VerticalDistance { value: current, .. }
+                | Constraint::Radius { value: current, .. }
+                | Constraint::Diameter { value: current, .. }
+                | Constraint::PointLineDistance { value: current, .. }
+                | Constraint::LineCurveDistance { value: current, .. },
             ) => *current = value,
             _ => return false,
         }
@@ -2162,7 +2579,11 @@ impl Sketch {
                 | Constraint::Angle { value: recorded, .. }
                 | Constraint::LineDistance { value: recorded, .. }
                 | Constraint::HorizontalDistance { value: recorded, .. }
-                | Constraint::VerticalDistance { value: recorded, .. } => *recorded = value,
+                | Constraint::VerticalDistance { value: recorded, .. }
+                | Constraint::Radius { value: recorded, .. }
+                | Constraint::Diameter { value: recorded, .. }
+                | Constraint::PointLineDistance { value: recorded, .. }
+                | Constraint::LineCurveDistance { value: recorded, .. } => *recorded = value,
                 _ => {}
             }
         }
@@ -2576,6 +2997,8 @@ impl ConstrainedConstraint {
 }
 
 
+mod import;
+
 #[cfg(feature = "solvespace")]
 mod solvespace {
     use super::*;
@@ -2967,6 +3390,181 @@ mod dof_and_dimension_tests {
     /// A driven dimension measures without constraining, so it must not add an
     /// equation - otherwise asking for a reference measurement would make the
     /// sketch look over-constrained.
+
+    #[test]
+    fn a_radius_dimension_sets_and_fixes_the_radius() {
+        let mut sketch = Sketch::new("test");
+        let circle = sketch.add_circle(0.0, 0.0, 10.0);
+        sketch.add_dimension_constraint(
+            Constraint::Radius {
+                curve: circle,
+                value: 25.0,
+            },
+            true,
+            true,
+            Some([5.0, 5.0]),
+            DimensionOrientation::Aligned,
+        );
+        sketch.solve().expect("solve");
+        assert!(close(sketch.circles[0].radius, 25.0), "{}", sketch.circles[0].radius);
+        // The radius is now one equation of the model.
+        let analysis = sketch.analyze_dof_detailed();
+        assert!(analysis.total_dof > analysis.free_dof);
+    }
+
+    #[test]
+    fn a_diameter_dimension_halves_itself_into_a_radius() {
+        let mut sketch = Sketch::new("test");
+        let circle = sketch.add_circle(0.0, 0.0, 10.0);
+        sketch.add_dimension_constraint(
+            Constraint::Diameter {
+                curve: circle,
+                value: 30.0,
+            },
+            true,
+            true,
+            None,
+            DimensionOrientation::Aligned,
+        );
+        sketch.solve().expect("solve");
+        assert!(close(sketch.circles[0].radius, 15.0));
+        // The record is reachable as a dimension, with its value.
+        let index = sketch.constraints.len() - 1;
+        assert_eq!(sketch.dimension_value(index), Some(30.0));
+    }
+
+    #[test]
+    fn a_point_line_dimension_measures_the_perpendicular() {
+        let mut sketch = Sketch::new("test");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(20.0, 0.0);
+        let line = sketch.add_line(a, b);
+        let point = sketch.add_point(5.0, 3.0);
+        sketch.add_dimension_constraint(
+            Constraint::PointLineDistance {
+                point,
+                line,
+                value: 7.0,
+            },
+            true,
+            true,
+            Some([10.0, 8.0]),
+            DimensionOrientation::Aligned,
+        );
+        sketch.solve().expect("solve");
+        let moved = sketch.point(point).expect("the point");
+        assert!(close(moved.y, 7.0), "{}", moved.y);
+        // ... and it keeps its place along the line.
+        assert!(close(moved.x, 5.0), "{}", moved.x);
+    }
+
+    #[test]
+    fn a_tangent_distance_leaves_the_radius_out_of_the_gap() {
+        let mut sketch = Sketch::new("test");
+        let a = sketch.add_point(-30.0, 0.0);
+        let b = sketch.add_point(30.0, 0.0);
+        let line = sketch.add_line(a, b);
+        let circle = sketch.add_circle(0.0, 12.0, 5.0);
+        sketch.add_dimension_constraint(
+            Constraint::LineCurveDistance {
+                line,
+                curve: circle,
+                value: 4.0,
+            },
+            true,
+            true,
+            Some([0.0, 6.0]),
+            DimensionOrientation::Aligned,
+        );
+        sketch.solve().expect("solve");
+        let centre = sketch.point(sketch.circles[0].center).expect("centre");
+        // The centre sits radius + gap above the line.
+        assert!(close(centre.y, 9.0), "{}", centre.y);
+        assert!(close(sketch.circles[0].radius, 5.0), "radius must not move");
+    }
+
+    #[test]
+    fn a_driven_radius_dimension_does_not_move_the_radius() {
+        let mut sketch = Sketch::new("test");
+        let circle = sketch.add_circle(0.0, 0.0, 10.0);
+        sketch.add_dimension_constraint(
+            Constraint::Radius {
+                curve: circle,
+                value: 40.0,
+            },
+            false,
+            true,
+            None,
+            DimensionOrientation::Aligned,
+        );
+        sketch.solve().expect("solve");
+        assert!(close(sketch.circles[0].radius, 10.0));
+        // A driven dimension is not an equation either: the radius keeps one.
+        let index = sketch.constraints.len() - 1;
+        assert_eq!(sketch.dimension_is_driving(index), Some(false));
+    }
+
+    #[test]
+    fn the_entities_with_freedom_are_listed() {
+        let mut sketch = Sketch::new("test");
+        let corners = sketch.add_rectangle(0.0, 0.0, 10.0, 10.0);
+        let circle = sketch.add_circle(20.0, 0.0, 4.0);
+        // Nothing is anchored yet: every point, the four lines and the circle.
+        let free = sketch.find_unconstrained_entities();
+        assert!(free.contains(&corners[0]));
+        assert!(free.contains(&circle));
+
+        // Pin a corner: the two lines that use it still have a free end.
+        sketch.constraints.push(Constraint::Fixed { point: corners[0] });
+        let free = sketch.find_unconstrained_entities();
+        assert!(!free.contains(&corners[0]));
+        assert!(free.contains(&sketch.lines[0].id));
+
+        // A radius dimension takes the radius out of the circle's freedom, but
+        // its centre is still free.
+        sketch.constraints.push(Constraint::Radius {
+            curve: circle,
+            value: 4.0,
+        });
+        let free = sketch.find_unconstrained_entities();
+        assert!(free.contains(&circle), "the centre is still free");
+        sketch.constraints.push(Constraint::Fixed {
+            point: sketch.circles[0].center,
+        });
+        let free = sketch.find_unconstrained_entities();
+        assert!(!free.contains(&circle), "radius and centre are fixed");
+    }
+
+    #[test]
+    fn a_conic_passes_through_its_shoulder() {
+        let mut sketch = Sketch::new("test");
+        let start = sketch.add_point(-10.0, 0.0);
+        let control = sketch.add_point(0.0, 20.0);
+        let end = sketch.add_point(10.0, 0.0);
+        let conic = sketch.add_conic(start, control, end, 0.5);
+        let points = sketch.conic_points(conic, 20);
+        assert_eq!(points.len(), 21);
+        // At rho 0.5 the curve passes through the quadratic Bezier midpoint.
+        let middle = points[10];
+        let expected = [
+            (-10.0 + 2.0 * 0.5 * 0.0 + 10.0) / 3.0,
+            (0.0 + 2.0 * 0.5 * 20.0 + 0.0) / 3.0,
+        ];
+        assert!(close(middle[0], expected[0]), "{middle:?}");
+        assert!(close(middle[1], expected[1]), "{middle:?}");
+        assert!(sketch.find_unconstrained_entities().contains(&conic));
+    }
+
+    #[test]
+    fn a_text_keeps_its_words_and_height() {
+        let mut sketch = Sketch::new("test");
+        let id = sketch.add_text([5.0, 5.0], 3.0, "RCAD");
+        let text = sketch.texts.iter().find(|text| text.id == id).expect("text");
+        assert_eq!(text.content, "RCAD");
+        assert!(close(text.height, 3.0));
+        assert!(close(text.position[0], 5.0));
+    }
+
     #[test]
     fn a_driven_dimension_is_not_an_equation() {
         let mut sketch = Sketch::new("driven dof");

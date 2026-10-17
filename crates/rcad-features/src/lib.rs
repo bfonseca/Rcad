@@ -35,6 +35,7 @@ pub fn add_extrude_from_sketch(
     name: &str,
     sketch: &Sketch,
     height: f64,
+    source: Option<EntityId>,
 ) -> Option<EntityId> {
     let profile = sketch.to_profile()?;
     Some(push_feature(
@@ -45,6 +46,7 @@ pub fn add_extrude_from_sketch(
                 profile,
                 height,
                 placement: None,
+                sketch: source,
             },
         ),
     ))
@@ -67,6 +69,7 @@ pub fn add_extrude_rect(
                 profile,
                 height,
                 placement: None,
+                sketch: None,
             },
         ),
     )
@@ -79,6 +82,7 @@ pub fn add_extrude(
     profile: Profile2D,
     height: f64,
     placement: Option<SketchPlacement>,
+    sketch: Option<EntityId>,
 ) -> EntityId {
     push_feature(
         part,
@@ -88,6 +92,7 @@ pub fn add_extrude(
                 profile,
                 height,
                 placement,
+                sketch,
             },
         ),
     )
@@ -114,6 +119,7 @@ pub fn add_revolve(
     profile: Profile2D,
     angle_deg: f64,
     placement: Option<SketchPlacement>,
+    sketch: Option<EntityId>,
 ) -> EntityId {
     push_feature(
         part,
@@ -123,6 +129,7 @@ pub fn add_revolve(
                 profile,
                 angle_deg,
                 placement,
+                sketch,
             },
         ),
     )
@@ -281,7 +288,7 @@ mod helper_tests {
     fn extrude_from_empty_sketch_reports_failure() {
         let mut part = Part::new_solid("P");
         let sketch = Sketch::new("empty");
-        assert!(add_extrude_from_sketch(&mut part, "E", &sketch, 5.0).is_none());
+        assert!(add_extrude_from_sketch(&mut part, "E", &sketch, 5.0, None).is_none());
         assert!(part.features.is_empty(), "a feature was added for an empty sketch");
     }
 
@@ -291,7 +298,8 @@ mod helper_tests {
         let mut sketch = Sketch::new("rect");
         sketch.add_rectangle(0.0, 0.0, 4.0, 2.0);
 
-        let id = add_extrude_from_sketch(&mut part, "E", &sketch, 5.0).expect("feature created");
+        let id = add_extrude_from_sketch(&mut part, "E", &sketch, 5.0, None)
+            .expect("feature created");
 
         assert_eq!(part.features.len(), 1);
         assert_eq!(part.features[0].id, id);

@@ -536,6 +536,11 @@ pub enum FeatureKind {
         /// is swept along +Z, which is what every extrude did before placements.
         #[serde(default)]
         placement: Option<SketchPlacement>,
+        /// The Sketch feature this extrusion was built from. When it is set, a
+        /// rebuild re-reads the profile and the plane from the sketch, so
+        /// editing the sketch updates the solid.
+        #[serde(default)]
+        sketch: Option<EntityId>,
     },
     Revolve {
         profile: Profile2D,
@@ -543,6 +548,10 @@ pub enum FeatureKind {
         /// Where the profile lies. Without it the profile is on the XY plane.
         #[serde(default)]
         placement: Option<SketchPlacement>,
+        /// The Sketch feature this revolve was built from, for the same reason
+        /// as the extrusion's.
+        #[serde(default)]
+        sketch: Option<EntityId>,
     },
     Boolean {
         tool_feature: EntityId,

@@ -151,6 +151,7 @@ fn create_base_plate() -> Result<Part, Box<dyn std::error::Error>> {
             profile: rcad_geom::Profile2D { outer: vec![], holes: vec![] },
             height: 10.0,
             placement: None,
+            sketch: None,
         },
     ));
     
@@ -183,6 +184,7 @@ fn create_bracket() -> Result<Part, Box<dyn std::error::Error>> {
             profile: rcad_geom::Profile2D { outer: vec![], holes: vec![] },
             height: 10.0,
             placement: None,
+            sketch: None,
         },
     ));
     
@@ -192,6 +194,7 @@ fn create_bracket() -> Result<Part, Box<dyn std::error::Error>> {
             profile: rcad_geom::Profile2D { outer: vec![], holes: vec![] },
             height: 50.0,
             placement: None,
+            sketch: None,
         },
     ));
     
@@ -224,6 +227,7 @@ fn create_shaft() -> Result<Part, Box<dyn std::error::Error>> {
             profile: rcad_geom::Profile2D { outer: vec![], holes: vec![] },
             angle_deg: 360.0,
             placement: None,
+            sketch: None,
         },
     ));
     
