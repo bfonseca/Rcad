@@ -90,11 +90,26 @@ visíveis no sólido. Sensação de “sólido”, não de “malha”.
 **Depende de:** nada (pode começar já).
 **Tamanho:** M–L. **Risco:** médio (integração egui/eframe/WGPU e fallback glow).
 
-### A0 — Baseline visual e de performance
-- [ ] Capturar o estado atual com `--demo`, `--view iso`, `--screenshot` e guardar as imagens de referência.
-- [ ] Medir e registar: FPS no modelo demo, nº de triângulos, tempo de rebuild, tempo de picking.
-- [ ] Criar uma peça de teste “média” (ex.: chapa com vários furos e rounds) para medir mais tarde.
-- **Aceitação:** tabela de baseline preenchida neste plano (ou em `plans/foundation-baseline.md`).
+### A0 — Baseline visual e de performance ✅
+- [x] Capturar o estado atual com `--demo`, `--view iso`, `--screenshot` e guardar as imagens de referência.
+- [x] Medir e registar: FPS no modelo demo, nº de triângulos, tempo de rebuild, tempo de picking.
+- [x] Criar uma peça de teste “média” (chapa 120×80×10, 8 furos, rounds) para medir mais tarde.
+- [x] Corrigir a captura de ecrã para esperar pela primeira tesselação (antes saía vazia em peças lentas).
+- **Aceitação:** baseline publicado em [foundation-baseline.md](foundation-baseline.md).
+
+**Resultado do A0 (resumo):**
+- Rebuild da chapa de 8 furos: **≈15 s** cold / ≈5,3 s incremental; duplicar os furos
+  multiplica o custo por ~4 → **gargalo dominante e superlinear**.
+- Segunda tesselação (inclui nomes/histórico): **≈2,8 s**; o resto está na avaliação
+  de features + derivação de referências por feature.
+- Picking: ~1,1 ms para 180k triângulos → **não é o gargalo**.
+- Frame time (software GL, demo): 8,8 ms → **o renderer não é o gargalo de FPS**; o
+  Bloco A é sobretudo qualidade visual (depth, MSAA, arestas, sombreado).
+- A face superior da chapa mostra **costuras entre triângulos** no painter — prova
+  visual do problema que o Bloco A resolve.
+- **Consequência para o plano:** B deve reduzir drasticamente a topologia (furo
+  cilíndrico = 1 face em vez de ~32), mas **D2/D3 deixam de ser “depois de B”**:
+  o custo superlinear por feature tem de ser atacado em paralelo com B.
 
 ### A1 — Configuração do render target
 - [ ] Em `crates/rcad-app/src/main.rs`, configurar `eframe::NativeOptions` com
@@ -251,12 +266,18 @@ referências quebradas aparecem com “onde estavam” e substituto; dá para ed
 
 **Princípio:** medir antes de otimizar; cada bloco entrega métricas antes/depois.
 
-### D0 — Baseline e orçamentos
-- [ ] Instrumentar (atrás de flag/log) tempo de frame, nº de triângulos, tempo de rebuild e de picking.
-- [ ] Medir o modelo demo e a peça “média” de A0.
-- [ ] Fixar orçamentos iniciais (a confirmar com os números): 60 FPS em interação; ≤16,7 ms/frame;
-      rebuild do demo < 250 ms; picking < 2 ms; abrir/relêr documento < 1 s.
-- **Aceitação:** tabela de métricas no repositório, reproduzível.
+> **Achado do A0 (2026-10-17):** o rebuild é o gargalo real — 15 s para 18 features,
+> com crescimento superlinear (~4× por duplicação de furos). O renderer de software
+> faz 8,8 ms/frame. Por isso D não é um “polish” no fim: **D2 (cache/rebuild) e a
+> redução de trabalho por feature têm de avançar em paralelo com o Bloco B.** Os
+> números e orçamentos estão em [foundation-baseline.md](foundation-baseline.md).
+
+### D0 — Baseline e orçamentos ✅
+- [x] Instrumentar (exemplo de benchmark + teste de picking ignorado) tempo de rebuild,
+      segunda tesselação, tamanho de malha e custo de picking.
+- [x] Medir o modelo demo e as peças de teste de A0.
+- [x] Fixar orçamentos iniciais em [foundation-baseline.md](foundation-baseline.md) (§7).
+- **Aceitação:** tabela de métricas no repositório, reproduzível. ✅
 
 ### D1 — Picking
 - [ ] Substituir a travessia O(n) de triângulos por **BVH** por corpo (primeiro passo) ou buffer de IDs na GPU.
@@ -301,6 +322,7 @@ Com o build novo, o utilizador deve conseguir, sem tocar em código:
 | Scope creep (features novas a meio) | Regra do §2, decisão 5; backlog separado |
 | Otimizar sem medir | D0 obrigatório; métricas antes/depois por bloco |
 | Perder o trabalho já feito em referências | C0 parte do naming existente; não reescrever o que está testado |
+| Rebuild superlinear (medido no A0: ~4× por duplicação de furos) | D2/D3 em paralelo com B; medir cada alteração e manter o alvo de ≤500 ms para a chapa de 8 furos |
 | Ambiente de medição (GPU vs software) | Registar o ambiente de cada medição; não comparar maçãs com laranjas |
 
 ---
@@ -332,7 +354,8 @@ Com o build novo, o utilizador deve conseguir, sem tocar em código:
 
 ## 12. Próximo passo imediato
 
-**A0** — capturar o baseline visual e de performance e preencher a tabela; depois **A1**.
-Nenhuma alteração de código começa sem o utilizador confirmar o arranque do A0.
+**A1** — configurar `eframe::NativeOptions` com depth/stencil/MSAA e começar o
+pipeline WGPU do viewport. O A0 está concluído e o “antes” está congelado em
+[foundation-baseline.md](foundation-baseline.md).
 
 *Documento criado em 2026-10-17. Atualizar o estado das tarefas à medida que avançam.*

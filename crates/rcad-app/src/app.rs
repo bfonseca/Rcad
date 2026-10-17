@@ -67,6 +67,9 @@ pub struct CaptureRequest {
     pub frames: u32,
     requested: bool,
     rendered: u32,
+    /// When the capture run started. Used as a safety valve: a document whose
+    /// rebuild never finishes must not hang the screenshot forever.
+    started: std::time::Instant,
 }
 
 impl CaptureRequest {
@@ -76,6 +79,7 @@ impl CaptureRequest {
             frames,
             requested: false,
             rendered: 0,
+            started: std::time::Instant::now(),
         }
     }
 }
@@ -1407,6 +1411,22 @@ impl RcadApp {
     /// Capture mode: let a few frames render (so the async kernel rebuild can
     /// land), then ask egui for the framebuffer, write it out and quit.
     fn handle_capture(&mut self, ctx: &egui::Context) {
+        // A document with features rebuilds asynchronously in the kernel worker.
+        // The screenshot used to be taken after a fixed number of frames, which
+        // captured an empty viewport for any part whose rebuild took longer than
+        // `frames * frame_time` (the 8-hole baseline plate takes several seconds).
+        // Wait for the first tessellation, with a wall-clock safety valve.
+        let waiting_for_model = !self.mesh_ready
+            && self
+                .get_active_part()
+                .map(|part| !part.features.is_empty())
+                .unwrap_or(false);
+        let waited = self
+            .capture
+            .as_ref()
+            .map(|capture| capture.started.elapsed())
+            .unwrap_or_default();
+
         let Some(capture) = self.capture.as_mut() else {
             return;
         };
@@ -1424,8 +1444,13 @@ impl RcadApp {
         }
 
         capture.rendered += 1;
-        if !capture.requested && capture.rendered >= capture.frames {
+        let model_settled = !waiting_for_model || waited > std::time::Duration::from_secs(120);
+        if !capture.requested && capture.rendered >= capture.frames && model_settled {
             capture.requested = true;
+            tracing::info!(
+                "capturing after {} frame(s), model settled={model_settled}",
+                capture.rendered
+            );
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
     }

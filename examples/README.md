@@ -25,6 +25,19 @@ cargo run --example assembly_demo
 ```
 Outputs: `examples/models/assembly_output.step`
 
+### foundation_bench.rs
+Foundation baseline benchmark: builds the demo and a medium plate (120×80×10,
+8 holes, rounds), measures cold/incremental rebuild, a second tessellation and
+the mesh size, and saves both documents for screenshots.
+```bash
+cargo run --release --example foundation_bench
+```
+Optional environment variables: `RCAD_BENCH_RUNS=<n>`, `RCAD_BENCH_ROUNDS=0`,
+`RCAD_BENCH_SCALING=1` (also measures 0/2/4-hole plates).
+Outputs: `examples/models/foundation_demo.rcad` and
+`examples/models/foundation_plate.rcad`, plus `metric,...` lines on stdout.
+See `plans/foundation-baseline.md` for the recorded numbers.
+
 ## Running Examples
 
 ```bash
@@ -35,6 +48,7 @@ cargo run --example box_demo
 cargo run --example box_demo
 cargo run --example sketch_demo
 cargo run --example assembly_demo
+cargo run --release --example foundation_bench
 
 # Run with release optimizations
 cargo run --release --example box_demo

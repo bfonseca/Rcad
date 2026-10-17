@@ -30,3 +30,7 @@ path = "models/sketch_demo.rs"
 [[example]]
 name = "assembly_demo"
 path = "models/assembly_demo.rs"
+
+[[example]]
+name = "foundation_bench"
+path = "models/foundation_bench.rs"

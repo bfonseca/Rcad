@@ -1374,4 +1374,73 @@ mod tests {
             );
         }
     }
+
+    /// A0 baseline: the cost of the current linear picking scan.
+    ///
+    /// This is a measurement, not an assertion, so it is ignored by default.
+    /// Run it explicitly:
+    ///   cargo test --release -p rcad-app baseline_picking_cost -- --ignored --nocapture
+    #[test]
+    #[ignore = "A0 baseline measurement; run with --ignored --nocapture"]
+    fn baseline_picking_cost() {
+        use std::time::Instant;
+
+        let side: usize = 300; // 2 * 300 * 300 = 180_000 triangles
+        let stride = side + 1;
+        let mut positions = Vec::with_capacity(stride * stride);
+        let mut normals = Vec::with_capacity(stride * stride);
+        let mut indices = Vec::new();
+        for y in 0..stride {
+            for x in 0..stride {
+                positions.push([x as f32 - side as f32 * 0.5, y as f32 - side as f32 * 0.5, 0.0]);
+                normals.push([0.0, 0.0, 1.0]);
+            }
+        }
+        for y in 0..side {
+            for x in 0..side {
+                let i = (y * stride + x) as u32;
+                indices.extend([
+                    i,
+                    i + 1,
+                    i + stride as u32 + 1,
+                    i,
+                    i + stride as u32 + 1,
+                    i + stride as u32,
+                ]);
+            }
+        }
+        let mesh = TriangleMesh {
+            positions,
+            normals,
+            indices,
+            ..Default::default()
+        };
+        let mut camera = OrbitCamera {
+            distance: 900.0,
+            ..Default::default()
+        };
+        // Look at the grid from an isometric direction: along the grid plane the
+        // ray would be coplanar with the triangles and never intersect them.
+        camera.look_from(Vec3::new(1.0, 1.0, 1.0));
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0));
+        // Off the exact grid vertex at the centre: the ray must land inside a
+        // triangle so the measurement includes a real hit.
+        let cursor = rect.center() + Vec2::new(3.0, 0.0);
+
+        let runs = 200;
+        let started = Instant::now();
+        let mut hits = 0usize;
+        for _ in 0..runs {
+            if pick_triangle(cursor, rect, &mesh, &camera).is_some() {
+                hits += 1;
+            }
+        }
+        let per_pick_ms = started.elapsed().as_secs_f64() * 1000.0 / runs as f64;
+        eprintln!(
+            "baseline_picking: triangles={} runs={} hits={} avg_ms={per_pick_ms:.3}",
+            mesh.triangle_count(),
+            runs,
+            hits
+        );
+    }
 }
