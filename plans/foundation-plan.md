@@ -170,13 +170,24 @@ visíveis no sólido. Sensação de “sólido”, não de “malha”.
 - **Aceitação:** um cilindro mostra gradiente contínuo, não facetas por triângulo (verificado no
   render offscreen; a confirmação final na janela fica para o Gate A).
 
-### A4 — Arestas e modo Shaded with Edges
-- [ ] Pass 2: arestas B-Rep instanciadas como linhas finas, com depth bias (evitar z-fighting).
-- [ ] `Shaded with Edges` como modo por omissão.
-- [ ] Arestas tangentes atenuadas usando o ângulo diedral já calculado em `NamedEdge`
-      (`crates/rcad-occt/src/lib.rs`, `edge_dihedral`).
-- [ ] Arestas selecionadas/hovered com espessura/cor própria.
-- **Aceitação:** caixa e furos com arestas nítidas; tangências discretas; sem linhas a “tremer”.
+### A4 — Arestas e modo Shaded with Edges ✅ (validação de janela pendente)
+- [x] Pass 2: arestas B-Rep instanciadas como linhas, com depth test e **depth bias negativo**
+      para não haver z-fighting (`cad_edges.wgsl` + segundo pipeline).
+- [x] `Shaded with Edges` como comportamento por omissão (as arestas deixam de ser só de seleção).
+- [x] Arestas tangentes atenuadas usando o `dihedral_degrees` já calculado em `NamedEdge`.
+- [x] Arestas selecionadas/hovered com cor própria no GPU; o painter continua a desenhar a linha
+      mais grossa por cima para facilitar o alvo.
+- **Aceitação:** caixa e furos com arestas nítidas, ocultas escondidas e sem linhas a “tremer”.
+  **Validado no render offscreen** (ver abaixo); falta a confirmação na janela.
+
+**Resultado A4 (2026-10-17):** o render offscreen do demo passou a mostrar o contorno escuro de
+todas as arestas visíveis, com as arestas traseiras devidamente escondidas pelo depth test:
+
+![A4 edges](../docs/baseline/a4-headless-edges.png)
+
+O teste `tangent_edges_are_dimmed_and_selected_edges_take_the_highlight` fixa a classificação
+(deiedral ≈180° → cor atenuada; seleção → cor de destaque). O que falta: validar na janela WGPU
+do utilizador, onde o painter acrescenta a linha grossa de seleção/hover.
 
 ### A5 — Qualidade de tesselação configurável ✅
 - [x] Expor a `Tessellation` do `cadrum` no backend, no `rcad.toml` (`[tessellation]`) e no
@@ -207,9 +218,13 @@ depois de B/D, a medição deve ser repetida.
 - **Aceitação:** CI verde; capturas nos dois modos. ⚠️ parcial (modo glow validado; WGPU de janela pendente).
 
 ### A7 — Gate A (aceitação visual + números)
+> **Nota (2026-10-17):** o utilizador correu a app no seu desktop e confirmou que o render está
+> muito melhor; a captura mostra o pipeline WGPU a funcionar em janela (sem facetas/costuras).
+> Falta a comparação formal lado a lado, o FPS e a confirmação das arestas do A4 nessa janela.
+
 - [ ] Comparação lado a lado com as imagens A0 (sem facetas, com arestas, sem serrilhado).
 - [ ] FPS e tempo de picking dentro do orçamento definido em D.
-- [ ] Nenhuma regressão na suite (287 testes, 4 medições ignoradas); `cargo check
+- [ ] Nenhuma regressão na suite (288 testes, 4 medições ignoradas); `cargo check
       --workspace --all-targets` com 0 avisos.
 - **O utilizador valida visualmente antes de passar ao Bloco B.**
 
@@ -380,6 +395,7 @@ Com o build novo, o utilizador deve conseguir, sem tocar em código:
 | Perder o trabalho já feito em referências | C0 parte do naming existente; não reescrever o que está testado |
 | Rebuild superlinear (medido no A0: ~4× por duplicação de furos) | D2/D3 em paralelo com B; medir cada alteração e manter o alvo de ≤500 ms para a chapa de 8 furos |
 | Ambiente sem GPU/Vulkan: o renderer WGPU não arranca e não pode ser validado localmente | Validar em hardware ou instalar um driver Vulkan software (lavapipe); manter o fallback `--renderer glow` para CI/screenshots |
+| O teste do utilizador expôs referências perdidas (5) e um fillet com raio 8,5 que não cabe na geometria; a lista de reparação é muito verbosa | Trabalho do Bloco C (grafo, reparação, mensagens) e D (falha de fillet deve ser diagnosticada antes de aplicar); registado para a próxima sessão |
 | Ambiente de medição (GPU vs software) | Registar o ambiente de cada medição; não comparar maçãs com laranjas |
 
 ---
@@ -411,9 +427,8 @@ Com o build novo, o utilizador deve conseguir, sem tocar em código:
 
 ## 12. Próximo passo imediato
 
-**A4** — levar as arestas B-Rep para o pipeline (shaded-with-edges, tangentes
-atenuadas). Depois **A6/A7** — captura WGPU/regressão de imagem e o Gate A visual
-no hardware do utilizador. A2, A3 e A5 estão concluídos; o “antes” está congelado
-em [foundation-baseline.md](foundation-baseline.md).
+**A6/A7** — captura WGPU/regressão de imagem e o Gate A visual no hardware do
+utilizador. A2, A3, A4 e A5 estão concluídos; o “antes” está congelado em
+[foundation-baseline.md](foundation-baseline.md).
 
 *Documento criado em 2026-10-17. Atualizar o estado das tarefas à medida que avançam.*

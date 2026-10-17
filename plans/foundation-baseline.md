@@ -212,10 +212,22 @@ Sem uma janela WGPU neste ambiente, o pipeline foi validado em três níveis:
 
 ![A2 offscreen](../docs/baseline/a2-headless-demo.png)
 
-O que fica por validar: a **janela** WGPU real (`Surface::configure` falha neste
-ambiente) e o Gate A visual. Isso tem de ser corrido no hardware do utilizador.
+A **janela** WGPU real foi entretanto confirmada pelo utilizador no seu desktop (render
+muito melhor do que antes); falta apenas o Gate A formal (comparação lado a lado e FPS).
+Neste ambiente de comandos o `Surface::configure` continua a falhar.
 
-## 10. Próximo passo
+## 10. A4 — arestas B-Rep (offscreen)
+
+O A4 acrescentou o segundo passe de arestas: linhas B-Rep com depth test, bias negativo para
+evitar z-fighting e classificação de tangentes pelo ângulo diedral. O render offscreen do demo
+passou a mostrar o contorno escuro das arestas visíveis, com as traseiras escondidas:
+
+![A4 edges](../docs/baseline/a4-headless-edges.png)
+
+O que falta: confirmar na janela do utilizador (o painter continua a desenhar a linha grossa
+de seleção/hover por cima) e, no Gate A, comparar com o “antes”.
+
+## 11. Próximo passo
 
 **A4 / A6 / A7** — arestas B-Rep no pipeline (shaded-with-edges e tangentes
 atenuadas), captura/regressão de imagem e o Gate A visual com GPU. O “antes”

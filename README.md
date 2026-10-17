@@ -300,14 +300,16 @@ and its state reconciliation.
 - [x] STEP/STL export through OCCT; STEP import in the kernel (not in the UI)
 - [x] MCP server (`rcad-mcp`, stdio, 13 tools + 3 resources; no prompts/TCP)
 - [x] CI workflow (`.github/workflows/ci.yml`): build + test blocking, clippy/fmt advisory
-- [x] 287 tests passing (4 ignored measurements) and a warning-free
+- [x] 288 tests passing (4 ignored measurements) and a warning-free
       `cargo check --workspace --all-targets`
 - [x] **WGPU solid pipeline** (depth 24/stencil 8, 4x MSAA, Blinn-Phong, per-face colours,
       selection/hover tint) with the painter kept as fallback — foundation A2/A3. Validated
-      offscreen; the WGPU window path still needs a GPU machine.
+      offscreen and confirmed running in the window on the user's machine.
 - [x] **Configurable display tessellation** in `rcad.toml` and the Options dialog, with
       reference names independent of the display quality — foundation A5
-- [ ] **Shaded-with-edges and tangent-edge dimming** — foundation A4
+- [x] **Shaded-with-edges and tangent-edge dimming** (edge pass with depth bias, tangent
+      classification from the dihedral angle) — foundation A4 (offscreen validated; window
+      confirmation pending)
 - [ ] **Analytic sketch curves and holes reaching the B-Rep** — foundation B
 - [ ] **Parent/child dependency graph, real Insert Here/Rollback, Edit Definition** — foundation C
 - [ ] Adaptive history overlay with blur (the overlay is solid today)

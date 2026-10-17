@@ -33,8 +33,15 @@ pub const DEPTH_BITS: u8 = 24;
 pub const STENCIL_BITS: u8 = 8;
 
 const SHADER: &str = include_str!("../../shaders/cad_material.wgsl");
+const EDGE_SHADER: &str = include_str!("../../shaders/cad_edges.wgsl");
 /// Neutral base for a face the project did not colour.
 const DEFAULT_FACE: Color32 = Color32::from_rgb(196, 204, 222);
+/// B-Rep edges: a dark outline, the way Creo draws shaded-with-edges.
+const EDGE_COLOUR: Color32 = Color32::from_rgb(34, 38, 46);
+/// Tangent edges are dimmed instead of outlined.
+const TANGENT_EDGE_COLOUR: Color32 = Color32::from_rgb(140, 146, 156);
+/// How close to 180° a dihedral angle must be to count as tangent.
+const TANGENT_TOLERANCE_DEG: f64 = 2.0;
 const LIGHT_DIRECTION: [f32; 3] = [0.4, 0.8, 0.5];
 
 /// One vertex of the solid buffer. Layout must match `VertexBufferLayout` below.
@@ -51,6 +58,29 @@ impl SolidVertex {
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x3,
+    ];
+
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBUTES,
+        }
+    }
+}
+
+/// One vertex of the B-Rep edge line list.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct EdgeVertex {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+}
+
+impl EdgeVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
+        0 => Float32x3,
+        1 => Float32x3,
     ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -88,6 +118,8 @@ impl SolidUniforms {
 struct FrameData {
     vertices: Vec<SolidVertex>,
     indices: Vec<u32>,
+    /// Line-list vertices for the B-Rep edges (two per segment).
+    edges: Vec<EdgeVertex>,
     uniforms: SolidUniforms,
 }
 
@@ -130,6 +162,7 @@ impl SolidRenderer {
         let callback = SolidCallback {
             vertices: Arc::new(data.vertices),
             indices: Arc::new(data.indices),
+            edges: Arc::new(data.edges),
             uniforms: data.uniforms,
             target_format: self.target_format,
             depth_format: self.depth_format,
@@ -191,8 +224,72 @@ fn build_frame_data(
     FrameData {
         vertices,
         indices,
+        edges: build_edge_vertices(mesh, selection, hover),
         uniforms: SolidUniforms::for_camera(camera, rect),
     }
+}
+
+/// Turn the B-Rep edge polylines into a line list.
+///
+/// Edges are classified by the dihedral angle the kernel already computed:
+/// tangent edges (angle through the material ≈ 180°) are dimmed, ordinary
+/// ones are dark. Selected/hovered edges take the highlight colours; the
+/// painter still draws a thicker line over them for easy targeting.
+fn build_edge_vertices(
+    mesh: &TriangleMesh,
+    selection: &Selection,
+    hover: Option<&Selected>,
+) -> Vec<EdgeVertex> {
+    let hovered = match hover {
+        Some(Selected::Edge { reference, .. }) => Some(reference.as_str()),
+        _ => None,
+    };
+    let mut vertices = Vec::new();
+    for edge in &mesh.edges {
+        if edge.points.len() < 2 {
+            continue;
+        }
+        let selected = selection.has_edge(&edge.name);
+        let is_hovered = hovered == Some(edge.name.as_str());
+        let color = if selected {
+            SELECTED_COLOUR
+        } else if is_hovered {
+            HOVER_COLOUR
+        } else if (edge.dihedral_degrees - 180.0).abs() <= TANGENT_TOLERANCE_DEG {
+            TANGENT_EDGE_COLOUR
+        } else {
+            EDGE_COLOUR
+        };
+        let rgb = [
+            color.r() as f32 / 255.0,
+            color.g() as f32 / 255.0,
+            color.b() as f32 / 255.0,
+        ];
+        for pair in edge.points.windows(2) {
+            vertices.push(EdgeVertex {
+                position: pair[0],
+                color: rgb,
+            });
+            vertices.push(EdgeVertex {
+                position: pair[1],
+                color: rgb,
+            });
+        }
+        // Closed curves can come back without repeating the first point.
+        if edge.closed && edge.points.first() != edge.points.last() {
+            if let (Some(first), Some(last)) = (edge.points.first(), edge.points.last()) {
+                vertices.push(EdgeVertex {
+                    position: *last,
+                    color: rgb,
+                });
+                vertices.push(EdgeVertex {
+                    position: *first,
+                    color: rgb,
+                });
+            }
+        }
+    }
+    vertices
 }
 
 fn triangle_colour(
@@ -228,6 +325,7 @@ fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
 /// Persistent GPU resources, stored in `CallbackResources`.
 struct SolidResources {
     pipeline: wgpu::RenderPipeline,
+    edge_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
     vertex_buffer: wgpu::Buffer,
@@ -235,6 +333,9 @@ struct SolidResources {
     index_buffer: wgpu::Buffer,
     index_capacity: u64,
     index_count: u32,
+    edge_buffer: wgpu::Buffer,
+    edge_capacity: u64,
+    edge_count: u32,
 }
 
 impl SolidResources {
@@ -314,6 +415,61 @@ impl SolidResources {
             cache: None,
         });
 
+        // A4: second pipeline for the B-Rep edges. It shares the camera
+        // uniforms; the depth test keeps hidden edges hidden, and a small
+        // negative bias pulls the line off the face it bounds (no z-fighting).
+        let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rcad edge shader"),
+            source: wgpu::ShaderSource::Wgsl(EDGE_SHADER.into()),
+        });
+        let edge_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rcad edge pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &edge_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[EdgeVertex::layout()],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
+                format,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -2,
+                    slope_scale: -1.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState {
+                count: msaa_samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &edge_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let uniform_size = std::mem::size_of::<SolidUniforms>() as wgpu::BufferAddress;
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rcad solid uniforms"),
@@ -332,6 +488,7 @@ impl SolidResources {
 
         Self {
             pipeline,
+            edge_pipeline,
             bind_group,
             uniform_buffer,
             vertex_buffer: empty_vertex_buffer(device),
@@ -339,6 +496,9 @@ impl SolidResources {
             index_buffer: empty_index_buffer(device),
             index_capacity: 4,
             index_count: 0,
+            edge_buffer: empty_vertex_buffer(device),
+            edge_capacity: 4,
+            edge_count: 0,
         }
     }
 
@@ -348,6 +508,7 @@ impl SolidResources {
         queue: &wgpu::Queue,
         vertices: &[SolidVertex],
         indices: &[u32],
+        edges: &[EdgeVertex],
         uniforms: SolidUniforms,
     ) {
         let vertex_bytes: &[u8] = bytemuck::cast_slice(vertices);
@@ -378,6 +539,21 @@ impl SolidResources {
             queue.write_buffer(&self.index_buffer, 0, index_bytes);
         }
 
+        let edge_bytes: &[u8] = bytemuck::cast_slice(edges);
+        if edge_bytes.len() as u64 > self.edge_capacity {
+            self.edge_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("rcad edge vertices"),
+                size: edge_bytes.len() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.edge_capacity = edge_bytes.len() as u64;
+        }
+        if !edge_bytes.is_empty() {
+            queue.write_buffer(&self.edge_buffer, 0, edge_bytes);
+        }
+        self.edge_count = edges.len() as u32;
+
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
         self.index_count = indices.len() as u32;
     }
@@ -404,6 +580,7 @@ fn empty_index_buffer(device: &wgpu::Device) -> wgpu::Buffer {
 struct SolidCallback {
     vertices: Arc<Vec<SolidVertex>>,
     indices: Arc<Vec<u32>>,
+    edges: Arc<Vec<EdgeVertex>>,
     uniforms: SolidUniforms,
     target_format: wgpu::TextureFormat,
     depth_format: Option<wgpu::TextureFormat>,
@@ -433,6 +610,7 @@ impl CallbackTrait for SolidCallback {
                 queue,
                 &self.vertices,
                 &self.indices,
+                &self.edges,
                 self.uniforms,
             );
         }
@@ -471,6 +649,14 @@ impl CallbackTrait for SolidCallback {
         render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
         render_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..resources.index_count, 0, 0..1);
+
+        // Pass 2: B-Rep edges, with depth testing so hidden edges stay hidden.
+        if resources.edge_count >= 2 {
+            render_pass.set_pipeline(&resources.edge_pipeline);
+            render_pass.set_bind_group(0, &resources.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, resources.edge_buffer.slice(..));
+            render_pass.draw(0..resources.edge_count, 0..1);
+        }
     }
 }
 
@@ -481,14 +667,19 @@ mod tests {
 
     /// The shader cannot be compiled by a GPU in this environment, so validate
     /// its WGSL and uniform/layout types with naga instead.
-    #[test]
-    fn the_solid_shader_parses_and_validates() {
-        let module = naga::front::wgsl::parse_str(SHADER).expect("solid shader parses");
+    fn validate_shader(source: &str) {
+        let module = naga::front::wgsl::parse_str(source).expect("shader parses");
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
         );
-        validator.validate(&module).expect("solid shader validates");
+        validator.validate(&module).expect("shader validates");
+    }
+
+    #[test]
+    fn the_solid_and_edge_shaders_parse_and_validate() {
+        validate_shader(SHADER);
+        validate_shader(EDGE_SHADER);
     }
 
     fn triangle_mesh() -> TriangleMesh {
@@ -567,6 +758,58 @@ mod tests {
             assert!((colour[1] - expected[1]).abs() < 1e-6, "{colour:?}");
             assert!((colour[2] - expected[2]).abs() < 1e-6, "{colour:?}");
         }
+    }
+
+    fn named_edge(name: &str, dihedral_degrees: f64) -> rcad_geom::NamedEdge {
+        rcad_geom::NamedEdge {
+            name: name.to_string(),
+            points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+            dihedral_degrees,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tangent_edges_are_dimmed_and_selected_edges_take_the_highlight() {
+        let mut mesh = triangle_mesh();
+        mesh.edges = vec![named_edge("e-normal", 90.0), named_edge("e-tangent", 180.0)];
+
+        let data = build_frame_data(
+            &mesh,
+            &OrbitCamera::default(),
+            rect(),
+            &Selection::default(),
+            None,
+            None,
+            &ProjectManifest::default(),
+        );
+        assert_eq!(data.edges.len(), 4, "two segments, four line-list vertices");
+        let normal = data.edges[0].color;
+        let tangent = data.edges[2].color;
+        assert_ne!(normal, tangent, "the tangent edge must be drawn dimmer");
+        assert!(tangent[0] > normal[0], "the tangent colour is lighter");
+
+        let mut selection = Selection::default();
+        selection.replace(Selected::Edge {
+            reference: "e-normal".to_string(),
+            label: "edge".to_string(),
+        });
+        let selected = build_frame_data(
+            &mesh,
+            &OrbitCamera::default(),
+            rect(),
+            &selection,
+            None,
+            None,
+            &ProjectManifest::default(),
+        );
+        let selected_rgb = selected.edges[0].color;
+        let expected = [
+            SELECTED_COLOUR.r() as f32 / 255.0,
+            SELECTED_COLOUR.g() as f32 / 255.0,
+            SELECTED_COLOUR.b() as f32 / 255.0,
+        ];
+        assert_eq!(selected_rgb, expected);
     }
 
     #[test]
@@ -659,6 +902,7 @@ mod tests {
             &queue,
             &vertices,
             &[0, 1, 2],
+            &[],
             SolidUniforms {
                 view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 eye: [0.0, 0.0, 1.0, 1.0],
@@ -825,6 +1069,7 @@ mod tests {
             &queue,
             &vertices,
             &[0, 1, 2],
+            &[],
             SolidUniforms {
                 view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 eye: [0.0, 0.0, 1.0, 1.0],
@@ -920,6 +1165,7 @@ mod tests {
         let callback = SolidCallback {
             vertices: Arc::new(data.vertices),
             indices: Arc::new(data.indices),
+            edges: Arc::new(data.edges),
             uniforms: data.uniforms,
             target_format: wgpu::TextureFormat::Rgba8UnormSrgb,
             depth_format: Some(wgpu::TextureFormat::Depth24PlusStencil8),
