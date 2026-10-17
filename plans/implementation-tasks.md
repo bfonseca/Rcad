@@ -12,11 +12,13 @@
 > cargo test --workspace e cargo check --workspace --all-targets (zero avisos),
 > e faz commit em main e push. Vai dizendo o que fizeste e o que ficou por fazer.
 
-**Onde estamos (última sessão):** o sketch desenha-se com o rato e mostra o seu
-estado. Os pontos 1 e 2 do sketch ficaram feitos, commitados e verdes; tudo o
-resto descrito neste ficheiro, até essa data, continua feito.
+**Onde estamos (última sessão):** os seis pontos que faltavam do sketch
+ficaram feitos, commitados e verdes; tudo o resto descrito neste ficheiro, até
+essa data, continua feito. O sketch desenha, edita, mede, restringe, projeta e
+desfaz, e os graus de liberdade passaram a ser um cálculo de posto em vez de uma
+contagem de restrições.
 
-**Feito nesta sessão (não repetir):**
+**Feito na sessão anterior (não repetir):**
 
 1. **Desenhar com o rato.** Novo `crates/rcad-app/src/sketch_ui.rs`: ferramentas
    de clique (Point, Line, Rectangle, Circle), snap à grelha do sketch (5 mm,
@@ -44,24 +46,48 @@ resto descrito neste ficheiro, até essa data, continua feito.
    Simétrico, Concêntrico, Ponto médio, Coincidente e Dimensão (mede a linha ou
    os dois pontos escolhidos, e recusa repetir a mesma distância).
 
+**Feito nesta sessão (não repetir):**
+
+1. **Dimensões editáveis.** Duplo-clique numa dimensão abre o editor no local
+   (valor, Driving/Driven, Promote, Delete); o clique direito abre o menu da
+   dimensão e o clique simples seleciona-a (a faixa do sketch oferece as mesmas
+   ações). `Sketch::set_dimension_value`, `set_dimension_driving`,
+   `promote_dimension` e `remove_constraint` mantêm o registo do Intent Manager
+   em passo. Uma dimensão driven passa a ser ignorada pelo solver: mede e não
+   move a geometria.
+2. **Os restantes comandos.** Arco de 3 pontos (circunferência por três pontos,
+   com o lado escolhido por aquele que a passa), spline (cliques + Enter),
+   `trim`, `extend` (dois cliques), `offset` (distância na faixa), `mirror` e
+   `pattern` linear (geometria na seleção, linha clicada como eixo/direção).
+3. **Arrastar geometria.** Com a ferramenta Select, arrastar um ponto move-o com
+   o snap e volta a resolver; os pontos ancorados não fogem.
+4. **Referências projetadas.** "Project Refs" projeta para o sketch as arestas
+   selecionadas do modelo e o contorno das faces selecionadas (as arestas da
+   tesselação que só aparecem num triângulo); desenham-se a tracejado.
+5. **Undo do sketch.** `sketch_undo`/`sketch_redo`: Ctrl+Z em modo sketch
+   recua um passo do desenho (clique, restrição, dimensão, arrasto, projeção)
+   antes de tocar no projeto; Ctrl+Y refaz.
+6. **DOF por posto.** `analyze_dof_detailed()` devolve `DOFAnalysis`
+   (`total_dof`, `constrained_dof` = posto do Jacobiano, `free_dof`,
+   `redundant_constraints`, `status`). As variáveis são as coordenadas dos
+   pontos e o raio de cada círculo/arco; as equações vêm de cada restrição, com
+   derivadas numéricas e eliminação de Gauss. Uma restrição repetida aparece
+   como redundante e o sketch diz "over-constrained"; uma dimensão driven não
+   conta como equação.
+
 **Próximo, por esta ordem:**
 
-1. **Editar dimensões**: duplo-clique para escrever outro valor, alternar
-   driving/driven e promover fraca a forte — a API existe em `rcad-sketch`
-   (`promote_to_strong`, `weak_constraints`, `driven_dimensions`) e ainda não
-   tem interface.
-2. **Os restantes comandos do sketch**: arco de 3 pontos, spline, `trim`,
-   `extend`, `offset`, `mirror` e `pattern`. Os botões existem e continuam
-   TODO; os métodos existem no crate (`trim_entity`, `extend_entity`,
-   `offset_entity`, `mirror_entities`, `linear_pattern`, `circular_pattern`).
-3. **Arrastar geometria do sketch** com o rato, para o utilizador poder testar os
-   graus de liberdade que a faixa mostra.
-4. **Projetar referências** para o sketch (`add_reference_geometry` já existe) e
-   desenhá-las.
-5. **Undo do sketch**: o `undo_stack` guarda só o `Project`; o desenho no sketch
-   não é reversível com Ctrl+Z.
-6. `analyze_dof` é uma contagem simples, não um cálculo de posto: deteção de
-   sobre/sub-restrição é aproximada e a redundância pode não ser exata.
+1. **Acabamento das dimensões**: posição do texto arrastável
+   (`dimension_text_position`), orientação (horizontal/vertical/paralelo) e
+   `add_dimension_with_intent` com auto-promoção fraca→forte.
+2. **Restantes comandos do sketch**: arco tangente, cónica (rho), texto,
+   importação DXF/SVG, `circular_pattern` exposto na interface, line chain.
+3. **Tabela de restrições** editável e destaque das entidades que ainda têm
+   liberdade: o painel mostra o número, não entidade a entidade.
+4. **Referências associativas**: a geometria projetada é uma fotografia; ligá-la
+   à face/aresta de origem é o que falta para seguir o modelo.
+5. **`find_unconstrained_entities()`** com contagem por entidade (hoje há
+   `free_points` para pontos e o DOF global).
 
 **Feito antes (não repetir):** nomes estáveis de faces e arestas; referências
 persistentes por feature; seleção ordenada partilhada (viewport + árvore) com
@@ -196,18 +222,18 @@ Based on the approved plan in `plans/creo-workflow-analysis.md`, this document b
 - [ ] **4.1.1** Enhance `ConstrainedConstraint` with `auto_generated`, `promoted_from`, `dimension_text_position`, `dimension_orientation`
 - [ ] **4.1.2** Add `DimensionOrientation` enum (Horizontal, Vertical, Parallel, Radial, Diameter)
 - [ ] **4.1.3** Implement `add_dimension_with_intent()` with auto-promotion logic
-- [ ] **4.1.4** Implement `promote_weak_to_strong()` 
-- [ ] **4.1.5** Implement `analyze_dof_detailed()` returning `DOFAnalysis`
-- [ ] **4.1.6** Implement `find_unconstrained_entities()` for UI highlighting
-- [ ] **4.1.7** Visual distinction in viewport: dashed/gray/italic (weak) vs solid/black/normal (strong)
-- [ ] **4.1.8** Dimension context menu: Toggle Driving/Driven, Promote, Delete, Edit, Flip Arrows
+- [x] **4.1.4** Implement `promote_weak_to_strong()` — `Sketch::promote_dimension`, with Promote in the editor, the menu and the strip
+- [x] **4.1.5** Implement `analyze_dof_detailed()` returning `DOFAnalysis` — rank of the constraint Jacobian, free and redundant counts
+- [x] **4.1.6** Implement `find_unconstrained_entities()` for UI highlighting — `free_points` marks the unanchored points; per-entity counting still missing
+- [x] **4.1.7** Visual distinction in viewport: weak grey, strong green, driven blue in parentheses (colour, not italics)
+- [x] **4.1.8** Dimension context menu: Toggle Driving/Driven, Promote, Delete, Edit (no arrow flip: length dimensions)
 - [ ] **4.1.9** Drag dimension text → update `dimension_text_position`
-- [ ] **4.1.10** Double-click dimension → in-place value edit (driving only)
+- [x] **4.1.10** Double-click dimension → in-place value edit (a driven dimension reads; a driving one also moves the geometry)
 
 ### 4.2 Reference Geometry Improvements
 - [ ] **4.2.1** Add `ProjectionMode` enum (OneSide, BothSides, AlongVector)
 - [ ] **4.2.2** Enhance `ReferenceGeometry` with `projection_mode`, `source_feature`, `source_body`, `is_associative`, `status`
-- [ ] **4.2.3** Implement `project_references(entities, mode, source_feature)`
+- [x] **4.2.3** Implement `project_references(entities, mode, source_feature)` — "Project Refs" projects the selected edges and face boundaries; no projection-mode enum yet
 - [ ] **4.2.4** Implement `update_references(project)` for associative updates
 - [ ] **4.2.4** Create Reference Geometry Panel in Sketch mode
 - [ ] **4.2.5** Auto-projection on sketch creation (pre-selected entities)
@@ -223,15 +249,20 @@ Based on the approved plan in `plans/creo-workflow-analysis.md`, this document b
 ### 4.4 Additional Sketch Tools
 - [ ] **4.4.1** Line Chain tool (continuous click-click-click, Esc to end)
 - [ ] **4.4.2** Tangent Arc tool
-- [ ] **4.4.3** 3-Point Arc tool
+- [x] **4.4.3** 3-Point Arc tool
 - [ ] **4.4.4** Conic tool (rho parameter)
 - [ ] **4.4.5** Text tool (TrueType as sketch geometry)
 - [ ] **4.4.6** Import DXF/SVG → sketch entities
 - [ ] **4.4.7** Sketch Region auto-detection
-- [ ] **4.4.8** Show DOF arrows toggle
-- [ ] **4.4.9** Highlight conflicts (red on over-constrained)
+- [x] **4.4.8** Show DOF arrows toggle — a ring on every unanchored point plus the DOF strip; no arrow toggle
+- [x] **4.4.9** Highlight conflicts (red on over-constrained) — the strip shows the status and the redundancy count in red
 - [ ] **4.4.10** Constraint Table (spreadsheet view, editable)
-- [ ] **4.4.11** Drag Test (Shift+drag to test DOF)
+- [x] **4.4.11** Drag Test (Shift+drag to test DOF) — drag a point with Select; no Shift required
+- [x] **4.4.12** Spline tool (click the control points, Enter to finish)
+- [x] **4.4.13** Trim / Extend / Offset by clicking entities
+- [x] **4.4.14** Mirror and linear pattern from the sketch selection
+- [x] **4.4.15** Project model edges and face boundaries into the sketch
+- [x] **4.4.16** Sketch undo/redo (Ctrl+Z / Ctrl+Y while sketching)
 
 ---
 
@@ -952,9 +983,69 @@ rectangle through viewport clicks, step back with Escape, apply a constraint to
 the sketch selection, dimension a clicked line, and leave a click on empty
 sketch space to the model picker.
 
-Still missing in the sketch, in order: editing a dimension (double-click, or
-toggle driving/driven, promote weak to strong), the remaining commands (3-point
-arc, spline, trim, extend, offset, mirror, pattern), dragging geometry,
-projecting reference geometry, and undo for the sketch (the undo stack holds the
-project, not the sketch). `analyze_dof` is a count, not a rank, so the
-redundancy number is approximate.
+Those six items were done in the following session (see the handover block and
+the section below).
+
+### Dimensions, the rest of the commands, references and rank DOF (steps 1-6)
+
+The remaining sketch items were done in one pass. `Sketch` gained the pieces
+that are about the data rather than the view:
+
+- `analyze_dof_detailed()` returns a `DOFAnalysis { total_dof, constrained_dof,
+  free_dof, redundant_constraints, status }`. It builds the constraint equations
+  at the current configuration over the variables the solver can move (x and y
+  of each point, the radius of each circle or arc), differentiates them by
+  central differences, scales each equation and takes the rank by Gaussian
+  elimination. `constrained_dof` is that rank, `free_dof` is variables minus
+  rank and `redundant_constraints` is equations minus rank. A repeated
+  constraint is therefore reported as redundant/over-constrained, and a driven
+  dimension is not an equation at all. `analyze_dof()` keeps returning the
+  triple the interface already used, and `constraint_status()` now comes from
+  the analysis.
+- Dimension editing: `dimension_value`, `dimension_is_driving`,
+  `dimension_is_weak`, `set_dimension_value`, `set_dimension_driving`,
+  `promote_dimension` and `remove_constraint`, all keeping the Intent Manager
+  record in step. The iterative solver skips driven dimensions, so a reference
+  really is a reference.
+- `add_arc` still writes a self-coincidence on each endpoint as a marker; the
+  DOF model recognises it as a marker instead of two equations.
+
+The app side (`crates/rcad-app/src/sketch_ui.rs` and `app.rs`):
+
+- The two-click tools became general: `SketchDraft` holds the clicks a creation
+  tool collected and the entity picks a command tool collected. The 3-point arc
+  solves the circumcircle and picks the sweep that passes through the third
+  point (`arc_through_points`, refused when the three are collinear). The
+  spline collects control points and Enter finishes it. Trim, Extend (two
+  picks), Offset (distance from the strip), Mirror and linear Pattern (the
+  selection is the geometry, a clicked line is the axis or direction) run
+  through `command_step`.
+- Dragging: with Select, a press on a sketch point starts a drag; the point
+  follows the snapped cursor and is re-solved every frame, so constraints show
+  their effect. The press origin, not the current position, is what finds the
+  point.
+- Projected references: "Project Refs" turns the selected edges into polylines
+  and the selected faces into their boundary segments (the tessellation edges
+  seen once), projects them onto the sketch plane and draws them dashed.
+- Dimension editing in the viewport: a click selects a dimension, a right-click
+  opens its menu (edit, driving/driven, promote, delete), a double-click opens
+  the in-place editor next to it. The strip offers the same actions plus the
+  offset distance and the pattern count/spacing the command tools read.
+- Sketch undo: `sketch_undo`/`sketch_redo` snapshots. Every sketch edit takes
+  one snapshot before it changes anything; Ctrl+Z while a sketch is open steps
+  back through those before it touches the project history, and Ctrl+Y redoes.
+
+Tests: `rcad-sketch` covers the rank analysis (a bare point, a circle radius, a
+rectangle, a duplicate constraint, a fully dimensioned rectangle, an arc's
+self-reference, a driven dimension not being an equation, editing a value,
+promoting, removing); `sketch_ui` covers the circumcircle, the tools' click
+state, trim/extend/offset/mirror/pattern, dimension hit testing and moving a
+point; the app tests drive real pointer events for a double-click on a dimension
+and for a drag, plus dimension editing, sketch undo/redo, projection and the
+Enter-finished spline.
+
+Still missing in the sketch: dimension text position and orientation with
+`add_dimension_with_intent`, the conic/text/DXF/SVG/line-chain tools, an
+editable constraint table, per-entity free-DOF highlighting
+(`find_unconstrained_entities`), associative projected references, and
+`circular_pattern` in the interface.

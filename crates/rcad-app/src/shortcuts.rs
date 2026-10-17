@@ -194,7 +194,9 @@ pub fn handle_shortcuts(app: &mut crate::app::RcadApp, ctx: &egui::Context, shor
         app.new_sketch();
     }
     if shortcuts.plain_pressed(ctx, shortcuts.sketch_solve) {
-        app.solve_sketch();
+        // Enter finishes the spline being drawn, and solves when nothing is
+        // half-finished.
+        app.finish_sketch_shape_or_solve();
     }
     // The sketch keys arm a tool; the shape arrives with the clicks, so the
     // key and the toolbar button do the same thing.

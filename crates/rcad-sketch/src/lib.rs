@@ -717,6 +717,16 @@ fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
     for _ in 0..80 {
         let mut max_err = 0.0f64;
         let constraints = sketch.constraints.clone();
+        // A driven (reference) dimension measures; it does not drive.
+        let driven: Vec<(Uuid, Uuid)> = sketch
+            .constrained_constraints
+            .iter()
+            .filter(|record| !record.is_driving)
+            .filter_map(|record| match &record.constraint {
+                Constraint::Distance { a, b, .. } => Some((*a, *b)),
+                _ => None,
+            })
+            .collect();
         for c in constraints {
             match c {
                 Constraint::Fixed { point } => {
@@ -750,6 +760,12 @@ fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
                     }
                 }
                 Constraint::Distance { a, b, value } => {
+                    if driven
+                        .iter()
+                        .any(|(da, db)| (da == &a && db == &b) || (da == &b && db == &a))
+                    {
+                        continue;
+                    }
                     let (ax, ay, af) = {
                         let p = sketch.point(a).ok_or(SketchError::Unknown(a))?;
                         (p.x, p.y, p.fixed)
@@ -1133,50 +1149,451 @@ pub struct ConstrainedConstraint {
     pub is_driving: bool, // For dimensions: true = driving (modifies geometry), false = driven (reference only)
 }
 
-impl Sketch {
-    /// Analyze degrees of freedom in the sketch
-    /// Returns (dof, constrained_dof, redundant_constraints)
-    pub fn analyze_dof(&self) -> (usize, usize, usize) {
-        // Each point has 2 DOF (x, y)
-        let total_dof = self.points.len() * 2;
-        
-        // Count effective constraints (simplified)
-        let mut constrained: usize = 0;
-        for constraint in &self.constraints {
-            match constraint {
-                Constraint::Fixed { .. } => constrained += 2,
-                Constraint::Coincident { .. } => constrained += 2,
-                Constraint::Distance { .. } => constrained += 1,
-                Constraint::Horizontal { .. } => constrained += 1,
-                Constraint::Vertical { .. } => constrained += 1,
-                Constraint::Tangent { .. } => constrained += 1,
-                Constraint::Symmetric { .. } => constrained += 2,
-                Constraint::EqualRadius { .. } => constrained += 1,
-                Constraint::EqualLength { .. } => constrained += 1,
-                Constraint::Parallel { .. } => constrained += 1,
-                Constraint::Perpendicular { .. } => constrained += 1,
-                Constraint::Midpoint { .. } => constrained += 2,
-                Constraint::Concentric { .. } => constrained += 2,
+/// Whether a sketch still has freedom left, has none, or asks for more than it
+/// has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConstraintStatus {
+    UnderConstrained,
+    FullyConstrained,
+    OverConstrained,
+}
+
+impl ConstraintStatus {
+    /// The words the interface shows for this status.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConstraintStatus::UnderConstrained => "under-constrained",
+            ConstraintStatus::FullyConstrained => "fully-constrained",
+            ConstraintStatus::OverConstrained => "over-constrained",
+        }
+    }
+}
+
+/// A rank-based analysis of a sketch's degrees of freedom.
+///
+/// The previous version counted constraints: two horizontals on the same line
+/// counted twice, a self-reference on an arc endpoint counted two, and a
+/// dimension that repeated another one counted as if it added freedom. Here the
+/// constraint equations are differentiated with respect to everything the
+/// solver can move (two coordinates per point, one radius per circle or arc)
+/// and the rank of that Jacobian is what "constrained" means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DOFAnalysis {
+    /// Variables the solver can move: two per point, one per radius.
+    pub total_dof: usize,
+    /// Independent equations: the rank of the constraint Jacobian.
+    pub constrained_dof: usize,
+    /// Freedom left: the variables the rank does not cover.
+    pub free_dof: usize,
+    /// Equations that add nothing to the rank: duplicates, or a constraint
+    /// that conflicts with the ones already there.
+    pub redundant_constraints: usize,
+    pub status: ConstraintStatus,
+}
+
+/// The constraint equations of a sketch, read through a flat variable vector.
+///
+/// Variables are laid out as: `x, y` for each point in `points` order, then one
+/// radius per circle, then one radius per arc. Everything the residuals need is
+/// looked up by id, so the layout can be rearranged without changing them.
+struct DofModel<'a> {
+    sketch: &'a Sketch,
+    point_index: std::collections::HashMap<Uuid, usize>,
+    circle_index: std::collections::HashMap<Uuid, usize>,
+    arc_index: std::collections::HashMap<Uuid, usize>,
+}
+
+impl<'a> DofModel<'a> {
+    fn new(sketch: &'a Sketch) -> Self {
+        let point_index = sketch
+            .points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (point.id, index))
+            .collect();
+        let circle_index = sketch
+            .circles
+            .iter()
+            .enumerate()
+            .map(|(index, circle)| (circle.id, index))
+            .collect();
+        let arc_index = sketch
+            .arcs
+            .iter()
+            .enumerate()
+            .map(|(index, arc)| (arc.id, index))
+            .collect();
+        Self {
+            sketch,
+            point_index,
+            circle_index,
+            arc_index,
+        }
+    }
+
+    fn variable_count(&self) -> usize {
+        self.sketch.points.len() * 2 + self.sketch.circles.len() + self.sketch.arcs.len()
+    }
+
+    fn variables(&self) -> Vec<f64> {
+        let mut values = Vec::with_capacity(self.variable_count());
+        for point in &self.sketch.points {
+            values.push(point.x);
+            values.push(point.y);
+        }
+        for circle in &self.sketch.circles {
+            values.push(circle.radius);
+        }
+        for arc in &self.sketch.arcs {
+            values.push(arc.radius);
+        }
+        values
+    }
+
+    fn point(&self, variables: &[f64], id: Uuid) -> Option<[f64; 2]> {
+        let index = *self.point_index.get(&id)?;
+        Some([variables[index * 2], variables[index * 2 + 1]])
+    }
+
+    fn radius(&self, variables: &[f64], id: Uuid) -> Option<f64> {
+        let offset = self.sketch.points.len() * 2;
+        if let Some(index) = self.circle_index.get(&id) {
+            return Some(variables[offset + index]);
+        }
+        let arc_offset = offset + self.sketch.circles.len();
+        self.arc_index
+            .get(&id)
+            .map(|index| variables[arc_offset + index])
+    }
+
+    fn line(&self, variables: &[f64], id: Uuid) -> Option<([f64; 2], [f64; 2])> {
+        let line = self.sketch.lines.iter().find(|line| line.id == id)?;
+        Some((self.point(variables, line.a)?, self.point(variables, line.b)?))
+    }
+
+    /// The centre point of a circle or an arc.
+    fn curve_centre(&self, variables: &[f64], id: Uuid) -> Option<[f64; 2]> {
+        let centre = self
+            .sketch
+            .circles
+            .iter()
+            .find(|circle| circle.id == id)
+            .map(|circle| circle.center)
+            .or_else(|| {
+                self.sketch
+                    .arcs
+                    .iter()
+                    .find(|arc| arc.id == id)
+                    .map(|arc| arc.center)
+            })?;
+        self.point(variables, centre)
+    }
+
+    /// Every constraint equation, in a layout that depends only on which
+    /// entities exist - never on their values - so the numeric Jacobian is
+    /// consistent from row to row and column to column.
+    ///
+    /// Residuals are squared where a square root would otherwise make the
+    /// derivative infinite at coincident geometry: the solution set is the same
+    /// and the Jacobian stays finite.
+    fn residuals(&self, variables: &[f64]) -> Vec<f64> {
+        let mut rows = Vec::new();
+
+        // A driven (reference) dimension measures without constraining: it is
+        // not an equation at all, and counting it would make a sketch look
+        // over-constrained because of a measurement the user asked for.
+        let driven: Vec<(Uuid, Uuid)> = self
+            .sketch
+            .constrained_constraints
+            .iter()
+            .filter(|record| !record.is_driving)
+            .filter_map(|record| match &record.constraint {
+                Constraint::Distance { a, b, .. } => Some((*a, *b)),
+                _ => None,
+            })
+            .collect();
+
+        // A point the solver treats as fixed is pinned even when the constraint
+        // list does not say so (the solver sets the flag when it meets Fixed).
+        let fixed_by_constraint: std::collections::HashSet<Uuid> = self
+            .sketch
+            .constraints
+            .iter()
+            .filter_map(|constraint| match constraint {
+                Constraint::Fixed { point } => Some(*point),
+                _ => None,
+            })
+            .collect();
+        for point in &self.sketch.points {
+            if point.fixed && !fixed_by_constraint.contains(&point.id) {
+                if let Some([x, y]) = self.point(variables, point.id) {
+                    rows.push(x);
+                    rows.push(y);
+                }
             }
         }
-        
-        // Simplified: assume some redundancy
-        let redundant = constrained.saturating_sub(total_dof);
-        let effective = constrained.min(total_dof);
-        
-        (total_dof, effective, redundant)
+
+        for constraint in &self.sketch.constraints {
+            match constraint {
+                Constraint::Fixed { point } => {
+                    if let Some([x, y]) = self.point(variables, *point) {
+                        rows.push(x);
+                        rows.push(y);
+                    }
+                }
+                Constraint::Coincident { a, b } => {
+                    // An arc endpoint is stored coincident with itself as a
+                    // marker; it says nothing about the sketch.
+                    if a == b {
+                        continue;
+                    }
+                    if let (Some(pa), Some(pb)) =
+                        (self.point(variables, *a), self.point(variables, *b))
+                    {
+                        rows.push(pa[0] - pb[0]);
+                        rows.push(pa[1] - pb[1]);
+                    }
+                }
+                Constraint::Distance { a, b, value } => {
+                    if a == b {
+                        continue;
+                    }
+                    if driven
+                        .iter()
+                        .any(|(da, db)| (da == a && db == b) || (da == b && db == a))
+                    {
+                        continue;
+                    }
+                    if let (Some(pa), Some(pb)) =
+                        (self.point(variables, *a), self.point(variables, *b))
+                    {
+                        let dx = pb[0] - pa[0];
+                        let dy = pb[1] - pa[1];
+                        rows.push(dx * dx + dy * dy - value * value);
+                    }
+                }
+                Constraint::Horizontal { line } => {
+                    if let Some((a, b)) = self.line(variables, *line) {
+                        rows.push(a[1] - b[1]);
+                    }
+                }
+                Constraint::Vertical { line } => {
+                    if let Some((a, b)) = self.line(variables, *line) {
+                        rows.push(a[0] - b[0]);
+                    }
+                }
+                Constraint::Parallel { a, b } => {
+                    if let (Some((a1, a2)), Some((b1, b2))) =
+                        (self.line(variables, *a), self.line(variables, *b))
+                    {
+                        rows.push(
+                            (a2[0] - a1[0]) * (b2[1] - b1[1])
+                                - (a2[1] - a1[1]) * (b2[0] - b1[0]),
+                        );
+                    }
+                }
+                Constraint::Perpendicular { a, b } => {
+                    if let (Some((a1, a2)), Some((b1, b2))) =
+                        (self.line(variables, *a), self.line(variables, *b))
+                    {
+                        rows.push(
+                            (a2[0] - a1[0]) * (b2[0] - b1[0])
+                                + (a2[1] - a1[1]) * (b2[1] - b1[1]),
+                        );
+                    }
+                }
+                Constraint::EqualLength { a, b } => {
+                    if let (Some((a1, a2)), Some((b1, b2))) =
+                        (self.line(variables, *a), self.line(variables, *b))
+                    {
+                        let length_a = (a2[0] - a1[0]).hypot(a2[1] - a1[1]);
+                        let length_b = (b2[0] - b1[0]).hypot(b2[1] - b1[1]);
+                        rows.push(length_a - length_b);
+                    }
+                }
+                Constraint::EqualRadius { a, b } => {
+                    if let (Some(ra), Some(rb)) =
+                        (self.radius(variables, *a), self.radius(variables, *b))
+                    {
+                        rows.push(ra - rb);
+                    }
+                }
+                Constraint::Tangent { a, b } => {
+                    // Line/curve tangency: the squared distance from the centre
+                    // to the line equals the squared radius.
+                    let curve = self
+                        .radius(variables, *a)
+                        .map(|radius| (*a, radius))
+                        .or_else(|| self.radius(variables, *b).map(|radius| (*b, radius)));
+                    let line = self
+                        .line(variables, *a)
+                        .or_else(|| self.line(variables, *b));
+                    if let (Some((curve_id, radius)), Some((p1, p2))) = (curve, line) {
+                        if let Some(centre) = self.curve_centre(variables, curve_id) {
+                            let dx = p2[0] - p1[0];
+                            let dy = p2[1] - p1[1];
+                            let length_squared = dx * dx + dy * dy;
+                            if length_squared > 1e-18 {
+                                let cross = (centre[0] - p1[0]) * -dy + (centre[1] - p1[1]) * dx;
+                                rows.push(cross * cross / length_squared - radius * radius);
+                            }
+                        }
+                    }
+                }
+                Constraint::Symmetric { a, b, axis_line } => {
+                    if let (Some(pa), Some(pb), Some((p1, p2))) = (
+                        self.point(variables, *a),
+                        self.point(variables, *b),
+                        self.line(variables, *axis_line),
+                    ) {
+                        let dx = p2[0] - p1[0];
+                        let dy = p2[1] - p1[1];
+                        let midpoint = [
+                            (pa[0] + pb[0]) * 0.5 - p1[0],
+                            (pa[1] + pb[1]) * 0.5 - p1[1],
+                        ];
+                        // The midpoint lies on the axis...
+                        rows.push(dx * midpoint[1] - dy * midpoint[0]);
+                        // ...and the pair is perpendicular to it.
+                        rows.push(dx * (pb[0] - pa[0]) + dy * (pb[1] - pa[1]));
+                    }
+                }
+                Constraint::Midpoint { point, line } => {
+                    if let (Some(point), Some((p1, p2))) =
+                        (self.point(variables, *point), self.line(variables, *line))
+                    {
+                        rows.push(2.0 * point[0] - p1[0] - p2[0]);
+                        rows.push(2.0 * point[1] - p1[1] - p2[1]);
+                    }
+                }
+                Constraint::Concentric { a, b } => {
+                    if let (Some(ca), Some(cb)) =
+                        (self.curve_centre(variables, *a), self.curve_centre(variables, *b))
+                    {
+                        rows.push(ca[0] - cb[0]);
+                        rows.push(ca[1] - cb[1]);
+                    }
+                }
+            }
+        }
+        rows
     }
-    
+}
+
+/// The rank of a matrix, by Gaussian elimination with partial pivoting.
+fn matrix_rank(matrix: &[f64], rows: usize, columns: usize) -> usize {
+    let tolerance = 1e-6;
+    let mut matrix = matrix.to_vec();
+    let mut pivot_row = 0;
+    for column in 0..columns {
+        if pivot_row >= rows {
+            break;
+        }
+        let mut best = pivot_row;
+        let mut best_value = matrix[pivot_row * columns + column].abs();
+        for candidate in pivot_row + 1..rows {
+            let value = matrix[candidate * columns + column].abs();
+            if value > best_value {
+                best_value = value;
+                best = candidate;
+            }
+        }
+        if best_value <= tolerance {
+            continue;
+        }
+        if best != pivot_row {
+            for c in 0..columns {
+                matrix.swap(pivot_row * columns + c, best * columns + c);
+            }
+        }
+        let pivot = matrix[pivot_row * columns + column];
+        for below in pivot_row + 1..rows {
+            let factor = matrix[below * columns + column] / pivot;
+            if factor == 0.0 {
+                continue;
+            }
+            for c in column..columns {
+                matrix[below * columns + c] -= factor * matrix[pivot_row * columns + c];
+            }
+        }
+        pivot_row += 1;
+    }
+    pivot_row
+}
+
+impl Sketch {
+    /// The degrees of freedom the constraints actually leave, by rank.
+    pub fn analyze_dof_detailed(&self) -> DOFAnalysis {
+        let model = DofModel::new(self);
+        let variables = model.variables();
+        let variable_count = model.variable_count();
+        let base = model.residuals(&variables);
+        let equation_count = base.len();
+
+        // A central difference is exact for the quadratic equations most of
+        // these constraints are, and accurate enough for the rest.
+        const EPSILON: f64 = 1e-6;
+        let mut jacobian = vec![0.0; equation_count * variable_count];
+        for column in 0..variable_count {
+            let mut forward = variables.clone();
+            forward[column] += EPSILON;
+            let mut backward = variables.clone();
+            backward[column] -= EPSILON;
+            let plus = model.residuals(&forward);
+            let minus = model.residuals(&backward);
+            for row in 0..equation_count {
+                jacobian[row * variable_count + column] =
+                    (plus[row] - minus[row]) / (2.0 * EPSILON);
+            }
+        }
+
+        // Scale each equation to its own size before ranking it, so a squared
+        // distance and a horizontal are weighed the same.
+        for row in 0..equation_count {
+            let start = row * variable_count;
+            let largest = jacobian[start..start + variable_count]
+                .iter()
+                .fold(0.0f64, |largest, value| largest.max(value.abs()));
+            if largest > 0.0 {
+                for value in &mut jacobian[start..start + variable_count] {
+                    *value /= largest;
+                }
+            }
+        }
+
+        let rank = matrix_rank(&jacobian, equation_count, variable_count);
+        let free_dof = variable_count.saturating_sub(rank);
+        let redundant_constraints = equation_count.saturating_sub(rank);
+        let status = if redundant_constraints > 0 {
+            ConstraintStatus::OverConstrained
+        } else if free_dof == 0 {
+            ConstraintStatus::FullyConstrained
+        } else {
+            ConstraintStatus::UnderConstrained
+        };
+        DOFAnalysis {
+            total_dof: variable_count,
+            constrained_dof: rank,
+            free_dof,
+            redundant_constraints,
+            status,
+        }
+    }
+
+    /// Analyze degrees of freedom in the sketch
+    /// Returns (total_dof, constrained_dof, redundant_constraints)
+    pub fn analyze_dof(&self) -> (usize, usize, usize) {
+        let analysis = self.analyze_dof_detailed();
+        (
+            analysis.total_dof,
+            analysis.constrained_dof,
+            analysis.redundant_constraints,
+        )
+    }
+
     /// Get sketch status: "under-constrained", "fully-constrained", "over-constrained"
     pub fn constraint_status(&self) -> &'static str {
-        let (total, constrained, redundant) = self.analyze_dof();
-        if redundant > 0 {
-            "over-constrained"
-        } else if constrained >= total {
-            "fully-constrained"
-        } else {
-            "under-constrained"
-        }
+        self.analyze_dof_detailed().status.as_str()
     }
     
     /// Auto-apply weak constraints to make sketch fully constrained (Intent Manager)
@@ -1267,6 +1684,124 @@ impl Sketch {
             .collect()
     }
 
+    /// The points behind a dimension, when the constraint at `index` is one.
+    fn dimension_points(&self, index: usize) -> Option<(Uuid, Uuid, f64)> {
+        match self.constraints.get(index) {
+            Some(Constraint::Distance { a, b, value }) => Some((*a, *b, *value)),
+            _ => None,
+        }
+    }
+
+    /// The Intent Manager record of the dimension between two points.
+    fn dimension_record(&self, a: Uuid, b: Uuid) -> Option<usize> {
+        self.constrained_constraints.iter().position(|record| {
+            matches!(&record.constraint, Constraint::Distance { a: ra, b: rb, .. }
+                if (ra == &a && rb == &b) || (ra == &b && rb == &a))
+        })
+    }
+
+    /// The value the dimension at `index` holds the distance at.
+    pub fn dimension_value(&self, index: usize) -> Option<f64> {
+        self.dimension_points(index).map(|(_, _, value)| value)
+    }
+
+    /// Whether the dimension at `index` drives the geometry or only reports it.
+    /// A dimension with no Intent Manager record is a driving one.
+    pub fn dimension_is_driving(&self, index: usize) -> Option<bool> {
+        let (a, b, _) = self.dimension_points(index)?;
+        Some(
+            self.dimension_record(a, b)
+                .map(|position| self.constrained_constraints[position].is_driving)
+                .unwrap_or(true),
+        )
+    }
+
+    /// Is the dimension at `index` weak (put there by the Intent Manager)?
+    pub fn dimension_is_weak(&self, index: usize) -> bool {
+        let Some((a, b, _)) = self.dimension_points(index) else {
+            return false;
+        };
+        self.dimension_record(a, b)
+            .map(|position| {
+                self.constrained_constraints[position].strength == ConstraintStrength::Weak
+            })
+            .unwrap_or(false)
+    }
+
+    /// Change a dimension's value, keeping its Intent Manager record in step.
+    pub fn set_dimension_value(&mut self, index: usize, value: f64) -> bool {
+        let Some((a, b, _)) = self.dimension_points(index) else {
+            return false;
+        };
+        if let Some(Constraint::Distance { value: current, .. }) = self.constraints.get_mut(index) {
+            *current = value;
+        }
+        if let Some(position) = self.dimension_record(a, b) {
+            if let Constraint::Distance { value: recorded, .. } =
+                &mut self.constrained_constraints[position].constraint
+            {
+                *recorded = value;
+            }
+        }
+        true
+    }
+
+    /// Toggle a dimension between driving the geometry and merely reporting it.
+    ///
+    /// A driven dimension is skipped by the solver, so its value stays a
+    /// reference measurement instead of moving the geometry.
+    pub fn set_dimension_driving(&mut self, index: usize, driving: bool) -> bool {
+        let Some((a, b, value)) = self.dimension_points(index) else {
+            return false;
+        };
+        match self.dimension_record(a, b) {
+            Some(position) => self.constrained_constraints[position].is_driving = driving,
+            None => self.constrained_constraints.push(ConstrainedConstraint {
+                constraint: Constraint::Distance { a, b, value },
+                strength: ConstraintStrength::Strong,
+                is_driving: driving,
+            }),
+        }
+        true
+    }
+
+    /// Promote a weak dimension to a strong one. Returns true when it changed.
+    pub fn promote_dimension(&mut self, index: usize) -> bool {
+        let Some((a, b, value)) = self.dimension_points(index) else {
+            return false;
+        };
+        match self.dimension_record(a, b) {
+            Some(position) => {
+                if self.constrained_constraints[position].strength == ConstraintStrength::Strong {
+                    return false;
+                }
+                self.constrained_constraints[position].strength = ConstraintStrength::Strong;
+                true
+            }
+            None => {
+                self.constrained_constraints.push(ConstrainedConstraint {
+                    constraint: Constraint::Distance { a, b, value },
+                    strength: ConstraintStrength::Strong,
+                    is_driving: true,
+                });
+                true
+            }
+        }
+    }
+
+    /// Remove the constraint at `index` and the record that belongs to it.
+    pub fn remove_constraint(&mut self, index: usize) -> bool {
+        if index >= self.constraints.len() {
+            return false;
+        }
+        let removed = self.constraints.remove(index);
+        if let Constraint::Distance { a, b, .. } = removed {
+            if let Some(position) = self.dimension_record(a, b) {
+                self.constrained_constraints.remove(position);
+            }
+        }
+        true
+    }
     /// Trim a line back to its nearest intersection with another entity.
     ///
     /// Returns `Err(SketchError::Unknown)` when `entity_id` is not a line, and
@@ -1862,3 +2397,211 @@ mod regression_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod dof_and_dimension_tests {
+    use super::*;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    /// A sketch with one unconstrained point has its two coordinates free.
+    #[test]
+    fn a_bare_point_has_two_degrees_of_freedom() {
+        let mut sketch = Sketch::new("p");
+        sketch.add_point(3.0, 4.0);
+        let analysis = sketch.analyze_dof_detailed();
+        assert_eq!(analysis.total_dof, 2);
+        assert_eq!(analysis.constrained_dof, 0);
+        assert_eq!(analysis.free_dof, 2);
+        assert_eq!(analysis.redundant_constraints, 0);
+        assert_eq!(analysis.status, ConstraintStatus::UnderConstrained);
+    }
+
+    /// A circle's radius is something the solver can move, so it counts.
+    #[test]
+    fn a_circle_radius_is_a_variable() {
+        let mut sketch = Sketch::new("c");
+        sketch.add_circle(0.0, 0.0, 5.0);
+        let analysis = sketch.analyze_dof_detailed();
+        assert_eq!(analysis.total_dof, 3, "two coordinates for the centre and one radius");
+        assert_eq!(analysis.free_dof, 3);
+    }
+
+    /// The four horizontals and verticals of a rectangle remove four freedoms,
+    /// not eight: the rectangle can still slide and change size.
+    #[test]
+    fn a_rectangle_is_under_constrained_by_four() {
+        let mut sketch = Sketch::new("r");
+        sketch.add_rectangle(0.0, 0.0, 10.0, 5.0);
+        let analysis = sketch.analyze_dof_detailed();
+        assert_eq!(analysis.total_dof, 8);
+        assert_eq!(analysis.constrained_dof, 4);
+        assert_eq!(analysis.free_dof, 4);
+        assert_eq!(analysis.redundant_constraints, 0);
+        assert_eq!(analysis.status, ConstraintStatus::UnderConstrained);
+    }
+
+    /// The old counting version celebrated a duplicate constraint as extra
+    /// coverage; the rank sees it adds nothing, and calls the sketch over
+    /// constrained.
+    #[test]
+    fn a_duplicate_constraint_is_redundant() {
+        let mut sketch = Sketch::new("dup");
+        sketch.add_rectangle(0.0, 0.0, 10.0, 5.0);
+        let line = sketch.lines[0].id;
+        sketch.constraints.push(Constraint::Horizontal { line });
+
+        let analysis = sketch.analyze_dof_detailed();
+        assert_eq!(analysis.constrained_dof, 4, "a repeated horizontal adds no rank");
+        assert_eq!(analysis.redundant_constraints, 1);
+        assert_eq!(analysis.status, ConstraintStatus::OverConstrained);
+        assert_eq!(sketch.constraint_status(), "over-constrained");
+    }
+
+    /// A rectangle with its width, its height and one fixed corner is fully
+    /// constrained: eight independent equations for eight variables.
+    #[test]
+    fn a_dimensioned_rectangle_with_a_fixed_corner_is_fully_constrained() {
+        let mut sketch = Sketch::new("full");
+        let corners = sketch.add_rectangle(0.0, 0.0, 60.0, 40.0);
+        sketch.add_dimension(corners[0], corners[1], 60.0, true, true);
+        sketch.add_dimension(corners[1], corners[2], 40.0, true, true);
+        sketch.constraints.push(Constraint::Fixed { point: corners[0] });
+
+        let analysis = sketch.analyze_dof_detailed();
+        assert_eq!(analysis.total_dof, 8);
+        assert_eq!(analysis.constrained_dof, 8);
+        assert_eq!(analysis.free_dof, 0);
+        assert_eq!(analysis.redundant_constraints, 0);
+        assert_eq!(analysis.status, ConstraintStatus::FullyConstrained);
+        assert_eq!(sketch.constraint_status(), "fully-constrained");
+    }
+
+    /// An arc stores a self-coincidence on each endpoint as a marker; it must
+    /// not be mistaken for a constraint.
+    #[test]
+    fn an_arc_self_reference_is_not_an_equation() {
+        let mut sketch = Sketch::new("arc");
+        sketch.add_arc(0.0, 0.0, 5.0, 0.0, std::f64::consts::FRAC_PI_2);
+        let analysis = sketch.analyze_dof_detailed();
+        assert_eq!(analysis.redundant_constraints, 0);
+        assert_eq!(analysis.status, ConstraintStatus::UnderConstrained);
+    }
+
+    /// A driven dimension still shows its value but the solver leaves the
+    /// geometry alone.
+    #[test]
+    fn a_driven_dimension_does_not_move_the_geometry() {
+        let mut sketch = Sketch::new("driven");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(10.0, 0.0);
+        sketch.add_dimension(a, b, 20.0, false, true);
+
+        sketch.solve().unwrap();
+
+        let pa = sketch.point(a).unwrap();
+        let pb = sketch.point(b).unwrap();
+        assert!(close((pb.x - pa.x).abs(), 10.0), "a driven dimension must not drive");
+    }
+
+    /// A driving dimension moves the geometry to its value, and editing the
+    /// value moves it again.
+    #[test]
+    fn editing_a_dimension_value_reaches_the_solver() {
+        let mut sketch = Sketch::new("edit");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(10.0, 0.0);
+        let index = sketch.constraints.len();
+        sketch.add_dimension(a, b, 20.0, true, true);
+        sketch.solve().unwrap();
+
+        let distance = |sketch: &Sketch| {
+            let pa = sketch.point(a).unwrap();
+            let pb = sketch.point(b).unwrap();
+            (pb.x - pa.x).hypot(pb.y - pa.y)
+        };
+        assert!(close(distance(&sketch), 20.0), "the dimension did not drive");
+
+        assert!(sketch.set_dimension_value(index, 35.0));
+        assert_eq!(sketch.dimension_value(index), Some(35.0));
+        assert_eq!(
+            sketch.constrained_constraints[0].constraint_value_for_test(),
+            35.0,
+            "the Intent Manager record must follow the edit"
+        );
+        sketch.solve().unwrap();
+        assert!(close(distance(&sketch), 35.0));
+    }
+
+
+    /// A driven dimension measures without constraining, so it must not add an
+    /// equation - otherwise asking for a reference measurement would make the
+    /// sketch look over-constrained.
+    #[test]
+    fn a_driven_dimension_is_not_an_equation() {
+        let mut sketch = Sketch::new("driven dof");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(10.0, 0.0);
+        sketch.add_dimension(a, b, 20.0, false, true);
+
+        let analysis = sketch.analyze_dof_detailed();
+        assert_eq!(analysis.total_dof, 4);
+        assert_eq!(
+            analysis.constrained_dof, 0,
+            "a reference measures, it does not constrain"
+        );
+        assert_eq!(analysis.free_dof, 4);
+        assert_eq!(analysis.redundant_constraints, 0);
+        assert_eq!(analysis.status, ConstraintStatus::UnderConstrained);
+    }
+
+    /// Toggling driving on and off is visible to the caller and to the solver.
+    #[test]
+    fn toggling_driving_and_promoting_a_dimension() {
+        let mut sketch = Sketch::new("toggle");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(10.0, 0.0);
+        let index = sketch.constraints.len();
+        sketch.add_dimension(a, b, 20.0, true, false);
+
+        assert_eq!(sketch.dimension_is_driving(index), Some(true));
+        assert!(sketch.dimension_is_weak(index));
+
+        assert!(sketch.set_dimension_driving(index, false));
+        assert_eq!(sketch.dimension_is_driving(index), Some(false));
+
+        assert!(sketch.promote_dimension(index), "weak to strong");
+        assert!(!sketch.dimension_is_weak(index));
+        assert!(!sketch.promote_dimension(index), "already strong");
+    }
+
+    /// Removing a dimension drops its Intent Manager record too.
+    #[test]
+    fn removing_a_dimension_cleans_its_record() {
+        let mut sketch = Sketch::new("remove");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(10.0, 0.0);
+        let index = sketch.constraints.len();
+        sketch.add_dimension(a, b, 20.0, true, true);
+        assert_eq!(sketch.constrained_constraints.len(), 1);
+
+        assert!(sketch.remove_constraint(index));
+        assert!(sketch.constraints.is_empty());
+        assert!(sketch.constrained_constraints.is_empty());
+        assert_eq!(sketch.dimension_value(index), None);
+    }
+}
+
+/// Small test-only read helpers.
+#[cfg(test)]
+impl ConstrainedConstraint {
+    fn constraint_value_for_test(&self) -> f64 {
+        match &self.constraint {
+            Constraint::Distance { value, .. } => *value,
+            _ => f64::NAN,
+        }
+    }
+}
+
