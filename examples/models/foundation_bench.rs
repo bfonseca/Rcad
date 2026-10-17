@@ -100,6 +100,27 @@ fn plate_part(holes: usize, with_rounds: bool) -> Part {
     part
 }
 
+/// Display tessellation for this run: the project defaults, overridable with
+/// `RCAD_BENCH_LINEAR`, `RCAD_BENCH_ANGULAR_DEG` and `RCAD_BENCH_RELATIVE=0`.
+///
+/// This lets A5 compare the old default (0.004 relative, 28.6°) with the new
+/// one (0.002 relative, 11.5°) on the same machine.
+fn bench_tessellation() -> (f64, f64, bool) {
+    let default = rcad_doc::DisplayTessellation::default();
+    let linear = std::env::var("RCAD_BENCH_LINEAR")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default.linear);
+    let angular_deg = std::env::var("RCAD_BENCH_ANGULAR_DEG")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default.angular_deg);
+    let relative = std::env::var("RCAD_BENCH_RELATIVE")
+        .map(|value| value != "0")
+        .unwrap_or(default.relative);
+    (linear, angular_deg.to_radians(), relative)
+}
+
 struct Stats {
     label: String,
     features: usize,
@@ -113,6 +134,8 @@ struct Stats {
 
 fn measure(label: &str, part: &Part, runs: usize) -> Stats {
     let mut backend = OcctBackend::new();
+    let (linear, angular_rad, relative) = bench_tessellation();
+    backend.set_display_tessellation(linear, angular_rad, relative);
     let mut cold_total = 0.0f64;
     let mut last = None;
 
@@ -196,11 +219,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| value == "1")
         .unwrap_or(false);
 
+    let (tess_linear, tess_angular, tess_relative) = bench_tessellation();
+    println!("metric,tessellation_linear,{tess_linear}");
+    println!("metric,tessellation_angular_deg,{:.2}", tess_angular.to_degrees());
+    println!("metric,tessellation_relative,{tess_relative}");
+
     let demo = demo_part();
     let plate = plate_part(8, with_rounds);
     eprintln!(
-        "bench: plate features={} rounds={with_rounds} runs={plate_runs} scaling={scaling}",
-        plate.features.len()
+        "bench: plate features={} rounds={with_rounds} runs={plate_runs} scaling={scaling}          tessellation linear={tess_linear} angular={:.1}° relative={tess_relative}",
+        plate.features.len(),
+        tess_angular.to_degrees()
     );
 
     let demo_stats = measure("demo", &demo, 5);

@@ -14,6 +14,14 @@ repository = "https://github.com/bfonseca/Rcad"
 linear = 0.01
 angular = 0.1
 
+# Qualidade de tesselação para visualização (fundação A5).
+# linear: desvio linear (fração do tamanho da feature quando relative=true; mm caso contrário)
+# angular_deg: desvio angular máximo entre facetas vizinhas, em graus (menor = mais liso)
+[tessellation]
+linear = 0.002
+angular_deg = 11.5
+relative = true
+
 # Parâmetros globais do projeto
 [global_parameters]
 # Exemplo: comprimento padrão de extrusão

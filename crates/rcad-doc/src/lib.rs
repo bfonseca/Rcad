@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 pub mod manifest;
 
-pub use manifest::{MANIFEST_FILE, ProjectManifest};
+pub use manifest::{DisplayTessellation, MANIFEST_FILE, ProjectManifest};
 
 pub type EntityId = Uuid;
 

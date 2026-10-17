@@ -49,6 +49,7 @@ rcad-cae = { path = "crates/rcad-cae" }
 rcad-mcp = { path = "crates/rcad-mcp" }
 
 glam = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 rmp-serde = "1.3"
 thiserror = "2"

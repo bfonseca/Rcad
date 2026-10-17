@@ -137,21 +137,36 @@ visíveis no sólido. Sensação de “sólido”, não de “malha”.
 - As costuras entre triângulos da chapa continuam visíveis: o A1 prepara o *framebuffer*,
   mas só o A2 (pipeline real) resolve o problema visual.
 
-### A2 — Pipeline WGPU do viewport
-- [ ] Validar o pipeline num ambiente com GPU (ou lavapipe instalado); este ambiente de
-      desenvolvimento não tem nenhum.
-- [ ] Criar `crates/rcad-app/src/render/` com o `egui_wgpu::CallbackTrait`.
-- [ ] Criar `crates/rcad-app/shaders/cad_material.wgsl`.
-- [ ] Subir `TriangleMesh` para buffers de vértice/índice (sem copiar normais calculadas no CPU).
-- [ ] Uniforms de câmara (ver `crates/rcad-app/src/camera.rs`); depth test/write; back-face culling.
-- [ ] Passar as cores de face do projeto (`face_ids` → nome estável → `rcad.toml`) para o shader.
-- **Aceitação:** o sólido aparece com profundidade correta; faces traseiras não aparecem; cores por face mantêm-se.
+### A2 — Pipeline WGPU do viewport ✅ (validação de janela pendente)
+- [x] Criar `crates/rcad-app/src/render/` com o `egui_wgpu::CallbackTrait`.
+- [x] Criar `crates/rcad-app/shaders/cad_material.wgsl` (validado com `naga`).
+- [x] Subir `TriangleMesh` para buffers de vértice/índice (sem copiar normais calculadas no CPU).
+- [x] Uniforms de câmara; depth test/write (Depth24PlusStencil8); MSAA coerente com o framebuffer.
+- [x] Passar as cores de face do projeto (`face_ids` → nome estável → `rcad.toml`) para o shader,
+      incluindo seleção/hover.
+- **Aceitação:** o sólido aparece com profundidade correta; faces traseiras não aparecem; cores por
+  face mantêm-se. **Validado por render offscreen** com o `llvmpipe` GL (ver § result).
 
-### A3 — Sombreado
-- [ ] Blinn-Phong com luz principal fixa à câmara + ambiente hemisférico; especular discreto.
-- [ ] Interpolação suave das normais por vértice (as normais do `cadrum` já são exatas e por vértice).
-- [ ] Tinta de seleção/hover sem apagar a cor do projeto (comportamento atual a preservar).
-- **Aceitação:** um cilindro mostra gradiente contínuo, não facetas por triângulo.
+**Resultado A2 (2026-10-17):**
+- O `egui::Painter` continua a ser o caminho de recurso: com `--renderer glow`,
+  `SolidRenderer` é `None` e as capturas continuam a funcionar.
+- Com um estado WGPU, o viewport adiciona um `PaintCallback` no lugar do sólido.
+- Sem GPU *de janela*, o adapter GL **headless** do llvmpipe permitiu validar o pipeline a sério:
+  - `cargo test -p rcad-app the_solid_shader_parses_and_validates` (WGSL + naga);
+  - `cargo test -p rcad-app headless_pipeline_draws_a_triangle -- --ignored --nocapture`
+    cria o pipeline/depth/draw e passa na validação do WGPU;
+  - `cargo test -p rcad-app headless_render_of_the_demo_writes_a_png -- --ignored --nocapture`
+    corre o caminho real `prepare`+`paint` sobre a malha da demo (OCCT) e grava
+    `target/a2-headless-demo.png`; a imagem mostra o sólido sombreado com o corte cilíndrico.
+- O que ainda **não** foi validado: a janela WGPU real (o `Surface::configure` falha neste
+  ambiente). O Gate A visual tem de ser corrido no hardware do utilizador.
+
+### A3 — Sombreado ✅
+- [x] Blinn-Phong com luz principal fixa + ambiente; especular discreto (`cad_material.wgsl`).
+- [x] Interpolação suave das normais por vértice (as normais do `cadrum` já são exatas).
+- [x] Tinta de seleção/hover sem apagar a cor do projeto (testes em `render::tests`).
+- **Aceitação:** um cilindro mostra gradiente contínuo, não facetas por triângulo (verificado no
+  render offscreen; a confirmação final na janela fica para o Gate A).
 
 ### A4 — Arestas e modo Shaded with Edges
 - [ ] Pass 2: arestas B-Rep instanciadas como linhas finas, com depth bias (evitar z-fighting).
@@ -161,22 +176,39 @@ visíveis no sólido. Sensação de “sólido”, não de “malha”.
 - [ ] Arestas selecionadas/hovered com espessura/cor própria.
 - **Aceitação:** caixa e furos com arestas nítidas; tangências discretas; sem linhas a “tremer”.
 
-### A5 — Qualidade de tesselação configurável
-- [ ] Expor a `Tessellation` do `cadrum` (deflexão linear/angular) no backend e no `rcad.toml`.
-- [ ] Escolher um default mais fino que o atual (0,5 rad angular) e medir o custo em A0/D0.
-- [ ] Cache de tesselação por shape/feature (evitar re-tesselar o que não mudou).
-- **Aceitação:** o utilizador consegue escolher “qualidade de visualização” e vê o efeito; o custo está medido.
+### A5 — Qualidade de tesselação configurável ✅
+- [x] Expor a `Tessellation` do `cadrum` no backend, no `rcad.toml` (`[tessellation]`) e no
+      Options dialog (linear, angular°, relative; Apply/Reset).
+- [x] Default mais fino que o do `cadrum` (0,002 relativo, 11,5°) e custo medido.
+- [x] Os nomes/referências usam uma tesselação canónica fixa: mudar a qualidade **não** altera
+      nomes (teste `display_tessellation_changes_triangles_but_not_reference_names`).
+- [ ] Cache de tesselação por shape/feature — **movido para D3** (é uma otimização de rebuild,
+      não uma opção de qualidade).
+- **Aceitação:** o utilizador consegue escolher a qualidade e vê o efeito; o custo está medido. ✅
+
+**Resultado A5 (2026-10-17):** mesma máquina, mesma peça, só muda a qualidade:
+
+| Peça | Triângulos antes (0,004 / 28,65°) | Triângulos depois (0,002 / 11,5°) | Rebuild antes/depois |
+|---|---:|---:|---:|
+| demo | 48 | 76 (+58%) | 15,4 / 15,7 ms |
+| chapa 8 furos | 3 172 | 5 076 (+60%) | 16 335 / 16 300 ms |
+
+O rebuild é dominado pelo trabalho por feature/naming (A0), por isso **+60% de triângulos custa
+~2% no tempo**. A qualidade extra é praticamente gratuita enquanto o gargalo não for corrigido;
+depois de B/D, a medição deve ser repetida.
 
 ### A6 — Fallback e CI
-- [ ] Manter o caminho `egui::Painter` para `--renderer glow` (máquinas sem GPU, CI, capturas).
-- [ ] Garantir que `--screenshot` continua a produzir imagens com o renderer novo e com o fallback.
-- [ ] Adicionar/ajustar teste de regressão de imagem (antes/depois) sem tornar o CI frágil.
-- **Aceitação:** CI verde; capturas de ecrã disponíveis nos dois modos.
+- [x] Manter o caminho `egui::Painter` para `--renderer glow` (máquinas sem GPU, CI, capturas).
+- [x] `--screenshot` continua a funcionar no fallback (demo e chapa capturadas com glow).
+- [ ] `--screenshot` com o renderer WGPU: precisa de uma janela com GPU (não validável aqui).
+- [ ] Teste de regressão de imagem (antes/depois) — fica para o Gate A, com hardware.
+- **Aceitação:** CI verde; capturas nos dois modos. ⚠️ parcial (modo glow validado; WGPU de janela pendente).
 
 ### A7 — Gate A (aceitação visual + números)
 - [ ] Comparação lado a lado com as imagens A0 (sem facetas, com arestas, sem serrilhado).
 - [ ] FPS e tempo de picking dentro do orçamento definido em D.
-- [ ] Nenhuma regressão nos 280 testes; `cargo check --workspace --all-targets` com 0 avisos.
+- [ ] Nenhuma regressão na suite (287 testes, 3 medições ignoradas); `cargo check
+      --workspace --all-targets` com 0 avisos.
 - **O utilizador valida visualmente antes de passar ao Bloco B.**
 
 ---
@@ -308,6 +340,7 @@ referências quebradas aparecem com “onde estavam” e substituto; dá para ed
 ### D2 — Cache e rebuild
 - [ ] Confirmar que o cache de shapes (`ShapeCache`) só reconstrói o que mudou.
 - [ ] Evitar re-tesselar features inalteradas; medir.
+- [ ] Cache de tesselação por shape/feature (tarefa movida do A5).
 - **Aceitação:** editar uma feature não reconstrói o modelo todo.
 
 ### D3 — Regressão de performance no CI
@@ -376,9 +409,9 @@ Com o build novo, o utilizador deve conseguir, sem tocar em código:
 
 ## 12. Próximo passo imediato
 
-**A2** — criar o módulo `render/`, o shader `cad_material.wgsl` e o primeiro
-pipeline WGPU para os sólidos. A1 está concluído; a validação WGPU final fica
-dependente de um ambiente com GPU (ou lavapipe). O “antes” está congelado em
-[foundation-baseline.md](foundation-baseline.md).
+**A4** — levar as arestas B-Rep para o pipeline (shaded-with-edges, tangentes
+atenuadas). Depois **A6/A7** — captura WGPU/regressão de imagem e o Gate A visual
+no hardware do utilizador. A2, A3 e A5 estão concluídos; o “antes” está congelado
+em [foundation-baseline.md](foundation-baseline.md).
 
 *Documento criado em 2026-10-17. Atualizar o estado das tarefas à medida que avançam.*

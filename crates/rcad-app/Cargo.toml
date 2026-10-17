@@ -27,6 +27,7 @@ rcad-animation.workspace = true
 rcad-cae.workspace = true
 eframe.workspace = true
 egui.workspace = true
+bytemuck.workspace = true
 glam.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -37,3 +38,8 @@ image.workspace = true
 rcad-table.workspace = true
 crossbeam-channel = "0.5"  # For async kernel worker
 rcad-truck.workspace = true  # Truck pure-Rust backend
+
+[dev-dependencies]
+# Validate the WGSL shader without a GPU (A2): naga is already a wgpu dependency.
+naga = { version = "25", features = ["wgsl-in"] }
+pollster = "0.4"

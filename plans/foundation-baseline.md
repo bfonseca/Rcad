@@ -178,8 +178,45 @@ antes/depois.
 
 ---
 
-## 8. Próximo passo
+## 8. A5 — qualidade de tesselação (medido)
 
-**A1** — configurar `eframe::NativeOptions` com depth/stencil/MSAA e isolar o
-pipeline WGPU do viewport. O A0 não alterou render público: as imagens acima são
-o “antes” que o Gate A tem de substituir.
+A5 tornou a tesselação configurável no `rcad.toml` (`[tessellation]`) e no
+Options dialog, e baixou o default de cadrum (0,004 relativo, 0,5 rad ≈ 28,65°)
+para **0,002 relativo e 11,5°**. A mesma peça, só com a qualidade alterada:
+
+| Peça | Triângulos (antes) | Triângulos (depois) | Cold rebuild (antes → depois) |
+|---|---:|---:|---:|
+| demo | 48 | 76 (+58%) | 15,4 → 15,7 ms |
+| chapa 8 furos | 3 172 | 5 076 (+60%) | 16 335 → 16 300 ms |
+
+Conclusão: enquanto o rebuild for dominado pelo trabalho por feature/naming,
+**+60% de triângulos custa ~2% do tempo** — a qualidade visual extra é
+praticamente gratuita. A medição deve ser repetida depois de B/D.
+
+Os nomes de faces/arestas usam uma tesselação **canónica fixa**, por isso mudar
+a qualidade nunca invalida referências:
+`rcad-occt::tests::display_tessellation_changes_triangles_but_not_reference_names`.
+
+## 9. A2 — validação headless do pipeline
+
+Sem uma janela WGPU neste ambiente, o pipeline foi validado em três níveis:
+
+1. **WGSL**: `the_solid_shader_parses_and_validates` (naga; apanhou um erro real
+   de `front_facing` no estágio errado antes de existir GPU).
+2. **Pipeline/draw**: `headless_pipeline_draws_a_triangle` cria o pipeline com
+   depth e desenha um triângulo, exercitando a validação do wgpu.
+3. **Caminho real `prepare`+`paint`**: `headless_render_of_the_demo_writes_a_png`
+   usa o adapter GL headless do llvmpipe, a malha real da demo (OCCT) e grava
+   `target/a2-headless-demo.png` — o sólido aparece sombreado, com o corte
+   cilíndrico e sem faces traseiras.
+
+![A2 offscreen](../docs/baseline/a2-headless-demo.png)
+
+O que fica por validar: a **janela** WGPU real (`Surface::configure` falha neste
+ambiente) e o Gate A visual. Isso tem de ser corrido no hardware do utilizador.
+
+## 10. Próximo passo
+
+**A4 / A6 / A7** — arestas B-Rep no pipeline (shaded-with-edges e tangentes
+atenuadas), captura/regressão de imagem e o Gate A visual com GPU. O “antes”
+continua congelado nas imagens desta página.

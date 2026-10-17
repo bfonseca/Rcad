@@ -205,6 +205,8 @@ The project manifest `rcad.toml` controls:
 - **General tolerances** (linear, angular)
 - **Global parameters** (default extrusion length, etc.)
 - **Surface colors** per client/type (threads, fit surfaces, sealing zones)
+- **Display tessellation** (linear/angular/relative) for viewport smoothness; it changes the
+  display mesh only, never the stored references
 - **External tables** path/format for Excel/CSV-driven parameters
 - **Startup** behavior (auto-open last, recent projects file, max count)
 - **Trail log** (enabled, format JSONL, level, rotation)
@@ -298,8 +300,14 @@ and its state reconciliation.
 - [x] STEP/STL export through OCCT; STEP import in the kernel (not in the UI)
 - [x] MCP server (`rcad-mcp`, stdio, 13 tools + 3 resources; no prompts/TCP)
 - [x] CI workflow (`.github/workflows/ci.yml`): build + test blocking, clippy/fmt advisory
-- [x] 280 tests passing and a warning-free `cargo check --workspace --all-targets`
-- [ ] **3D viewport rendered with WGPU** (depth, MSAA, shaded-with-edges) — foundation A
+- [x] 287 tests passing (3 ignored measurements) and a warning-free
+      `cargo check --workspace --all-targets`
+- [x] **WGPU solid pipeline** (depth 24/stencil 8, 4x MSAA, Blinn-Phong, per-face colours,
+      selection/hover tint) with the painter kept as fallback — foundation A2/A3. Validated
+      offscreen; the WGPU window path still needs a GPU machine.
+- [x] **Configurable display tessellation** in `rcad.toml` and the Options dialog, with
+      reference names independent of the display quality — foundation A5
+- [ ] **Shaded-with-edges and tangent-edge dimming** — foundation A4
 - [ ] **Analytic sketch curves and holes reaching the B-Rep** — foundation B
 - [ ] **Parent/child dependency graph, real Insert Here/Rollback, Edit Definition** — foundation C
 - [ ] Adaptive history overlay with blur (the overlay is solid today)

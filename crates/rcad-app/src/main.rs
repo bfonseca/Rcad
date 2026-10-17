@@ -2,6 +2,7 @@
 
 mod app;
 mod camera;
+mod render;
 mod selection;
 mod settings;
 mod sketch_ui;
@@ -19,16 +20,6 @@ use tracing_subscriber::EnvFilter;
 ///
 /// `--renderer glow` plus Mesa software rendering is the escape hatch for
 /// machines (and CI runners) without a usable GPU.
-/// Framebuffer configuration for the 3D viewport (foundation A).
-///
-/// The 2D painter used today does not need depth, but the WGPU callback that
-/// replaces it does. Configuring the framebuffer now means the render pass has
-/// a `Depth24PlusStencil8` attachment and MSAA available; the value of 4x is the
-/// starting point and Gate A compares it with 8x (Creo's default) on hardware.
-const MSAA_SAMPLES: u16 = 4;
-const DEPTH_BITS: u8 = 24;
-const STENCIL_BITS: u8 = 8;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum RendererChoice {
     #[default]
@@ -216,14 +207,18 @@ fn main() -> eframe::Result<()> {
             RendererChoice::Glow => eframe::Renderer::Glow,
             RendererChoice::Wgpu => eframe::Renderer::Wgpu,
         },
-        multisampling: MSAA_SAMPLES,
-        depth_buffer: DEPTH_BITS,
-        stencil_buffer: STENCIL_BITS,
+        // The solid pipeline in `render` matches this exact configuration.
+        multisampling: render::MSAA_SAMPLES,
+        depth_buffer: render::DEPTH_BITS,
+        stencil_buffer: render::STENCIL_BITS,
         ..Default::default()
     };
     tracing::info!(
-        "framebuffer: renderer={:?} msaa={MSAA_SAMPLES}x depth={DEPTH_BITS} stencil={STENCIL_BITS}",
-        cli.renderer
+        "framebuffer: renderer={:?} msaa={}x depth={} stencil={}",
+        cli.renderer,
+        render::MSAA_SAMPLES,
+        render::DEPTH_BITS,
+        render::STENCIL_BITS
     );
 
     let capture = cli

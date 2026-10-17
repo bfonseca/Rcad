@@ -267,6 +267,15 @@ pub trait GeometryBackend: Send {
     fn tessellate(&mut self, shape: ShapeId) -> GeomResult<TriangleMesh>;
     fn tessellate_many(&mut self, shapes: &[ShapeId]) -> GeomResult<TriangleMesh>;
 
+    /// Set the display tessellation quality (foundation A5).
+    ///
+    /// `linear` is a fraction of the feature size when `relative`, otherwise a
+    /// distance in millimetres; `angular_rad` is the maximum angle between
+    /// adjacent facets. Display tessellation must not change topology names:
+    /// backends derive names from a fixed canonical tessellation. Backends that
+    /// cannot tune display quality ignore this call.
+    fn set_display_tessellation(&mut self, _linear: f64, _angular_rad: f64, _relative: bool) {}
+
     /// Faces, edges and face history of `shape`, so the rebuild can give its
     /// topology names that survive a rebuild.
     ///

@@ -22,6 +22,21 @@ pub(crate) struct StoredShape {
 pub struct OcctBackend {
     next_id: u64,
     solids: HashMap<u64, StoredShape>,
+    /// Quality used for the display mesh. Topology names use a fixed canonical
+    /// tessellation instead, so changing this cannot invalidate references.
+    display_tessellation: Tessellation,
+}
+
+/// The display quality a backend uses until a project configures its own.
+///
+/// Finer than cadrum's default (relative 0.004, 0.5 rad ≈ 28.6°). The triangle
+/// cost is small next to the rebuild cost measured in A0.
+pub fn default_display_tessellation() -> Tessellation {
+    Tessellation {
+        deflection_linear: 0.002,
+        deflection_angular: 11.5_f64.to_radians(),
+        relative_linear: true,
+    }
 }
 
 impl Default for OcctBackend {
@@ -35,6 +50,7 @@ impl OcctBackend {
         Self {
             next_id: 1,
             solids: HashMap::new(),
+            display_tessellation: default_display_tessellation(),
         }
     }
 
@@ -98,7 +114,7 @@ impl OcctBackend {
         let solids: GeomResult<Vec<&Solid>> = shapes.iter().map(|id| self.get(*id)).collect();
         let solids = solids?;
         let owned: Vec<Solid> = solids.into_iter().cloned().collect();
-        let mesh = Solid::mesh(&owned, Tessellation::default())
+        let mesh = Solid::mesh(&owned, self.display_tessellation)
             .map_err(|e| GeomError::Backend(e.to_string()))?;
         let mut result = triangle_mesh_from_cadrum(&mesh);
         // OpenCascade identifies faces and edges by address, which changes in
@@ -685,6 +701,22 @@ impl GeometryBackend for OcctBackend {
         self.mesh_of(shapes)
     }
 
+    fn set_display_tessellation(&mut self, linear: f64, angular_rad: f64, relative: bool) {
+        // Clamp hand-edited values so a typo cannot freeze the app or produce an
+        // unusable mesh. Absolute linear deflection is in millimetres.
+        let linear = if relative {
+            linear.clamp(0.0001, 0.05)
+        } else {
+            linear.clamp(0.0001, 5.0)
+        };
+        let angular_rad = angular_rad.clamp(0.03, 1.0);
+        self.display_tessellation = Tessellation {
+            deflection_linear: linear,
+            deflection_angular: angular_rad,
+            relative_linear: relative,
+        };
+    }
+
     fn topology(&mut self, shape: ShapeId) -> GeomResult<ShapeTopology> {
         // Read the stored shape, never a clone: cloning rebuilds topology and
         // hands out fresh TShape addresses, so the ids would not match the ones
@@ -710,7 +742,7 @@ impl GeometryBackend for OcctBackend {
         let solids: GeomResult<Vec<Solid>> =
             shapes.iter().map(|id| self.get(*id).cloned()).collect();
         let solids = solids?;
-        let cmesh = Solid::mesh(&solids, Tessellation::default())
+        let cmesh = Solid::mesh(&solids, self.display_tessellation)
             .map_err(|e| GeomError::Backend(e.to_string()))?;
         let mut file = std::fs::File::create(path).map_err(|e| GeomError::Io(e.to_string()))?;
         cmesh
@@ -932,6 +964,28 @@ mod tests {
                 "a raw TShape address leaked into a face name: {name}"
             );
         }
+    }
+
+    /// A5: display quality changes the triangle count, never the names stored in
+    /// the document. References must survive the user changing tessellation.
+    #[test]
+    fn display_tessellation_changes_triangles_but_not_reference_names() {
+        let mut backend = OcctBackend::new();
+        let id = backend.cylinder(10.0, 30.0).unwrap();
+
+        backend.set_display_tessellation(0.02, 0.6, true); // coarse
+        let coarse = backend.tessellate(id).unwrap();
+        backend.set_display_tessellation(0.001, 0.08, true); // fine
+        let fine = backend.tessellate(id).unwrap();
+
+        assert!(
+            fine.triangle_count() > coarse.triangle_count(),
+            "finer tessellation must produce more triangles: {} vs {}",
+            fine.triangle_count(),
+            coarse.triangle_count()
+        );
+        assert_eq!(face_names(&coarse), face_names(&fine));
+        assert_eq!(edge_names(&coarse), edge_names(&fine));
     }
 
     /// Every triangle must point at a face that has a stable name, otherwise

@@ -223,6 +223,8 @@ pub fn draw_viewport(
     manifest: &ProjectManifest,
     show_grid: bool,
     grid_spacing: f32,
+    // WGPU solid renderer; `None` falls back to the egui painter.
+    solid_renderer: Option<&mut crate::render::SolidRenderer>,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
@@ -271,7 +273,12 @@ pub fn draw_viewport(
     }
 
     if !mesh.is_empty() {
-        draw_mesh(&painter, rect, mesh, camera, selection, hover, part, manifest);
+        match solid_renderer {
+            Some(renderer) => renderer.paint(
+                &painter, rect, mesh, camera, selection, hover, part, manifest,
+            ),
+            None => draw_mesh(&painter, rect, mesh, camera, selection, hover, part, manifest),
+        }
     } else {
         painter.text(
             rect.center(),

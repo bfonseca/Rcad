@@ -39,6 +39,9 @@ pub struct ProjectManifest {
     pub external_tables: ExternalTables,
     #[serde(default)]
     pub startup: Startup,
+    /// Display tessellation quality (foundation A5).
+    #[serde(default)]
+    pub tessellation: DisplayTessellation,
 }
 
 fn default_project_name() -> String {
@@ -90,6 +93,57 @@ impl Default for Tolerances {
             linear: 0.01,
             angular: 0.1,
         }
+    }
+}
+
+/// How finely B-Rep surfaces are tessellated for display.
+///
+/// This is a *display* setting: it changes the triangle mesh, never the
+/// topology names stored in the document. Geometric signatures use a fixed
+/// canonical tessellation so changing this value cannot break references.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct DisplayTessellation {
+    /// Linear deflection. When `relative` is true it is a fraction of the
+    /// feature size; otherwise it is an absolute distance in millimetres.
+    pub linear: f64,
+    /// Angular deflection in degrees: the largest angle between two adjacent
+    /// facets. Smaller values make curved surfaces smoother.
+    pub angular_deg: f64,
+    /// Interpret `linear` relative to the local feature size.
+    pub relative: bool,
+}
+
+impl Default for DisplayTessellation {
+    fn default() -> Self {
+        // Finer than cadrum's default (relative 0.004, 0.5 rad ≈ 28.6°):
+        // curved faces are the point of the viewport work, and the extra
+        // triangles are cheap compared with the rebuild cost measured in A0.
+        Self {
+            linear: 0.002,
+            angular_deg: 11.5,
+            relative: true,
+        }
+    }
+}
+
+impl DisplayTessellation {
+    pub fn angular_radians(self) -> f64 {
+        self.angular_deg.to_radians()
+    }
+
+    /// Clamp hand-edited or stale values to a range that cannot freeze the
+    /// rebuild or produce an empty mesh.
+    ///
+    /// A relative linear deflection is a small fraction of the feature size; an
+    /// absolute one is a distance in millimetres and therefore has a wider range.
+    pub fn clamped(mut self) -> Self {
+        self.linear = if self.relative {
+            self.linear.clamp(0.0001, 0.05)
+        } else {
+            self.linear.clamp(0.0001, 5.0)
+        };
+        self.angular_deg = self.angular_deg.clamp(2.0, 40.0);
+        self
     }
 }
 
@@ -210,7 +264,40 @@ mod tests {
         let parsed = ProjectManifest::parse("[project]\nname = \"Tiny\"\n").expect("parse");
         assert_eq!(parsed.project.name, "Tiny");
         assert_eq!(parsed.general_tolerance.linear, Tolerances::default().linear);
+        assert_eq!(parsed.tessellation.angular_deg, DisplayTessellation::default().angular_deg);
         assert!(parsed.surface_colors.is_empty());
+    }
+
+    #[test]
+    fn display_tessellation_round_trips_and_is_clamped() {
+        let mut manifest = ProjectManifest::create_default("P");
+        manifest.tessellation = DisplayTessellation {
+            linear: 0.001,
+            angular_deg: 8.0,
+            relative: false,
+        };
+        let parsed = ProjectManifest::parse(&manifest.to_text().expect("serialise")).expect("parse");
+        assert!((parsed.tessellation.linear - 0.001).abs() < 1e-12);
+        assert!((parsed.tessellation.angular_deg - 8.0).abs() < 1e-12);
+        assert!(!parsed.tessellation.relative);
+
+        let clamped = DisplayTessellation {
+            linear: 0.0,
+            angular_deg: 500.0,
+            relative: true,
+        }
+        .clamped();
+        assert!(clamped.linear > 0.0);
+        assert!(clamped.angular_deg <= 40.0);
+
+        // Absolute millimetres keep their wider range.
+        let absolute = DisplayTessellation {
+            linear: 1.0,
+            angular_deg: 12.0,
+            relative: false,
+        }
+        .clamped();
+        assert!((absolute.linear - 1.0).abs() < 1e-12);
     }
 
     #[test]

@@ -36,6 +36,9 @@ use std::thread;
 pub struct RebuildJob {
     pub version: u64,
     pub part: Part,
+    /// Display tessellation for this rebuild (foundation A5). The worker owns
+    /// its own backend, so the quality travels with each job.
+    pub tessellation: rcad_doc::DisplayTessellation,
 }
 
 pub struct RebuildResponse {
@@ -90,6 +93,9 @@ pub struct RcadApp {
     project: Project,
     current_path: Option<PathBuf>,
     occt_backend: OcctBackend,
+    /// WGPU solid renderer. `None` when running on glow (or no WGPU state), in
+    /// which case the viewport falls back to the painter.
+    solid_renderer: Option<crate::render::SolidRenderer>,
     sketch: Option<Sketch>,
     last_error: Option<String>,
     undo_stack: UndoStack,
@@ -298,7 +304,7 @@ pub struct NewParameterDraft {
 }
 
 impl RcadApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = AppSettings::load();
         let (job_tx, job_rx) = bounded::<RebuildJob>(2);
         let (res_tx, res_rx) = bounded::<RebuildResponse>(2);
@@ -318,6 +324,12 @@ impl RcadApp {
                     if job.version < version_worker.load(Ordering::Relaxed) {
                         continue;
                     }
+                    let quality = job.tessellation.clamped();
+                    backend.set_display_tessellation(
+                        quality.linear,
+                        quality.angular_radians(),
+                        quality.relative,
+                    );
                     let res = cache.rebuild_part_incremental(&job.part, &mut backend);
                     let _ = res_tx.send(RebuildResponse {
                         version: job.version,
@@ -335,6 +347,7 @@ impl RcadApp {
             project: Project::default(),
             current_path: None,
             occt_backend: OcctBackend::default(),
+            solid_renderer: None,
             sketch: None,
             last_error: None,
             undo_stack: UndoStack::default(),
@@ -410,6 +423,11 @@ impl RcadApp {
             mesh_ready: false,
         };
         
+        // The WGPU renderer only exists when eframe created a WGPU device; on
+        // the glow fallback the viewport keeps using the painter.
+        this.solid_renderer =
+            crate::render::SolidRenderer::new(cc.wgpu_render_state.as_ref());
+
         // Create default datum geometry (coordinate system + datum planes) for new part
         let _ = this.create_default_datum_geometry();
         this
@@ -882,6 +900,7 @@ impl RcadApp {
                 &self.manifest,
                 self.settings.show_grid,
                 self.settings.grid_spacing,
+                self.solid_renderer.as_mut(),
             );
 
             self.viewport_rect = Some(response.rect);
@@ -1067,7 +1086,12 @@ impl RcadApp {
                             // newest queued job from a superseded one.
                             let version =
                                 self.kernel_version.fetch_add(1, Ordering::Relaxed) + 1;
-                            if tx.try_send(RebuildJob { version, part }).is_ok() {
+                            let job = RebuildJob {
+                                version,
+                                part,
+                                tessellation: self.manifest.tessellation.clamped(),
+                            };
+                            if tx.try_send(job).is_ok() {
                                 self.needs_rebuild = false;
                             }
                         }
@@ -1159,6 +1183,7 @@ impl RcadApp {
             Ok(manifest) => {
                 let name = manifest.project.name.clone();
                 self.manifest = manifest;
+                self.apply_display_tessellation();
                 self.settings.remember_project(&root);
                 self.project_root = Some(root);
                 self.project_error = None;
@@ -1166,6 +1191,25 @@ impl RcadApp {
             }
             Err(err) => self.project_error = Some(err),
         }
+    }
+
+    /// Push the project's display tessellation into the kernel backend.
+    ///
+    /// This is display-only: topology names use a canonical tessellation, so
+    /// changing quality never invalidates a stored reference.
+    fn apply_display_tessellation(&mut self) {
+        let quality = self.manifest.tessellation.clamped();
+        tracing::info!(
+            "display tessellation: linear={} angular={:.2}° relative={}",
+            quality.linear,
+            quality.angular_deg,
+            quality.relative
+        );
+        self.occt_backend.set_display_tessellation(
+            quality.linear,
+            quality.angular_radians(),
+            quality.relative,
+        );
     }
 
     /// Reopen the last project, if it still exists and asks to be reopened.
@@ -1320,6 +1364,45 @@ impl RcadApp {
             self.settings.show_grid,
             egui::Slider::new(&mut self.settings.grid_spacing, 1.0..=100.0).text("spacing"),
         );
+        ui.separator();
+
+        ui.strong("Display quality");
+        ui.label(
+            egui::RichText::new(
+                "Tessellation of curved surfaces. It changes the display mesh only;
+                 references and topology names are unaffected.",
+            )
+            .size(10.0)
+            .color(egui::Color32::GRAY),
+        );
+        ui.horizontal(|ui| {
+            ui.label("linear");
+            ui.add(
+                egui::DragValue::new(&mut self.manifest.tessellation.linear)
+                    .speed(0.0001)
+                    .range(0.0001..=5.0),
+            );
+            ui.label("angular°");
+            ui.add(
+                egui::DragValue::new(&mut self.manifest.tessellation.angular_deg)
+                    .speed(0.1)
+                    .range(2.0..=40.0),
+            );
+            ui.checkbox(&mut self.manifest.tessellation.relative, "relative");
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Apply display quality").clicked() {
+                self.manifest.tessellation = self.manifest.tessellation.clamped();
+                self.apply_display_tessellation();
+                self.needs_rebuild = true;
+                self.status = Some("Display quality applied; rebuilding the model.".to_string());
+            }
+            if ui.button("Reset quality").clicked() {
+                self.manifest.tessellation = rcad_doc::DisplayTessellation::default();
+                self.apply_display_tessellation();
+                self.needs_rebuild = true;
+            }
+        });
         ui.separator();
 
         ui.strong("Colour vocabulary");
@@ -5052,6 +5135,7 @@ impl Default for RcadApp {
             project: Project::default(),
             current_path: None,
             occt_backend: OcctBackend::default(),
+            solid_renderer: None,
             sketch: None,
             last_error: None,
             undo_stack: UndoStack::default(),
