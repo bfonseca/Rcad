@@ -237,6 +237,9 @@ pub struct RcadApp {
     /// True once a rebuild response has been applied, so headless save can wait
     /// for the real model instead of writing an empty one.
     mesh_ready: bool,
+    /// Exponential moving average of the frame interval, shown in the status
+    /// bar so performance can be judged without reading logs (foundation A7/D0).
+    frame_time_ms: f32,
 }
 
 /// A feature driven by an edge set: a round or a break.
@@ -421,6 +424,7 @@ impl RcadApp {
             pending_demo_select: false,
             pending_save: None,
             mesh_ready: false,
+            frame_time_ms: 0.0,
         };
         
         // The WGPU renderer only exists when eframe created a WGPU device; on
@@ -590,6 +594,15 @@ impl RcadApp {
     /// Kept free of eframe types so tests can drive the UI directly with
     /// egui_kittest: click a button, then assert on the resulting state.
     pub fn ui(&mut self, ctx: &egui::Context) {
+        // Frame interval for the status bar. `stable_dt` is the value egui
+        // recommends for animations; it is smoothed across frames.
+        let dt_ms = (ctx.input(|i| i.stable_dt) * 1000.0).max(0.01);
+        self.frame_time_ms = if self.frame_time_ms <= 0.0 {
+            dt_ms
+        } else {
+            self.frame_time_ms * 0.9 + dt_ms * 0.1
+        };
+
         // Nothing can be modelled before a project exists: every component
         // reads the project tolerances, variables and colours.
         if self.project_root.is_none() {
@@ -869,6 +882,12 @@ impl RcadApp {
 
                 // Pick a face in the viewport, then tag it with a project colour.
                 self.draw_face_colour_control(ui);
+
+                // A quick read of renderer responsiveness (foundation A7/D0).
+                if self.frame_time_ms > 0.0 {
+                    ui.separator();
+                    ui.weak(format!("{:.0} fps", 1000.0 / self.frame_time_ms));
+                }
             });
         });
         
@@ -5209,6 +5228,7 @@ impl Default for RcadApp {
             pending_demo_select: false,
             pending_save: None,
             mesh_ready: false,
+            frame_time_ms: 0.0,
         }
     }
 }
@@ -7175,7 +7195,7 @@ mod interaction_tests {
         };
         assert_eq!(*sketch, Some(sketch_id), "the extrude does not name its sketch");
         let highest = profile
-            .outer
+            .sample_outer(1)
             .iter()
             .map(|point| point[0])
             .fold(f64::MIN, f64::max);
@@ -7208,7 +7228,7 @@ mod interaction_tests {
             unreachable!()
         };
         let highest = profile
-            .outer
+            .sample_outer(1)
             .iter()
             .map(|point| point[0])
             .fold(f64::MIN, f64::max);

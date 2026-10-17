@@ -28,6 +28,13 @@ pub enum DocError {
 
 pub type DocResult<T> = Result<T, DocError>;
 
+/// Current document format.
+///
+/// Version 2 stores analytic profile curves. Version-1 documents still load:
+/// `rcad_geom::Profile2D` deserialises the old point lists into line segments,
+/// so no separate migration pass is needed (see `rcad-geom/src/profile.rs`).
+pub const FORMAT_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub format_version: u32,
@@ -53,7 +60,7 @@ pub struct SavedView {
 impl Default for Project {
     fn default() -> Self {
         Self {
-            format_version: 1,
+            format_version: FORMAT_VERSION,
             name: "Untitled".into(),
             parts: vec![Part::new_solid("Part1")],
             assemblies: Vec::new(),

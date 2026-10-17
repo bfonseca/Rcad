@@ -300,7 +300,7 @@ and its state reconciliation.
 - [x] STEP/STL export through OCCT; STEP import in the kernel (not in the UI)
 - [x] MCP server (`rcad-mcp`, stdio, 13 tools + 3 resources; no prompts/TCP)
 - [x] CI workflow (`.github/workflows/ci.yml`): build + test blocking, clippy/fmt advisory
-- [x] 288 tests passing (4 ignored measurements) and a warning-free
+- [x] 298 tests passing (4 ignored measurements) and a warning-free
       `cargo check --workspace --all-targets`
 - [x] **WGPU solid pipeline** (depth 24/stencil 8, 4x MSAA, Blinn-Phong, per-face colours,
       selection/hover tint) with the painter kept as fallback — foundation A2/A3. Validated
@@ -308,9 +308,14 @@ and its state reconciliation.
 - [x] **Configurable display tessellation** in `rcad.toml` and the Options dialog, with
       reference names independent of the display quality — foundation A5
 - [x] **Shaded-with-edges and tangent-edge dimming** (edge pass with depth bias, tangent
-      classification from the dihedral angle) — foundation A4 (offscreen validated; window
-      confirmation pending)
-- [ ] **Analytic sketch curves and holes reaching the B-Rep** — foundation B
+      classification from the dihedral angle) — foundation A4, confirmed in the window
+- [x] **Gate A**: the user validated the new viewport visually (smooth shaded surfaces, correct
+      depth, visible edges); an FPS readout is now in the status bar
+- [x] **Analytic sketch curves and holes reaching the B-Rep** — foundation B: lines, arcs and
+      circles are real kernel curves (`format_version` 2, old documents migrate on load);
+      conics are sampled, splines and real Loft/Boundary are follow-ups. The 8-hole benchmark
+      plate rebuilds ~36× faster (15.2 s → 0.43 s) because the holes are cylinders, not
+      32-sided polygons.
 - [ ] **Parent/child dependency graph, real Insert Here/Rollback, Edit Definition** — foundation C
 - [ ] Adaptive history overlay with blur (the overlay is solid today)
 - [ ] Assembly UI and the 11 PTC placement constraints

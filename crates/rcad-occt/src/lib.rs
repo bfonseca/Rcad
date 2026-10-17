@@ -6,7 +6,7 @@ use std::path::Path;
 use cadrum::{DVec3 as CVec3, Edge, Solid, Surface, SurfaceKind, Tessellation};
 use glam::DVec3;
 use rcad_geom::{
-    naming, BooleanOp, EdgeFacts, FaceFacts, FaceInfo, FaceSource, GeomError, GeomResult,
+    naming, BooleanOp, Curve2D, EdgeFacts, FaceFacts, FaceInfo, FaceSource, GeomError, GeomResult,
     GeometryBackend, NamedEdge, NamedFace, Profile2D, ShapeId, ShapeTopology, TriangleMesh,
 };
 
@@ -92,20 +92,30 @@ impl OcctBackend {
         u: DVec3,
         v: DVec3,
     ) -> GeomResult<Vec<Edge>> {
-        if profile.outer.len() < 3 {
+        if profile.outer.is_empty() {
             return Err(GeomError::InvalidProfile(
-                "outer loop needs at least 3 points".into(),
+                "outer loop has no segments".into(),
+            ));
+        }
+        let normal = u.cross(v).normalize_or_zero();
+        if normal.length() == 0.0 {
+            return Err(GeomError::InvalidProfile(
+                "plane has a degenerate basis".into(),
             ));
         }
         let mut edges = Vec::new();
-        edges.extend(polygon_on_plane(&profile.outer, origin, u, v)?);
+        for curve in &profile.outer {
+            edges.push(curve_edge(curve, origin, u, v, normal)?);
+        }
         for hole in &profile.holes {
-            if hole.len() < 3 {
+            if hole.is_empty() {
                 return Err(GeomError::InvalidProfile(
-                    "hole loop needs at least 3 points".into(),
+                    "hole loop has no segments".into(),
                 ));
             }
-            edges.extend(polygon_on_plane(hole, origin, u, v)?);
+            for curve in hole {
+                edges.push(curve_edge(curve, origin, u, v, normal)?);
+            }
         }
         Ok(edges)
     }
@@ -144,19 +154,57 @@ fn cvec(v: DVec3) -> CVec3 {
     CVec3::new(v.x, v.y, v.z)
 }
 
-/// A closed polygon of a profile, placed on the plane an origin, an in-plane x
-/// and a normal describe.
-fn polygon_on_plane(
-    pts: &[[f64; 2]],
+/// Build one analytic edge on the plane an origin, an in-plane x and a normal
+/// describe. Lines stay lines, arcs become OCCT arcs and circles become real
+/// circles, so the extruded B-Rep has cylindrical surfaces rather than facets.
+fn curve_edge(
+    curve: &Curve2D,
     origin: DVec3,
     u: DVec3,
     v: DVec3,
-) -> GeomResult<Vec<Edge>> {
-    let pts3: Vec<CVec3> = pts
-        .iter()
-        .map(|p| cvec(origin + u * p[0] + v * p[1]))
-        .collect();
-    Edge::polygon(&pts3).map_err(|e| GeomError::Backend(e.to_string()))
+    normal: DVec3,
+) -> GeomResult<Edge> {
+    let point = |p: [f64; 2]| cvec(origin + u * p[0] + v * p[1]);
+    match curve {
+        Curve2D::Line { start, end } => {
+            Edge::line(point(*start), point(*end)).map_err(|e| GeomError::Backend(e.to_string()))
+        }
+        Curve2D::Arc {
+            center,
+            radius,
+            start_angle,
+            sweep_angle,
+        } => {
+            if *radius <= 0.0 || sweep_angle.abs() < 1e-12 {
+                return Err(GeomError::InvalidProfile("degenerate arc".into()));
+            }
+            if (sweep_angle.abs() - std::f64::consts::TAU).abs() < 1e-9 {
+                // A full turn drawn as an arc is a circle; three coincident
+                // points would be rejected by OCCT.
+                let edge = Edge::circle(*radius, cvec(normal))
+                    .map_err(|e| GeomError::Backend(e.to_string()))?;
+                return Ok(edge.translate(point(*center)));
+            }
+            let at = |angle: f64| {
+                point([
+                    center[0] + radius * angle.cos(),
+                    center[1] + radius * angle.sin(),
+                ])
+            };
+            let start = at(*start_angle);
+            let mid = at(start_angle + sweep_angle * 0.5);
+            let end = at(start_angle + sweep_angle);
+            Edge::arc_3pts(start, mid, end).map_err(|e| GeomError::Backend(e.to_string()))
+        }
+        Curve2D::Circle { center, radius } => {
+            if *radius <= 0.0 {
+                return Err(GeomError::InvalidProfile("circle has no radius".into()));
+            }
+            let edge = Edge::circle(*radius, cvec(normal))
+                .map_err(|e| GeomError::Backend(e.to_string()))?;
+            Ok(edge.translate(point(*center)))
+        }
+    }
 }
 
 fn triangle_mesh_from_cadrum(mesh: &cadrum::Mesh) -> TriangleMesh {
@@ -1019,6 +1067,62 @@ mod tests {
                 .values()
                 .any(|face| face.name.starts_with("F:cylinder(r5.0000)")),
             "the bore face should be named after its cylinder: {:?}",
+            face_names(&mesh)
+        );
+    }
+
+    /// B2: an analytic circle profile must produce a real cylindrical surface,
+    /// not a polygon of flat strips.
+    #[test]
+    fn an_analytic_circle_extrudes_to_a_real_cylinder() {
+        let mut backend = OcctBackend::new();
+        let profile = Profile2D::circle([0.0, 0.0], 5.0);
+        let id = backend.extrude_profile(&profile, 20.0).unwrap();
+        let mesh = backend.tessellate(id).unwrap();
+
+        let cylindrical = mesh
+            .face_names
+            .values()
+            .filter(|face| face.name.starts_with("F:cylinder(r5.0000)"))
+            .count();
+        assert_eq!(cylindrical, 1, "one cylindrical face: {:?}", face_names(&mesh));
+        assert!(
+            mesh.triangle_count() > 12,
+            "a cylinder needs curved tessellation: {} triangles",
+            mesh.triangle_count()
+        );
+    }
+
+    /// B2: a rectangle with a circular hole yields two wires (one outer loop,
+    /// one hole loop) and a cylindrical hole face.
+    #[test]
+    fn a_circular_hole_profile_extrudes_with_two_wires() {
+        let mut backend = OcctBackend::new();
+        let profile = Profile2D {
+            outer: Profile2D::polygon_loop(&[
+                [0.0, 0.0],
+                [40.0, 0.0],
+                [40.0, 20.0],
+                [0.0, 20.0],
+            ]),
+            holes: vec![vec![Curve2D::Circle {
+                center: [20.0, 10.0],
+                radius: 5.0,
+            }]],
+        };
+        let id = backend.extrude_profile(&profile, 10.0).unwrap();
+        let mesh = backend.tessellate(id).unwrap();
+
+        assert!(
+            mesh.face_names
+                .values()
+                .any(|face| face.name.starts_with("F:cylinder(r5.0000)")),
+            "the hole must be a cylindrical face: {:?}",
+            face_names(&mesh)
+        );
+        assert!(
+            mesh.face_names.values().any(|face| face.name.contains("plane")),
+            "the plate keeps planar faces: {:?}",
             face_names(&mesh)
         );
     }

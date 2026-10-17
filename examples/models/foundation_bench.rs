@@ -24,22 +24,10 @@ use rcad_geom::{BooleanOp, GeometryBackend, Profile2D};
 use rcad_occt::OcctBackend;
 use rcad_param::ShapeCache;
 
-/// A circle approximated by a closed polygon, centred on (cx, cy).
-///
-/// The sketch still only produces polygons (foundation B will replace this with
-/// analytic arcs); the approximation is deliberate so the baseline measures the
-/// current pipeline, not a future one.
-fn circle_profile(cx: f64, cy: f64, radius: f64, segments: usize) -> Profile2D {
-    let outer = (0..segments)
-        .map(|i| {
-            let a = std::f64::consts::TAU * i as f64 / segments as f64;
-            [cx + radius * a.cos(), cy + radius * a.sin()]
-        })
-        .collect();
-    Profile2D {
-        outer,
-        holes: Vec::new(),
-    }
+/// An analytic circle: after foundation B this becomes a real cylindrical
+/// surface in the kernel, not a 32-sided polygon.
+fn circle_profile(cx: f64, cy: f64, radius: f64) -> Profile2D {
+    Profile2D::circle([cx, cy], radius)
 }
 
 fn demo_part() -> Part {
@@ -80,7 +68,7 @@ fn plate_part(holes: usize, with_rounds: bool) -> Part {
     }
 
     for (index, [x, y]) in hole_positions().into_iter().take(holes).enumerate() {
-        let profile = circle_profile(x, y, 4.0, 32);
+        let profile = circle_profile(x, y, 4.0);
         let tool = add_extrude(
             &mut part,
             &format!("HoleTool{index}"),

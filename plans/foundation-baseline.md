@@ -213,7 +213,8 @@ Sem uma janela WGPU neste ambiente, o pipeline foi validado em três níveis:
 ![A2 offscreen](../docs/baseline/a2-headless-demo.png)
 
 A **janela** WGPU real foi entretanto confirmada pelo utilizador no seu desktop (render
-muito melhor do que antes); falta apenas o Gate A formal (comparação lado a lado e FPS).
+muito melhor do que antes), e o Gate A foi aprovado visualmente em 2026-10-17. O contador
+de FPS passou a estar no status bar para registar o primeiro número no próximo arranque.
 Neste ambiente de comandos o `Surface::configure` continua a falhar.
 
 ## 10. A4 — arestas B-Rep (offscreen)
@@ -224,11 +225,35 @@ passou a mostrar o contorno escuro das arestas visíveis, com as traseiras escon
 
 ![A4 edges](../docs/baseline/a4-headless-edges.png)
 
-O que falta: confirmar na janela do utilizador (o painter continua a desenhar a linha grossa
-de seleção/hover por cima) e, no Gate A, comparar com o “antes”.
+Confirmado na janela do utilizador em 2026-10-17 (as arestas foram consideradas corretas).
+O painter continua a desenhar a linha grossa de seleção/hover por cima.
 
-## 11. Próximo passo
+## 11. B — curvas analíticas (resultado)
 
-**A4 / A6 / A7** — arestas B-Rep no pipeline (shaded-with-edges e tangentes
-atenuadas), captura/regressão de imagem e o Gate A visual com GPU. O “antes”
-continua congelado nas imagens desta página.
+A chapa de teste deixou de usar círculos poligonais: cada furo é agora um **cilindro real**
+(`Profile2D::circle` → `Edge::circle`). A geometria ficou correta e o rebuild caiu:
+
+| Peça | Cold antes (B) | Cold depois | Incremental antes → depois |
+|---|---:|---:|---:|
+| chapa 2 furos | 938 ms | 146 ms | 481 → 58 ms |
+| chapa 4 furos | 3 391 ms | 225 ms | 1 511 → 71 ms |
+| **chapa 8 furos** | **15 240 ms** | **425 ms** | **5 262 → 103 ms** |
+
+Isto é **~36× mais rápido** na peça de teste, porque a topologia deixou de ter ~32 faces por
+furo. Os triângulos sobem de 5 076 para 6 068 (cilindro verdadeiramente curvo), custo que o A5
+já tinha medido como ~2% do tempo de rebuild antes de B.
+
+Compatibilidade: documentos antigos abrem e migram automaticamente (o `Deserialize` de
+`Profile2D` converte as listas de pontos em linhas; `format_version` passou para 2). Uma chapa
+pré-B foi aberta e reconstruída na app para validar isto.
+
+A chapa reconstruída com furos cilíndricos, vista de topo (fallback glow; o contador do status
+bar mostra 57 fps em software):
+
+![B analytic plate](../docs/baseline/b-analytic-plate.png)
+
+## 12. Próximo passo
+
+**Bloco C** — referências, pai/filho e rebuild condicionado. O Bloco A está fechado
+(Gate A aprovado) e o Bloco B está concluído no núcleo; Loft/Boundary e BSpline
+ficam como follow-up. O “antes” continua congelado nas imagens desta página.

@@ -951,10 +951,8 @@ mod icon_tests {
         use rcad_doc::{ConstructionKind, FeatureKind};
         use rcad_geom::{BooleanOp, Profile2D};
 
-        let profile = Profile2D {
-            outer: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
-            holes: Vec::new(),
-        };
+        let profile =
+            Profile2D::from_polygon(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
         let kinds = vec![
             FeatureKind::Box { size: [1.0, 1.0, 1.0] },
             FeatureKind::Cylinder { radius: 1.0, height: 1.0 },

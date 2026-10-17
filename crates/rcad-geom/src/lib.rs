@@ -10,12 +10,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod naming;
+pub mod profile;
 pub mod query;
 pub mod topology;
 
 pub use naming::{
     EdgeFacts, FaceFacts, NamedEdge, NamedFace, ReferenceMemory, plane_basis, remember,
 };
+pub use profile::{Curve2D, Profile2D};
 pub use topology::{FaceInfo, FaceSource, ShapeTopology};
 
 /// Opaque handle to a BREP shape owned by a backend.
@@ -145,14 +147,6 @@ pub enum BooleanOp {
     Union,
     Subtract,
     Intersect,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Profile2D {
-    /// Closed outer loop in the XY plane (Z = 0), CCW preferred.
-    pub outer: Vec<[f64; 2]>,
-    /// Optional hole loops.
-    pub holes: Vec<Vec<[f64; 2]>>,
 }
 
 #[derive(Debug, Error)]

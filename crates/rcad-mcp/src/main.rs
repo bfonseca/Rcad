@@ -223,10 +223,10 @@ impl Server {
             })(),
             "add_extrude" => (|| {
                 self.require_write()?;
-                let profile = Profile2D {
-                    outer: arg_profile(&args, "profile")?,
-                    holes: arg_holes(&args, "holes")?,
-                };
+                let profile = Profile2D::from_loops(
+                    arg_profile(&args, "profile")?,
+                    arg_holes(&args, "holes")?,
+                );
                 let height = required_f64(&args, "height")?;
                 let part = self.active_part_mut().map_err(tool_failure)?;
                 let feature_name = arg_str(&args, "name")
@@ -243,10 +243,7 @@ impl Server {
             })(),
             "add_revolve" => (|| {
                 self.require_write()?;
-                let profile = Profile2D {
-                    outer: arg_profile(&args, "profile")?,
-                    holes: Vec::new(),
-                };
+                let profile = Profile2D::from_polygon(arg_profile(&args, "profile")?);
                 let angle = args
                     .get("angle_deg")
                     .and_then(|v| v.as_f64())

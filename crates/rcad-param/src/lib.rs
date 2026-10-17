@@ -743,15 +743,7 @@ fn eval_feature(
 pub fn rect_profile(width: f64, height: f64) -> Profile2D {
     let hx = width * 0.5;
     let hy = height * 0.5;
-    Profile2D {
-        outer: vec![
-            [-hx, -hy],
-            [hx, -hy],
-            [hx, hy],
-            [-hx, hy],
-        ],
-        holes: Vec::new(),
-    }
+    Profile2D::from_polygon(vec![[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]])
 }
 
 /// Demo part: box with a cylindrical cut.
@@ -969,13 +961,12 @@ mod tests {
             "fillet radius is not part of the feature hash"
         );
 
-        let profile = Profile2D {
-            outer: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
-            holes: Vec::new(),
-        };
+        let profile = Profile2D::from_polygon(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
         let mut with_hole = base.clone();
-        let mut hole_profile = profile.clone();
-        hole_profile.holes.push(vec![[0.1, 0.1], [0.2, 0.1], [0.1, 0.2]]);
+        let hole_profile = Profile2D::from_loops(
+            vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            vec![vec![[0.1, 0.1], [0.2, 0.1], [0.1, 0.2]]],
+        );
         with_hole.kind = FeatureKind::Extrude {
             placement: None,
             profile: hole_profile,
@@ -1023,10 +1014,8 @@ mod tests {
         );
         let sketch_feature = Feature::new("Sketch1", FeatureKind::Sketch { sketch });
         let source = sketch_feature.id;
-        let stale = rcad_geom::Profile2D {
-            outer: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
-            holes: Vec::new(),
-        };
+        let stale =
+            rcad_geom::Profile2D::from_polygon(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
         let extrude = Feature::new(
             "Extrude1",
             FeatureKind::Extrude {
@@ -1046,7 +1035,7 @@ mod tests {
             .expect("the sketch profile was extruded");
         assert_eq!(profile.outer.len(), 4, "the stale profile was used");
         let highest = profile
-            .outer
+            .sample_outer(1)
             .iter()
             .map(|point| point[0])
             .fold(f64::MIN, f64::max);
@@ -1091,10 +1080,11 @@ mod tests {
         let extrude = Feature::new(
             "Extrude1",
             FeatureKind::Extrude {
-                profile: rcad_geom::Profile2D {
-                    outer: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
-                    holes: Vec::new(),
-                },
+                profile: rcad_geom::Profile2D::from_polygon(vec![
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                ]),
                 height: 5.0,
                 placement: None,
                 sketch: Some(source),
@@ -1179,10 +1169,11 @@ mod tests {
         let extrude = Feature::new(
             "Extrude1",
             FeatureKind::Extrude {
-                profile: rcad_geom::Profile2D {
-                    outer: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
-                    holes: Vec::new(),
-                },
+                profile: rcad_geom::Profile2D::from_polygon(vec![
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                ]),
                 height: 5.0,
                 placement: None,
                 sketch: Some(Uuid::new_v4()),

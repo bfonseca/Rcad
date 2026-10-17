@@ -1333,6 +1333,46 @@ mod tests {
             .join("../../target/a2-headless-demo.png");
         image.save(&path).expect("write the offscreen PNG");
         eprintln!("offscreen render: {} ({non_background} non-background pixels)", path.display());
+
+        // A6 image regression: compare with the committed golden image with a
+        // tolerance, so a shader/geometry regression is caught without making
+        // the test depend on exact rasterisation.
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/baseline/a4-headless-edges.png");
+        if let Ok(golden) = image::open(&golden_path) {
+            let golden = golden.to_rgba8();
+            assert_eq!(
+                (golden.width(), golden.height()),
+                (width, height),
+                "the golden image has a different size"
+            );
+            let mut channel_diff = 0u64;
+            let mut differing_pixels = 0usize;
+            for (actual, expected) in image.pixels().zip(golden.pixels()) {
+                let diff: u32 = (0..3)
+                    .map(|c| actual.0[c].abs_diff(expected.0[c]) as u32)
+                    .sum();
+                channel_diff += diff as u64;
+                if diff > 24 {
+                    differing_pixels += 1;
+                }
+            }
+            let pixels = (width * height) as u64;
+            let mean_channel_diff = channel_diff as f64 / (pixels * 3) as f64;
+            let differing_fraction = differing_pixels as f64 / pixels as f64;
+            assert!(
+                mean_channel_diff < 3.0 && differing_fraction < 0.02,
+                "image regression: mean channel diff {mean_channel_diff:.2}, \
+                 {:.2}% pixels differ (golden {})",
+                differing_fraction * 100.0,
+                golden_path.display()
+            );
+            eprintln!(
+                "image regression: mean channel diff {mean_channel_diff:.2}, \
+                 {:.2}% pixels differ",
+                differing_fraction * 100.0
+            );
+        }
     }
 
     #[test]

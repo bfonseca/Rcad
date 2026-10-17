@@ -904,10 +904,12 @@ mod tests {
     fn a_revolve_with_a_placement_spins_around_the_plane_axis() {
         // A profile offset from the axis, so the result is a ring and not a
         // profile that crosses its own axis of revolution.
-        let profile = rcad_geom::Profile2D {
-            outer: vec![[5.0, -5.0], [15.0, -5.0], [15.0, 5.0], [5.0, 5.0]],
-            holes: Vec::new(),
-        };
+        let profile = rcad_geom::Profile2D::from_polygon(vec![
+            [5.0, -5.0],
+            [15.0, -5.0],
+            [15.0, 5.0],
+            [5.0, 5.0],
+        ]);
         let mut part = Part::new_solid("P");
         part.features.push(Feature::new(
             "R",
@@ -961,10 +963,12 @@ mod tests {
         part.features.push(Feature::new(
             "E",
             FeatureKind::Extrude {
-                profile: rcad_geom::Profile2D {
-                    outer: vec![[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]],
-                    holes: Vec::new(),
-                },
+                profile: rcad_geom::Profile2D::from_polygon(vec![
+                    [-5.0, -5.0],
+                    [5.0, -5.0],
+                    [5.0, 5.0],
+                    [-5.0, 5.0],
+                ]),
                 height: 4.0,
                 placement: Some(rcad_doc::SketchPlacement {
                     origin: [0.0, 0.0, 0.0],
@@ -995,10 +999,12 @@ mod tests {
         part.features.push(Feature::new(
             "E",
             FeatureKind::Extrude {
-                profile: rcad_geom::Profile2D {
-                    outer: vec![[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]],
-                    holes: Vec::new(),
-                },
+                profile: rcad_geom::Profile2D::from_polygon(vec![
+                    [-5.0, -5.0],
+                    [5.0, -5.0],
+                    [5.0, 5.0],
+                    [-5.0, 5.0],
+                ]),
                 height: 4.0,
                 placement: Some(rcad_doc::SketchPlacement {
                     origin: [0.0, 0.0, 20.0],

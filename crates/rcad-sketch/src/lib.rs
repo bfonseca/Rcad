@@ -5,12 +5,47 @@
 //! (SolveSpace) when available in the build environment.
 
 use glam::Vec2;
-use rcad_geom::Profile2D;
+use rcad_geom::{Curve2D, Profile2D};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 pub type SketchId = Uuid;
+
+/// One chained piece of a sketch profile, between two sketch points.
+struct ProfileSegment {
+    start: Uuid,
+    end: Uuid,
+    curves: Vec<Curve2D>,
+}
+
+/// Signed shoe-lace area of a polygon approximation (positive = CCW).
+fn loop_area(points: &[[f64; 2]]) -> f64 {
+    let mut area = 0.0;
+    for index in 0..points.len() {
+        let a = points[index];
+        let b = points[(index + 1) % points.len()];
+        area += a[0] * b[1] - b[0] * a[1];
+    }
+    area * 0.5
+}
+
+/// Ray-casting point-in-polygon test, used to tell holes from stray loops.
+fn point_in_polygon(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
+    let mut inside = false;
+    for index in 0..polygon.len() {
+        let a = polygon[index];
+        let b = polygon[(index + 1) % polygon.len()];
+        let crosses = (a[1] > point[1]) != (b[1] > point[1]);
+        if crosses {
+            let x = a[0] + (point[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]);
+            if point[0] < x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
 
 #[derive(Debug, Error)]
 pub enum SketchError {
@@ -447,49 +482,194 @@ impl Sketch {
         iterative_solve(self)
     }
 
-    /// Closed outer profile from line connectivity (simple ordered points).
+    /// Closed profile made of analytic curves (foundation B).
+    ///
+    /// Lines stay lines, arcs stay arcs and circles stay circles; conics are
+    /// sampled into short lines because the kernel has no conic primitive yet.
+    /// Loops are chained by sketch point id, so a rectangle with a circle inside
+    /// becomes an outer loop plus one hole loop.
     pub fn to_profile(&self) -> Option<Profile2D> {
-        if self.points.len() < 3 {
-            return None;
+        let mut segments: Vec<ProfileSegment> = Vec::new();
+        let mut standalone_loops: Vec<Vec<Curve2D>> = Vec::new();
+
+        for line in &self.lines {
+            let (Some(a), Some(b)) = (self.point(line.a), self.point(line.b)) else {
+                continue;
+            };
+            segments.push(ProfileSegment {
+                start: line.a,
+                end: line.b,
+                curves: vec![Curve2D::Line {
+                    start: [a.x, a.y],
+                    end: [b.x, b.y],
+                }],
+            });
         }
-        // Prefer rectangle-like ordering from lines if present.
-        if self.lines.len() >= 4 {
-            let mut ordered = Vec::new();
-            let mut current = self.lines[0].a;
-            ordered.push(current);
-            let mut used = vec![false; self.lines.len()];
-            for _ in 0..self.lines.len() {
-                if let Some((idx, line)) = self
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .find(|(i, l)| !used[*i] && (l.a == current || l.b == current))
-                {
-                    used[idx] = true;
-                    current = if line.a == current { line.b } else { line.a };
-                    if ordered.contains(&current) {
-                        break;
-                    }
-                    ordered.push(current);
-                } else {
+
+        for arc in &self.arcs {
+            let (Some(center), Some(start), Some(end)) = (
+                self.point(arc.center),
+                self.point(arc.start_point),
+                self.point(arc.end_point),
+            ) else {
+                continue;
+            };
+            let mut sweep = arc.end_angle - arc.start_angle;
+            if sweep <= 0.0 {
+                sweep += std::f64::consts::TAU;
+            }
+            if (sweep - std::f64::consts::TAU).abs() < 1e-9 {
+                // A full turn is a circle, not a three-point arc.
+                standalone_loops.push(vec![Curve2D::Circle {
+                    center: [center.x, center.y],
+                    radius: arc.radius,
+                }]);
+                continue;
+            }
+            let _ = (start, end);
+            segments.push(ProfileSegment {
+                start: arc.start_point,
+                end: arc.end_point,
+                curves: vec![Curve2D::Arc {
+                    center: [center.x, center.y],
+                    radius: arc.radius,
+                    start_angle: arc.start_angle,
+                    sweep_angle: sweep,
+                }],
+            });
+        }
+
+        for circle in &self.circles {
+            let Some(center) = self.point(circle.center) else {
+                continue;
+            };
+            standalone_loops.push(vec![Curve2D::Circle {
+                center: [center.x, center.y],
+                radius: circle.radius,
+            }]);
+        }
+
+        // Conics have no kernel primitive yet: sample them into short lines and
+        // chain them through their start/end point ids.
+        for conic in &self.conics {
+            let points = self.conic_points(conic.id, 16);
+            if points.len() < 2 {
+                continue;
+            }
+            let curves = points
+                .windows(2)
+                .map(|pair| Curve2D::Line {
+                    start: pair[0],
+                    end: pair[1],
+                })
+                .collect();
+            segments.push(ProfileSegment {
+                start: conic.start,
+                end: conic.end,
+                curves,
+            });
+        }
+
+        let mut loops = standalone_loops;
+        let mut used = vec![false; segments.len()];
+        for first in 0..segments.len() {
+            if used[first] {
+                continue;
+            }
+            used[first] = true;
+            let start_id = segments[first].start;
+            let mut current_id = segments[first].end;
+            let mut curves = segments[first].curves.clone();
+            let mut guard = 0;
+            while current_id != start_id && guard <= segments.len() {
+                guard += 1;
+                let next = (0..segments.len())
+                    .find(|index| !used[*index] && segments[*index].start == current_id)
+                    .or_else(|| {
+                        (0..segments.len())
+                            .find(|index| !used[*index] && segments[*index].end == current_id)
+                    });
+                let Some(index) = next else {
                     break;
+                };
+                used[index] = true;
+                if segments[index].start == current_id {
+                    current_id = segments[index].end;
+                    curves.extend(segments[index].curves.clone());
+                } else {
+                    current_id = segments[index].start;
+                    let mut reversed = segments[index].curves.clone();
+                    reversed.reverse();
+                    for curve in &mut reversed {
+                        curve.reverse();
+                    }
+                    curves.extend(reversed);
                 }
             }
-            let outer: Vec<[f64; 2]> = ordered
-                .iter()
-                .filter_map(|id| self.point(*id).map(|p| [p.x, p.y]))
-                .collect();
-            if outer.len() >= 3 {
-                return Some(Profile2D {
-                    outer,
-                    holes: Vec::new(),
-                });
+            if current_id == start_id {
+                loops.push(curves);
             }
         }
-        Some(Profile2D {
-            outer: self.points.iter().map(|p| [p.x, p.y]).collect(),
-            holes: Vec::new(),
-        })
+
+        if loops.is_empty() {
+            // Compatibility: sketches that only carry points (imports, old
+            // documents) still extrude as a polygon.
+            if self.points.len() < 3 {
+                return None;
+            }
+            return Some(Profile2D::from_polygon(
+                self.points.iter().map(|p| [p.x, p.y]).collect(),
+            ));
+        }
+
+        // The largest loop is the outer boundary; the rest are holes if they
+        // lie inside it. This is enough for the common "plate with holes" case.
+        let polygons: Vec<Vec<[f64; 2]>> = loops
+            .iter()
+            .map(|curves| Profile2D::sample_loop(curves, 16))
+            .collect();
+        let outer_index = polygons
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| {
+                loop_area(a)
+                    .abs()
+                    .partial_cmp(&loop_area(b).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(index, _)| index)?;
+        let outer_polygon = &polygons[outer_index];
+
+        let mut outer = loops[outer_index].clone();
+        if loop_area(outer_polygon) < 0.0 {
+            outer.reverse();
+            for curve in &mut outer {
+                curve.reverse();
+            }
+        }
+        let mut holes = Vec::new();
+        for (index, loop_curves) in loops.into_iter().enumerate() {
+            if index == outer_index {
+                continue;
+            }
+            let polygon = &polygons[index];
+            let Some(seed) = polygon.first() else {
+                continue;
+            };
+            if !point_in_polygon(*seed, outer_polygon) {
+                continue;
+            }
+            let mut hole = loop_curves;
+            if loop_area(polygon) > 0.0 {
+                hole.reverse();
+                for curve in &mut hole {
+                    curve.reverse();
+                }
+            }
+            holes.push(hole);
+        }
+
+        Some(Profile2D { outer, holes })
     }
 
     /// Check if the sketch forms a closed profile (valid for solid creation).
@@ -3781,6 +3961,61 @@ mod dof_and_dimension_tests {
         assert_eq!(sketch.dimension_value(index), Some(60.0));
         assert!(sketch.remove_constraint(index));
         assert!(sketch.constraints.is_empty());
+    }
+
+    #[test]
+    fn a_circle_profile_is_analytic() {
+        let mut sketch = Sketch::new("circle");
+        sketch.add_circle(3.0, 4.0, 5.0);
+
+        let profile = sketch.to_profile().expect("a circle is a closed profile");
+
+        assert_eq!(profile.outer.len(), 1);
+        assert!(matches!(
+            profile.outer[0],
+            rcad_geom::Curve2D::Circle { radius, .. } if (radius - 5.0).abs() < 1e-12
+        ));
+    }
+
+    #[test]
+    fn a_circle_inside_a_rectangle_becomes_a_hole_loop() {
+        let mut sketch = Sketch::new("plate");
+        sketch.add_rectangle(0.0, 0.0, 40.0, 20.0);
+        sketch.add_circle(20.0, 10.0, 5.0);
+
+        let profile = sketch.to_profile().expect("outer and hole");
+
+        assert_eq!(profile.outer.len(), 4, "the rectangle stays four lines");
+        assert_eq!(profile.holes.len(), 1, "the circle is a hole loop");
+        assert_eq!(profile.holes[0].len(), 1, "a circle is one analytic curve");
+    }
+
+    #[test]
+    fn an_arc_is_kept_analytic_in_the_profile() {
+        let mut sketch = Sketch::new("dome");
+        let origin = sketch.add_point(0.0, 0.0);
+        let right = sketch.add_point(10.0, 0.0);
+        let arc = sketch.add_arc(5.0, 10.0, 5.0, 0.0, std::f64::consts::PI);
+        let (arc_start, arc_end) = {
+            let arc = sketch.arc(arc).expect("the arc");
+            (arc.start_point, arc.end_point)
+        };
+        sketch.add_line(arc_start, right);
+        sketch.add_line(right, origin);
+        sketch.add_line(origin, arc_end);
+
+        let profile = sketch.to_profile().expect("a closed line/arc loop");
+
+        assert_eq!(profile.outer.len(), 4);
+        assert_eq!(
+            profile
+                .outer
+                .iter()
+                .filter(|curve| matches!(curve, rcad_geom::Curve2D::Arc { .. }))
+                .count(),
+            1,
+            "the arc must not be sampled into lines"
+        );
     }
 }
 
