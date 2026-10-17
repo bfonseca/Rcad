@@ -592,6 +592,13 @@ pub enum FeatureKind {
         distance: f64,
         both_sides: bool,
     },
+    /// A sketch kept in the model history.
+    ///
+    /// It produces no body of its own, but it is a feature the user can open
+    /// again, and the extrude/revolve after it reads its profile.
+    Sketch {
+        sketch: rcad_sketch::Sketch,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

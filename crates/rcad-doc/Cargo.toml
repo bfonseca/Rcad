@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 rcad-geom.workspace = true
+rcad-sketch.workspace = true
 serde.workspace = true
 rmp-serde.workspace = true
 toml = "0.8"

@@ -12,82 +12,72 @@
 > cargo test --workspace e cargo check --workspace --all-targets (zero avisos),
 > e faz commit em main e push. Vai dizendo o que fizeste e o que ficou por fazer.
 
-**Onde estamos (última sessão):** os seis pontos que faltavam do sketch
-ficaram feitos, commitados e verdes; tudo o resto descrito neste ficheiro, até
-essa data, continua feito. O sketch desenha, edita, mede, restringe, projeta e
-desfaz, e os graus de liberdade passaram a ser um cálculo de posto em vez de uma
-contagem de restrições.
+**Onde estamos (última sessão):** o modo de edição de sketch foi revisto contra
+uma lista de dez pontos de UX; todos ficaram feitos, commitados e verdes, e os
+seis pontos da sessão anterior continuam feitos.
 
-**Feito na sessão anterior (não repetir):**
+**Feito nesta sessão (revisão do modo de edição de sketch):**
 
-1. **Desenhar com o rato.** Novo `crates/rcad-app/src/sketch_ui.rs`: ferramentas
-   de clique (Point, Line, Rectangle, Circle), snap à grelha do sketch (5 mm,
-   ligado por omissão e desligável no painel), e conversão ecrã <-> coordenadas
-   do sketch através do plano. Um retângulo são dois cliques (cantos opostos),
-   com pré-visualização elástica, coordenada sob o cursor à vista e `Esc` a
-   recuar um nível de cada vez (primeiro o clique pendente, depois a ferramenta,
-   só depois a seleção). `new_sketch` passa a olhar para o plano: de outra
-   direção o plano fica de perfil, o raio do ecrã nunca o encontra e desenhar
-   seria impossível sem se perceber porquê. Os botões e shortcuts do sketch
-   (`R`, `L`, `P`) passam a armar a ferramenta em vez de inserirem geometria
-   fixa.
-2. **Restrições, dimensões e graus de liberdade no ecrã.** O viewport desenha a
-   geometria do sketch, os glifos das restrições (H, V, `||`, perp, `=`, T, M,
-   F, coincidente, simétrico, concêntrico), as dimensões como linhas com setas e
-   valor (forte a verde, fraca a cinzento, de referência entre parênteses) e
-   marca os pontos que nada ancora (um ponto `Fixed`, um coincidente com um
-   ponto ancorado, ou o ponto médio de uma linha com as duas pontas ancoradas;
-   Horizontal/Vertical/Distance tiram liberdade mas não prendem o ponto). Por
-   baixo do viewport há uma faixa do sketch com
-   `analyze_dof()`/`constraint_status()` (presos vs restantes, contagens), a
-   ferramenta ativa com o próximo passo, o `Solve` e o snap. A
-   seleção de entidades do sketch (clique; Ctrl alterna) alimenta os botões de
-   restrição: Horizontal/Vertical, Paralelo/Perpendicular, Tangente, Igual,
-   Simétrico, Concêntrico, Ponto médio, Coincidente e Dimensão (mede a linha ou
-   os dois pontos escolhidos, e recusa repetir a mesma distância).
+1. **Duas referências de posicionamento.** O sketch guarda
+   `references: Vec<SketchReference>`: a de orientação (o plano ou face onde foi
+   colocado, com a referência estável) e uma automática (o CYS na origem ou a
+   geometria de onde veio). Aparecem na faixa (`R1:` / `R2:`) e no viewport,
+   junto aos eixos do sketch.
+2. **Modo de edição com OK/Cancel e histórico.** `FeatureKind::Sketch { sketch }`
+   novo em `rcad-doc`: OK guarda o sketch como feature do histórico (o documento
+   serializa-o e o duplo-clique na árvore volta a abri-lo); Cancel sai sem
+   guardar; um sketch sem geometria não entra no histórico. Enquanto o sketch
+   está aberto nenhuma outra feature pode arrancar (a barra recusa Model,
+   Assembly e Analysis, e o extrude/revolve/box também), porque o corpo em que
+   se apoiariam ainda não existe. Sem sketch aberto, o extrude/revolve usa a
+   feature de sketch selecionada (ou a última).
+3. **Constrangimentos na barra de topo.** A barra flutuante mostra, além das
+   ferramentas de desenho, os dez constrangimentos (H, V, paralelo,
+   perpendicular, tangente, igual, simétrico, concêntrico, ponto médio,
+   coincidente) e ainda trim/extend/offset/mirror/pattern/Project Refs.
+4. **Dropdowns de retângulo, círculo e polígono.** O botão faz o modo comum (um
+   clique) e o menu dos modos (manter premido): retângulo por dois cantos,
+   centro+canto, ou três pontos (rodado); círculo centro+raio, diâmetro, ou
+   tangente a duas linhas (raio na faixa); triângulo, pentágono e hexágono
+   regulares.
+5. **Ferramenta de dimensões dinâmica.** Um clique numa linha (ou ponto)
+   escolhe; dois cliques em duas linhas dão ângulo (não paralelas) ou distância
+   (paralelas); entre dois pontos (o centro de um círculo/arco conta como ponto)
+   dá distância. O clique em espaço vazio coloca o texto onde o utilizador
+   clicou; uma linha inclinada pode ser cotada alinhada, horizontal ou vertical
+   (`Distance`, `HorizontalDistance` e `VerticalDistance` novas no crate).
+   Duplo-clique na dimensão abre o valor no local (sem janela) e Enter ou um
+   clique fora fecham.
+6. **Polyline e saída por clique direito.** Nova ferramenta de cadeia: cada
+   clique acrescenta um segmento, o cursor faz snap aos pontos da própria cadeia
+   e fechar sobre o primeiro ponto fecha o loop e sai da ferramenta. O clique
+   direito sai de qualquer ferramenta ou função mantendo a geometria criada.
+7. **Cursor e teclado.** A cruz (+) e a leitura de coordenadas só aparecem nas
+   ferramentas de construção; nas de seleção fica o cursor do sistema. Com um
+   campo de texto com foco (dimensão, nome, valor) nenhum shortcut de letra ou
+   dígito dispara — a verificação é global em `handle_shortcuts`.
 
-**Feito nesta sessão (não repetir):**
-
-1. **Dimensões editáveis.** Duplo-clique numa dimensão abre o editor no local
-   (valor, Driving/Driven, Promote, Delete); o clique direito abre o menu da
-   dimensão e o clique simples seleciona-a (a faixa do sketch oferece as mesmas
-   ações). `Sketch::set_dimension_value`, `set_dimension_driving`,
-   `promote_dimension` e `remove_constraint` mantêm o registo do Intent Manager
-   em passo. Uma dimensão driven passa a ser ignorada pelo solver: mede e não
-   move a geometria.
-2. **Os restantes comandos.** Arco de 3 pontos (circunferência por três pontos,
-   com o lado escolhido por aquele que a passa), spline (cliques + Enter),
-   `trim`, `extend` (dois cliques), `offset` (distância na faixa), `mirror` e
-   `pattern` linear (geometria na seleção, linha clicada como eixo/direção).
-3. **Arrastar geometria.** Com a ferramenta Select, arrastar um ponto move-o com
-   o snap e volta a resolver; os pontos ancorados não fogem.
-4. **Referências projetadas.** "Project Refs" projeta para o sketch as arestas
-   selecionadas do modelo e o contorno das faces selecionadas (as arestas da
-   tesselação que só aparecem num triângulo); desenham-se a tracejado.
-5. **Undo do sketch.** `sketch_undo`/`sketch_redo`: Ctrl+Z em modo sketch
-   recua um passo do desenho (clique, restrição, dimensão, arrasto, projeção)
-   antes de tocar no projeto; Ctrl+Y refaz.
-6. **DOF por posto.** `analyze_dof_detailed()` devolve `DOFAnalysis`
-   (`total_dof`, `constrained_dof` = posto do Jacobiano, `free_dof`,
-   `redundant_constraints`, `status`). As variáveis são as coordenadas dos
-   pontos e o raio de cada círculo/arco; as equações vêm de cada restrição, com
-   derivadas numéricas e eliminação de Gauss. Uma restrição repetida aparece
-   como redundante e o sketch diz "over-constrained"; uma dimensão driven não
-   conta como equação.
+**Feito na sessão anterior (não repetir):** desenhar com o rato (Point, Line,
+Rectangle, Circle, snap à grelha, Esc a recuar); restrições, dimensões e graus
+de liberdade no ecrã (glifos, três cores de dimensão, pontos livres, faixa do
+sketch); dimensões editáveis (driving/driven/promote/delete); arco de 3 pontos,
+spline, trim, extend, offset, mirror, pattern; arrastar pontos; projetar
+referências; undo/redo do sketch; DOF por posto (`analyze_dof_detailed`).
 
 **Próximo, por esta ordem:**
 
-1. **Acabamento das dimensões**: posição do texto arrastável
-   (`dimension_text_position`), orientação (horizontal/vertical/paralelo) e
-   `add_dimension_with_intent` com auto-promoção fraca→forte.
-2. **Restantes comandos do sketch**: arco tangente, cónica (rho), texto,
-   importação DXF/SVG, `circular_pattern` exposto na interface, line chain.
-3. **Tabela de restrições** editável e destaque das entidades que ainda têm
-   liberdade: o painel mostra o número, não entidade a entidade.
-4. **Referências associativas**: a geometria projetada é uma fotografia; ligá-la
-   à face/aresta de origem é o que falta para seguir o modelo.
-5. **`find_unconstrained_entities()`** com contagem por entidade (hoje há
-   `free_points` para pontos e o DOF global).
+1. **Dimensões que faltam**: raio/diâmetro de um único círculo ou arco,
+   distância de um ponto a uma linha, e distâncias a geometria tangente.
+2. **Associatividade do sketch à feature**: o extrude/revolve guarda o perfil,
+   não uma referência à feature de sketch; editar o sketch depois não atualiza a
+   feature que dele nasceu.
+3. **Referências re-resolvidas**: as duas referências são guardadas e mostradas,
+   mas ainda não há repair list própria do sketch quando o plano ou a face se
+   move.
+4. **Restantes comandos**: arco tangente, cónica (rho), texto, importação
+   DXF/SVG e `circular_pattern` na interface.
+5. **Tabela de restrições** editável e destaque por entidade de liberdade
+   (`find_unconstrained_entities`).
 
 **Feito antes (não repetir):** nomes estáveis de faces e arestas; referências
 persistentes por feature; seleção ordenada partilhada (viewport + árvore) com
@@ -247,7 +237,7 @@ Based on the approved plan in `plans/creo-workflow-analysis.md`, this document b
 - [ ] **4.3.6** Click triad axes to flip orientation
 
 ### 4.4 Additional Sketch Tools
-- [ ] **4.4.1** Line Chain tool (continuous click-click-click, Esc to end)
+- [x] **4.4.1** Line Chain tool (continuous click-click-click, closes on the first point or a right-click)
 - [ ] **4.4.2** Tangent Arc tool
 - [x] **4.4.3** 3-Point Arc tool
 - [ ] **4.4.4** Conic tool (rho parameter)
@@ -263,6 +253,14 @@ Based on the approved plan in `plans/creo-workflow-analysis.md`, this document b
 - [x] **4.4.14** Mirror and linear pattern from the sketch selection
 - [x] **4.4.15** Project model edges and face boundaries into the sketch
 - [x] **4.4.16** Sketch undo/redo (Ctrl+Z / Ctrl+Y while sketching)
+- [x] **4.4.17** Two positioning references per sketch (orientation + automatic CYS), stored and shown
+- [x] **4.4.18** Sketch edit session with OK/Cancel; empty sketches are not saved; other features wait for OK
+- [x] **4.4.19** Sketch kept in the model history as a feature: saved in the document, re-opened from the tree
+- [x] **4.4.20** Rectangle / circle / polygon modes in the floating bar's dropdowns
+- [x] **4.4.21** Dynamic dimension tool: pick one or two entities, place the text, angle or distance, aligned/horizontal/vertical
+- [x] **4.4.22** Inline dimension editing: double-click opens the value in place; Enter or a click elsewhere commits
+- [x] **4.4.23** Right-click leaves any sketch tool keeping the geometry drawn
+- [x] **4.4.24** Crosshair only for construction tools; shortcuts suppressed while any text field has the keyboard
 
 ---
 
@@ -1049,3 +1047,62 @@ Still missing in the sketch: dimension text position and orientation with
 editable constraint table, per-entity free-DOF highlighting
 (`find_unconstrained_entities`), associative projected references, and
 `circular_pattern` in the interface.
+
+### Sketch edit mode, reviewed (ten UX points)
+
+The sketch received a review pass; these are the changes:
+
+- **Two positioning references.** A sketch stores `references:
+  Vec<SketchReference>`: the orientation reference (the plane or face it was
+  placed on, with its stable reference) and an automatic one (the coordinate
+  system at the origin, or the geometry it came from). `new_sketch` fills both;
+  the strip lists them as R1/R2 and the overlay labels them at the sketch axes.
+- **A sketch is a feature.** `FeatureKind::Sketch { sketch }` in `rcad-doc`
+  (which now depends on `rcad-sketch`). OK stores the sketch in the part history
+  and the document; Cancel leaves without saving; an empty sketch is never
+  added. The strip has OK and Cancel. While the sketch is open,
+  `handle_toolbar_action` refuses Model/Assembly/Analysis actions and
+  extrude/revolve/box refuse too, because the body they would build on is not in
+  the tree yet. A Sketch feature double-clicked in the tree opens back into the
+  editor (`EditDefinition`), and an extrude/revolve with no open sketch uses the
+  selected sketch feature, else the last one.
+- **Constraints in the top bar.** The floating bar's sketch rows list the
+  drawing tools, the command tools and all ten constraints; the left palette
+  keeps the model commands.
+- **Tool modes.** The rectangle, circle and polygon buttons are groups: a click
+  arms the common mode and holding opens the list. Rectangles: two corners,
+  centre + corner, or three points (rotated). Circles: centre + radius, diameter,
+  or tangent to two lines (radius from the strip). Polygons: triangle, pentagon,
+  hexagon (centre + vertex).
+- **Dynamic dimensions.** One click picks a line or a point; a second click on
+  another line gives an angle (non-parallel) or a distance (parallel), on another
+  point a distance (circle/arc centres count as points), and a click on empty
+  space places the text there. An inclined line can be measured aligned,
+  horizontally or vertically (`Distance`, `HorizontalDistance`,
+  `VerticalDistance`, the last two new). The Intent Manager record carries the
+  text position and the orientation. A double-click opens the value in place -
+  no window - and Enter or a click elsewhere commits it, with the text selected
+  so typing replaces it.
+- **Polyline.** A new chain tool: each click adds a segment, the cursor snaps to
+  the chain's own points, closing on the first point closes the loop and leaves
+  the tool. A right-click leaves any tool or pick sequence keeping the geometry.
+- **Cursor and keyboard.** The snap cross and the coordinate readout are drawn
+  only while a construction tool is active; a picking tool leaves the system
+  cursor. `handle_shortcuts` returns early when any widget wants the keyboard, so
+  typing a value never triggers P/L/R/E (or the view number keys).
+
+Tests: the crate covers the projected distances and the two references;
+`sketch_ui` covers the centre and skewed rectangles, the polygons, the diameter
+and tangent circles, the polyline close, the angular dimension geometry; the app
+covers OK/Cancel (including the empty sketch and cancelling an edit), the
+blocked features, opening a sketch from the tree, the document round trip of a
+sketch feature, the dimension workflow (one line, two lines, placement), the
+inline editor (Enter and click elsewhere) and shortcuts staying quiet while
+typing.
+
+Still missing, in order: radius and diameter dimensions for a single circle or
+arc, point-to-line and tangent distances, associative extrude/revolve from a
+stored sketch (the profile is a snapshot), re-resolved sketch references with
+their own repair list, tangent arc/conic/text/DXF/SVG, circular pattern in the
+interface, an editable constraint table and per-entity free-DOF highlighting.
+

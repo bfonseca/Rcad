@@ -588,6 +588,9 @@ fn eval_feature(
                 .map(Some)
                 .map_err(|e| e.to_string())
         }
+        // A sketch is history, not geometry: it keeps the body it found and the
+        // next feature (an extrude or a revolve) reads its profile.
+        FeatureKind::Sketch { .. } => Ok(None),
         FeatureKind::Construction { kind, origin, direction } => {
             let origin_vec = DVec3::from(*origin);
             let dir_vec = DVec3::from(*direction);

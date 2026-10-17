@@ -40,6 +40,11 @@ pub struct Sketch {
     pub reference_geometry: Vec<ReferenceGeometry>,
     /// When true, sketch is waiting for user to select a plane in the viewport
     pub in_placement_mode: bool,
+    /// The two references that position the sketch in the model: the
+    /// orientation reference it was placed on, and the automatic second one
+    /// (the coordinate system at the origin, or the geometry it came from).
+    #[serde(default)]
+    pub references: Vec<SketchReference>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +68,36 @@ pub enum StandardPlane {
     XY,
     YZ,
     ZX,
+}
+
+
+/// Which of the two placing references a [`SketchReference`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SketchReferenceRole {
+    /// The reference the sketch was placed on: it gives the plane and one axis.
+    Orientation,
+    /// The automatic second reference - the coordinate system at the origin, a
+    /// plane, or the geometry the sketch was drawn from - that fixes the other
+    /// direction.
+    Automatic,
+}
+
+/// A reference that positions a sketch in the model.
+///
+/// A sketch always needs two: one orientation reference (the plane or face it
+/// was placed on) and one that fixes the remaining direction. The second one is
+/// automatic: the coordinate system at the origin, or the plane/geometry used
+/// as reference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchReference {
+    /// A stable reference (a datum feature id, a face name), when it has one.
+    pub reference: Option<String>,
+    /// What the sketch strip shows for it.
+    pub label: String,
+    pub role: SketchReferenceRole,
+    /// The reference's origin and direction, in model space.
+    pub origin: [f64; 3],
+    pub direction: [f64; 3],
 }
 
 impl Default for Sketch {
@@ -89,7 +124,21 @@ impl Sketch {
             constrained_constraints: Vec::new(),
             reference_geometry: Vec::new(),
             in_placement_mode: false,
+            references: Vec::new(),
         }
+    }
+
+    /// Set the two references that position the sketch: the orientation one it
+    /// was placed on, and the automatic one that fixes the other direction.
+    pub fn set_references(&mut self, orientation: SketchReference, automatic: SketchReference) {
+        self.references = vec![orientation, automatic];
+    }
+
+    /// The positioning reference with a role, when the sketch has it.
+    pub fn reference(&self, role: SketchReferenceRole) -> Option<&SketchReference> {
+        self.references
+            .iter()
+            .find(|reference| reference.role == role)
     }
 
     pub fn add_point(&mut self, x: f64, y: f64) -> Uuid {
@@ -594,6 +643,14 @@ pub enum Constraint {
     Perpendicular { a: Uuid, b: Uuid },
     Midpoint { point: Uuid, line: Uuid },
     Concentric { a: Uuid, b: Uuid },
+    /// Angle between two lines, in degrees.
+    Angle { a: Uuid, b: Uuid, value: f64 },
+    /// Perpendicular distance between two parallel lines.
+    LineDistance { a: Uuid, b: Uuid, value: f64 },
+    /// The distance between two points measured along X.
+    HorizontalDistance { a: Uuid, b: Uuid, value: f64 },
+    /// The distance between two points measured along Y.
+    VerticalDistance { a: Uuid, b: Uuid, value: f64 },
 }
 
 /// Which relationship [`align_lines`] should impose between two segments.
@@ -718,14 +775,11 @@ fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
         let mut max_err = 0.0f64;
         let constraints = sketch.constraints.clone();
         // A driven (reference) dimension measures; it does not drive.
-        let driven: Vec<(Uuid, Uuid)> = sketch
+        let driven: Vec<Constraint> = sketch
             .constrained_constraints
             .iter()
             .filter(|record| !record.is_driving)
-            .filter_map(|record| match &record.constraint {
-                Constraint::Distance { a, b, .. } => Some((*a, *b)),
-                _ => None,
-            })
+            .map(|record| record.constraint.clone())
             .collect();
         for c in constraints {
             match c {
@@ -760,10 +814,9 @@ fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
                     }
                 }
                 Constraint::Distance { a, b, value } => {
-                    if driven
-                        .iter()
-                        .any(|(da, db)| (da == &a && db == &b) || (da == &b && db == &a))
-                    {
+                    if driven.iter().any(|subject| {
+                        same_subject(subject, &Constraint::Distance { a, b, value })
+                    }) {
                         continue;
                     }
                     let (ax, ay, af) = {
@@ -1056,6 +1109,175 @@ fn iterative_solve(sketch: &mut Sketch) -> Result<(), SketchError> {
                     // Rotate line b until it is perpendicular to line a.
                     align_lines(sketch, a, b, &mut max_err, AlignTarget::Perpendicular);
                 }
+                Constraint::Angle { a, b, value } => {
+                    // Rotate line b about its midpoint (or its fixed end) until
+                    // it sits at the wanted angle to line a.
+                    let segment = |sketch: &Sketch,
+                                   id: Uuid|
+                     -> Option<(Uuid, Uuid, [f64; 2], [f64; 2], bool, bool)> {
+                        let line = sketch.lines.iter().find(|line| line.id == id)?;
+                        let p1 = sketch.point(line.a)?;
+                        let p2 = sketch.point(line.b)?;
+                        Some((line.a, line.b, [p1.x, p1.y], [p2.x, p2.y], p1.fixed, p2.fixed))
+                    };
+                    let Some(first) = segment(sketch, a) else {
+                        continue;
+                    };
+                    let Some(second) = segment(sketch, b) else {
+                        continue;
+                    };
+                    let direction =
+                        |segment: &(Uuid, Uuid, [f64; 2], [f64; 2], bool, bool)| {
+                            [
+                                segment.3[0] - segment.2[0],
+                                segment.3[1] - segment.2[1],
+                            ]
+                        };
+                    let (d1, d2) = (direction(&first), direction(&second));
+                    if d1[0].hypot(d1[1]) < 1e-12 || d2[0].hypot(d2[1]) < 1e-12 {
+                        continue;
+                    }
+                    let current =
+                        (d1[0] * d2[1] - d1[1] * d2[0]).atan2(d1[0] * d2[0] + d1[1] * d2[1]);
+                    let mut delta = value.to_radians() - current;
+                    while delta > std::f64::consts::PI {
+                        delta -= 2.0 * std::f64::consts::PI;
+                    }
+                    while delta < -std::f64::consts::PI {
+                        delta += 2.0 * std::f64::consts::PI;
+                    }
+                    max_err = max_err.max(delta.abs());
+                    if delta.abs() < 1e-12 {
+                        continue;
+                    }
+                    let pivot = if second.4 {
+                        second.2
+                    } else if second.5 {
+                        second.3
+                    } else {
+                        [
+                            (second.2[0] + second.3[0]) * 0.5,
+                            (second.2[1] + second.3[1]) * 0.5,
+                        ]
+                    };
+                    let (sin, cos) = delta.sin_cos();
+                    for (id, point, is_fixed) in
+                        [(second.0, second.2, second.4), (second.1, second.3, second.5)]
+                    {
+                        if is_fixed {
+                            continue;
+                        }
+                        let x = pivot[0]
+                            + (point[0] - pivot[0]) * cos
+                            - (point[1] - pivot[1]) * sin;
+                        let y = pivot[1]
+                            + (point[0] - pivot[0]) * sin
+                            + (point[1] - pivot[1]) * cos;
+                        if let Some(p) = sketch.point_mut(id) {
+                            p.x = x;
+                            p.y = y;
+                        }
+                    }
+                }
+                Constraint::HorizontalDistance { a, b, value } => {
+                    // Move the two points along X until the horizontal distance
+                    // is the wanted one, keeping the midpoint.
+                    let (ax, af) = {
+                        let p = sketch.point(a).ok_or(SketchError::Unknown(a))?;
+                        (p.x, p.fixed)
+                    };
+                    let (bx, bf) = {
+                        let p = sketch.point(b).ok_or(SketchError::Unknown(b))?;
+                        (p.x, p.fixed)
+                    };
+                    let mut d = bx - ax;
+                    max_err = max_err.max((d.abs() - value).abs());
+                    let sign = if d < 0.0 { -1.0 } else { 1.0 };
+                    d = value * sign;
+                    let mid = (ax + bx) * 0.5;
+                    if !af {
+                        if let Some(p) = sketch.point_mut(a) {
+                            p.x = mid - d * 0.5;
+                        }
+                    }
+                    if !bf {
+                        if let Some(p) = sketch.point_mut(b) {
+                            p.x = mid + d * 0.5;
+                        }
+                    }
+                }
+                Constraint::VerticalDistance { a, b, value } => {
+                    let (ay, af) = {
+                        let p = sketch.point(a).ok_or(SketchError::Unknown(a))?;
+                        (p.y, p.fixed)
+                    };
+                    let (by, bf) = {
+                        let p = sketch.point(b).ok_or(SketchError::Unknown(b))?;
+                        (p.y, p.fixed)
+                    };
+                    let mut d = by - ay;
+                    max_err = max_err.max((d.abs() - value).abs());
+                    let sign = if d < 0.0 { -1.0 } else { 1.0 };
+                    d = value * sign;
+                    let mid = (ay + by) * 0.5;
+                    if !af {
+                        if let Some(p) = sketch.point_mut(a) {
+                            p.y = mid - d * 0.5;
+                        }
+                    }
+                    if !bf {
+                        if let Some(p) = sketch.point_mut(b) {
+                            p.y = mid + d * 0.5;
+                        }
+                    }
+                }
+                Constraint::LineDistance { a, b, value } => {
+                    // Slide line b along the normal of line a until the
+                    // perpendicular distance is the wanted one.
+                    let segment = |sketch: &Sketch,
+                                   id: Uuid|
+                     -> Option<(Uuid, Uuid, [f64; 2], [f64; 2], bool, bool)> {
+                        let line = sketch.lines.iter().find(|line| line.id == id)?;
+                        let p1 = sketch.point(line.a)?;
+                        let p2 = sketch.point(line.b)?;
+                        Some((line.a, line.b, [p1.x, p1.y], [p2.x, p2.y], p1.fixed, p2.fixed))
+                    };
+                    let Some(first) = segment(sketch, a) else {
+                        continue;
+                    };
+                    let Some(second) = segment(sketch, b) else {
+                        continue;
+                    };
+                    let direction = [
+                        first.3[0] - first.2[0],
+                        first.3[1] - first.2[1],
+                    ];
+                    let length = direction[0].hypot(direction[1]);
+                    if length < 1e-12 {
+                        continue;
+                    }
+                    let normal = [-direction[1] / length, direction[0] / length];
+                    let signed = (second.2[0] - first.2[0]) * normal[0]
+                        + (second.2[1] - first.2[1]) * normal[1];
+                    let target = if signed < 0.0 { -value } else { value };
+                    let delta = target - signed;
+                    max_err = max_err.max(delta.abs());
+                    if delta.abs() < 1e-12 {
+                        continue;
+                    }
+                    for (id, point, is_fixed) in
+                        [(second.0, second.2, second.4), (second.1, second.3, second.5)]
+                    {
+                        if is_fixed {
+                            continue;
+                        }
+                        if let Some(p) = sketch.point_mut(id) {
+                            p.x = point[0] + normal[0] * delta;
+                            p.y = point[1] + normal[1] * delta;
+                        }
+                    }
+                }
+
                 Constraint::Midpoint { point, line } => {
                     // Point is midpoint of line
                     // First get line endpoints to avoid borrow conflicts
@@ -1141,12 +1363,70 @@ impl Default for ConstraintStrength {
     }
 }
 
+/// Which direction a linear dimension measures along.
+///
+/// An inclined line can be measured along itself, or projected on the sketch
+/// axes; the user picks one when placing the dimension.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DimensionOrientation {
+    /// Along the line itself.
+    #[default]
+    Aligned,
+    /// Along the sketch X axis.
+    Horizontal,
+    /// Along the sketch Y axis.
+    Vertical,
+}
+
 /// Constraint with strength for Intent Manager
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstrainedConstraint {
     pub constraint: Constraint,
     pub strength: ConstraintStrength,
     pub is_driving: bool, // For dimensions: true = driving (modifies geometry), false = driven (reference only)
+    /// Where the user put the dimension's text, in sketch coordinates. None
+    /// means the viewport picks the default offset.
+    #[serde(default)]
+    pub dimension_text_position: Option<[f64; 2]>,
+    /// Which direction an inclined line's length is measured along.
+    #[serde(default)]
+    pub dimension_orientation: DimensionOrientation,
+}
+
+/// True when two constraints are about the same things, ignoring the value.
+///
+/// The Intent Manager record of a dimension is matched to the constraint by its
+/// entities, never by its current number, so editing the number keeps them
+/// together.
+pub fn same_subject(left: &Constraint, right: &Constraint) -> bool {
+    match (left, right) {
+        (
+            Constraint::Distance { a: a1, b: b1, .. }
+            | Constraint::Angle { a: a1, b: b1, .. }
+            | Constraint::LineDistance { a: a1, b: b1, .. }
+            | Constraint::HorizontalDistance { a: a1, b: b1, .. }
+            | Constraint::VerticalDistance { a: a1, b: b1, .. },
+            Constraint::Distance { a: a2, b: b2, .. }
+            | Constraint::Angle { a: a2, b: b2, .. }
+            | Constraint::LineDistance { a: a2, b: b2, .. }
+            | Constraint::HorizontalDistance { a: a2, b: b2, .. }
+            | Constraint::VerticalDistance { a: a2, b: b2, .. },
+        ) => (a1 == a2 && b1 == b2) || (a1 == b2 && b1 == a2),
+        _ => false,
+    }
+}
+
+/// True when the constraint is a dimension: it has a value the user can edit,
+/// a position for its text and a driving/driven flag.
+pub fn is_dimension(constraint: &Constraint) -> bool {
+    matches!(
+        constraint,
+        Constraint::Distance { .. }
+            | Constraint::Angle { .. }
+            | Constraint::LineDistance { .. }
+            | Constraint::HorizontalDistance { .. }
+            | Constraint::VerticalDistance { .. }
+    )
 }
 
 /// Whether a sketch still has freedom left, has none, or asks for more than it
@@ -1302,15 +1582,12 @@ impl<'a> DofModel<'a> {
         // A driven (reference) dimension measures without constraining: it is
         // not an equation at all, and counting it would make a sketch look
         // over-constrained because of a measurement the user asked for.
-        let driven: Vec<(Uuid, Uuid)> = self
+        let driven: Vec<Constraint> = self
             .sketch
             .constrained_constraints
             .iter()
             .filter(|record| !record.is_driving)
-            .filter_map(|record| match &record.constraint {
-                Constraint::Distance { a, b, .. } => Some((*a, *b)),
-                _ => None,
-            })
+            .map(|record| record.constraint.clone())
             .collect();
 
         // A point the solver treats as fixed is pinned even when the constraint
@@ -1358,10 +1635,16 @@ impl<'a> DofModel<'a> {
                     if a == b {
                         continue;
                     }
-                    if driven
-                        .iter()
-                        .any(|(da, db)| (da == a && db == b) || (da == b && db == a))
-                    {
+                    if driven.iter().any(|subject| {
+                        same_subject(
+                            subject,
+                            &Constraint::Distance {
+                                a: *a,
+                                b: *b,
+                                value: *value,
+                            },
+                        )
+                    }) {
                         continue;
                     }
                     if let (Some(pa), Some(pb)) =
@@ -1402,6 +1685,50 @@ impl<'a> DofModel<'a> {
                         );
                     }
                 }
+                Constraint::Angle { a, b, value } => {
+                    if let (Some((a1, a2)), Some((b1, b2))) =
+                        (self.line(variables, *a), self.line(variables, *b))
+                    {
+                        let da = [a2[0] - a1[0], a2[1] - a1[1]];
+                        let db = [b2[0] - b1[0], b2[1] - b1[1]];
+                        let target = value.to_radians();
+                        // sin(current - target) == 0, without the square root.
+                        rows.push(
+                            (da[0] * db[1] - da[1] * db[0]) * target.cos()
+                                - (da[0] * db[0] + da[1] * db[1]) * target.sin(),
+                        );
+                    }
+                }
+                Constraint::HorizontalDistance { a, b, value } => {
+                    if let (Some(pa), Some(pb)) =
+                        (self.point(variables, *a), self.point(variables, *b))
+                    {
+                        let dx = pb[0] - pa[0];
+                        rows.push(dx * dx - value * value);
+                    }
+                }
+                Constraint::VerticalDistance { a, b, value } => {
+                    if let (Some(pa), Some(pb)) =
+                        (self.point(variables, *a), self.point(variables, *b))
+                    {
+                        let dy = pb[1] - pa[1];
+                        rows.push(dy * dy - value * value);
+                    }
+                }
+                Constraint::LineDistance { a, b, value } => {
+                    if let (Some((a1, a2)), Some((b1, _))) =
+                        (self.line(variables, *a), self.line(variables, *b))
+                    {
+                        let da = [a2[0] - a1[0], a2[1] - a1[1]];
+                        let length_squared = da[0] * da[0] + da[1] * da[1];
+                        if length_squared > 1e-18 {
+                            let cross =
+                                da[0] * (b1[1] - a1[1]) - da[1] * (b1[0] - a1[0]);
+                            rows.push(cross * cross / length_squared - value * value);
+                        }
+                    }
+                }
+
                 Constraint::EqualLength { a, b } => {
                     if let (Some((a1, a2)), Some((b1, b2))) =
                         (self.line(variables, *a), self.line(variables, *b))
@@ -1643,20 +1970,59 @@ impl Sketch {
     }
 
     /// Add a dimension constraint with Intent Manager support (driving vs driven)
-    pub fn add_dimension(&mut self, a: Uuid, b: Uuid, value: f64, driving: bool, strong: bool) -> Uuid {
-        let id = Uuid::new_v4();
-        self.constraints.push(Constraint::Distance { a, b, value });
+    pub fn add_dimension(
+        &mut self,
+        a: Uuid,
+        b: Uuid,
+        value: f64,
+        driving: bool,
+        strong: bool,
+    ) -> Uuid {
+        self.add_dimension_constraint(
+            Constraint::Distance { a, b, value },
+            driving,
+            strong,
+            None,
+            DimensionOrientation::default(),
+        );
+        Uuid::new_v4()
+    }
+
+    /// Add any dimension constraint (distance, angle or line distance) with its
+    /// Intent Manager record and its on-screen placement.
+    pub fn add_dimension_constraint(
+        &mut self,
+        constraint: Constraint,
+        driving: bool,
+        strong: bool,
+        text_position: Option<[f64; 2]>,
+        orientation: DimensionOrientation,
+    ) -> bool {
+        if !is_dimension(&constraint) {
+            return false;
+        }
+        self.constraints.push(constraint.clone());
         self.constrained_constraints.push(ConstrainedConstraint {
-            constraint: Constraint::Distance { a, b, value },
-            strength: if strong { ConstraintStrength::Strong } else { ConstraintStrength::Weak },
+            constraint,
+            strength: if strong {
+                ConstraintStrength::Strong
+            } else {
+                ConstraintStrength::Weak
+            },
             is_driving: driving,
+            dimension_text_position: text_position,
+            dimension_orientation: orientation,
         });
-        id
+        true
     }
 
     /// Promote a weak constraint to strong (user explicitly adds dimension)
     pub fn promote_to_strong(&mut self, constraint_id: Uuid) -> bool {
-        if let Some(cc) = self.constrained_constraints.iter_mut().find(|c| c.constraint_id() == Some(constraint_id)) {
+        if let Some(cc) = self
+            .constrained_constraints
+            .iter_mut()
+            .find(|c| c.constraint_id() == Some(constraint_id))
+        {
             cc.strength = ConstraintStrength::Strong;
             return true;
         }
@@ -1665,82 +2031,139 @@ impl Sketch {
 
     /// Get all weak constraints that could be promoted
     pub fn weak_constraints(&self) -> Vec<&ConstrainedConstraint> {
-        self.constrained_constraints.iter()
+        self.constrained_constraints
+            .iter()
             .filter(|c| c.strength == ConstraintStrength::Weak)
             .collect()
     }
 
     /// Get all driving dimensions
     pub fn driving_dimensions(&self) -> Vec<&ConstrainedConstraint> {
-        self.constrained_constraints.iter()
+        self.constrained_constraints
+            .iter()
             .filter(|c| c.is_driving)
             .collect()
     }
 
     /// Get all driven dimensions (reference only)
     pub fn driven_dimensions(&self) -> Vec<&ConstrainedConstraint> {
-        self.constrained_constraints.iter()
+        self.constrained_constraints
+            .iter()
             .filter(|c| !c.is_driving)
             .collect()
     }
 
-    /// The points behind a dimension, when the constraint at `index` is one.
-    fn dimension_points(&self, index: usize) -> Option<(Uuid, Uuid, f64)> {
-        match self.constraints.get(index) {
-            Some(Constraint::Distance { a, b, value }) => Some((*a, *b, *value)),
+    /// The constraint behind a dimension index, when it is a dimension.
+    pub fn dimension_constraint(&self, index: usize) -> Option<&Constraint> {
+        let constraint = self.constraints.get(index)?;
+        is_dimension(constraint).then_some(constraint)
+    }
+
+    /// The Intent Manager record of the dimension at `index`.
+    pub fn dimension_record(&self, index: usize) -> Option<&ConstrainedConstraint> {
+        let constraint = self.dimension_constraint(index)?;
+        let position = self.record_index(constraint)?;
+        self.constrained_constraints.get(position)
+    }
+
+    /// Where the record of this constraint is, matched by its subjects.
+    fn record_index(&self, constraint: &Constraint) -> Option<usize> {
+        self.constrained_constraints
+            .iter()
+            .position(|record| same_subject(&record.constraint, constraint))
+    }
+
+    /// The value the dimension at `index` holds.
+    pub fn dimension_value(&self, index: usize) -> Option<f64> {
+        match self.dimension_constraint(index)? {
+            Constraint::Distance { value, .. }
+            | Constraint::Angle { value, .. }
+            | Constraint::LineDistance { value, .. }
+            | Constraint::HorizontalDistance { value, .. }
+            | Constraint::VerticalDistance { value, .. } => Some(*value),
             _ => None,
         }
-    }
-
-    /// The Intent Manager record of the dimension between two points.
-    fn dimension_record(&self, a: Uuid, b: Uuid) -> Option<usize> {
-        self.constrained_constraints.iter().position(|record| {
-            matches!(&record.constraint, Constraint::Distance { a: ra, b: rb, .. }
-                if (ra == &a && rb == &b) || (ra == &b && rb == &a))
-        })
-    }
-
-    /// The value the dimension at `index` holds the distance at.
-    pub fn dimension_value(&self, index: usize) -> Option<f64> {
-        self.dimension_points(index).map(|(_, _, value)| value)
     }
 
     /// Whether the dimension at `index` drives the geometry or only reports it.
     /// A dimension with no Intent Manager record is a driving one.
     pub fn dimension_is_driving(&self, index: usize) -> Option<bool> {
-        let (a, b, _) = self.dimension_points(index)?;
+        self.dimension_constraint(index)?;
         Some(
-            self.dimension_record(a, b)
-                .map(|position| self.constrained_constraints[position].is_driving)
+            self.dimension_record(index)
+                .map(|record| record.is_driving)
                 .unwrap_or(true),
         )
     }
 
     /// Is the dimension at `index` weak (put there by the Intent Manager)?
     pub fn dimension_is_weak(&self, index: usize) -> bool {
-        let Some((a, b, _)) = self.dimension_points(index) else {
+        self.dimension_record(index)
+            .map(|record| record.strength == ConstraintStrength::Weak)
+            .unwrap_or(false)
+    }
+
+    /// Where the dimension's text was placed, when the user placed it.
+    pub fn dimension_text_position(&self, index: usize) -> Option<[f64; 2]> {
+        self.dimension_record(index)?.dimension_text_position
+    }
+
+    /// Which direction the dimension measures along.
+    pub fn dimension_orientation(&self, index: usize) -> DimensionOrientation {
+        self.dimension_record(index)
+            .map(|record| record.dimension_orientation)
+            .unwrap_or_default()
+    }
+
+    /// Move a dimension's text and change the direction it measures along.
+    pub fn set_dimension_layout(
+        &mut self,
+        index: usize,
+        text_position: Option<[f64; 2]>,
+        orientation: DimensionOrientation,
+    ) -> bool {
+        let Some(constraint) = self.dimension_constraint(index).cloned() else {
             return false;
         };
-        self.dimension_record(a, b)
-            .map(|position| {
-                self.constrained_constraints[position].strength == ConstraintStrength::Weak
-            })
-            .unwrap_or(false)
+        match self.record_index(&constraint) {
+            Some(position) => {
+                self.constrained_constraints[position].dimension_text_position = text_position;
+                self.constrained_constraints[position].dimension_orientation = orientation;
+            }
+            None => self.constrained_constraints.push(ConstrainedConstraint {
+                constraint,
+                strength: ConstraintStrength::Strong,
+                is_driving: true,
+                dimension_text_position: text_position,
+                dimension_orientation: orientation,
+            }),
+        }
+        true
     }
 
     /// Change a dimension's value, keeping its Intent Manager record in step.
     pub fn set_dimension_value(&mut self, index: usize, value: f64) -> bool {
-        let Some((a, b, _)) = self.dimension_points(index) else {
+        let Some(constraint) = self.dimension_constraint(index).cloned() else {
             return false;
         };
-        if let Some(Constraint::Distance { value: current, .. }) = self.constraints.get_mut(index) {
-            *current = value;
+        match self.constraints.get_mut(index) {
+            Some(
+                Constraint::Distance { value: current, .. }
+                | Constraint::Angle { value: current, .. }
+                | Constraint::LineDistance { value: current, .. }
+                | Constraint::HorizontalDistance { value: current, .. }
+                | Constraint::VerticalDistance { value: current, .. },
+            ) => *current = value,
+            _ => return false,
         }
-        if let Some(position) = self.dimension_record(a, b) {
-            if let Constraint::Distance { value: recorded, .. } =
-                &mut self.constrained_constraints[position].constraint
-            {
-                *recorded = value;
+        if let Some(position) = self.record_index(&constraint) {
+            match &mut self.constrained_constraints[position].constraint {
+                Constraint::Distance { value: recorded, .. }
+                | Constraint::Angle { value: recorded, .. }
+                | Constraint::LineDistance { value: recorded, .. }
+                | Constraint::HorizontalDistance { value: recorded, .. }
+                | Constraint::VerticalDistance { value: recorded, .. } => *recorded = value,
+                _ => {}
             }
         }
         true
@@ -1751,15 +2174,17 @@ impl Sketch {
     /// A driven dimension is skipped by the solver, so its value stays a
     /// reference measurement instead of moving the geometry.
     pub fn set_dimension_driving(&mut self, index: usize, driving: bool) -> bool {
-        let Some((a, b, value)) = self.dimension_points(index) else {
+        let Some(constraint) = self.dimension_constraint(index).cloned() else {
             return false;
         };
-        match self.dimension_record(a, b) {
+        match self.record_index(&constraint) {
             Some(position) => self.constrained_constraints[position].is_driving = driving,
             None => self.constrained_constraints.push(ConstrainedConstraint {
-                constraint: Constraint::Distance { a, b, value },
+                constraint,
                 strength: ConstraintStrength::Strong,
                 is_driving: driving,
+                dimension_text_position: None,
+                dimension_orientation: DimensionOrientation::default(),
             }),
         }
         true
@@ -1767,10 +2192,10 @@ impl Sketch {
 
     /// Promote a weak dimension to a strong one. Returns true when it changed.
     pub fn promote_dimension(&mut self, index: usize) -> bool {
-        let Some((a, b, value)) = self.dimension_points(index) else {
+        let Some(constraint) = self.dimension_constraint(index).cloned() else {
             return false;
         };
-        match self.dimension_record(a, b) {
+        match self.record_index(&constraint) {
             Some(position) => {
                 if self.constrained_constraints[position].strength == ConstraintStrength::Strong {
                     return false;
@@ -1780,9 +2205,11 @@ impl Sketch {
             }
             None => {
                 self.constrained_constraints.push(ConstrainedConstraint {
-                    constraint: Constraint::Distance { a, b, value },
+                    constraint,
                     strength: ConstraintStrength::Strong,
                     is_driving: true,
+                    dimension_text_position: None,
+                    dimension_orientation: DimensionOrientation::default(),
                 });
                 true
             }
@@ -1795,13 +2222,14 @@ impl Sketch {
             return false;
         }
         let removed = self.constraints.remove(index);
-        if let Constraint::Distance { a, b, .. } = removed {
-            if let Some(position) = self.dimension_record(a, b) {
+        if is_dimension(&removed) {
+            if let Some(position) = self.record_index(&removed) {
                 self.constrained_constraints.remove(position);
             }
         }
         true
     }
+
     /// Trim a line back to its nearest intersection with another entity.
     ///
     /// Returns `Err(SketchError::Unknown)` when `entity_id` is not a line, and
@@ -2591,6 +3019,170 @@ mod dof_and_dimension_tests {
         assert!(sketch.constraints.is_empty());
         assert!(sketch.constrained_constraints.is_empty());
         assert_eq!(sketch.dimension_value(index), None);
+    }
+
+    /// A sketch records the two references that position it: the orientation
+    /// one it was placed on and the automatic one.
+    #[test]
+    fn a_sketch_records_its_two_positioning_references() {
+        let mut sketch = Sketch::new("refs");
+        sketch.set_references(
+            SketchReference {
+                reference: Some("plane-id".to_string()),
+                label: "FRONT_PLANE".to_string(),
+                role: SketchReferenceRole::Orientation,
+                origin: [0.0, 0.0, 0.0],
+                direction: [1.0, 0.0, 0.0],
+            },
+            SketchReference {
+                reference: None,
+                label: "CYS (origin)".to_string(),
+                role: SketchReferenceRole::Automatic,
+                origin: [0.0, 0.0, 0.0],
+                direction: [0.0, 0.0, 1.0],
+            },
+        );
+        assert_eq!(sketch.references.len(), 2);
+        assert_eq!(
+            sketch
+                .reference(SketchReferenceRole::Orientation)
+                .map(|reference| reference.label.as_str()),
+            Some("FRONT_PLANE")
+        );
+        assert_eq!(
+            sketch
+                .reference(SketchReferenceRole::Automatic)
+                .map(|reference| reference.label.as_str()),
+            Some("CYS (origin)")
+        );
+    }
+
+    /// The angle constraint rotates the second line to the wanted angle.
+    #[test]
+    fn an_angle_constraint_turns_the_second_line() {
+        let mut sketch = Sketch::new("angle");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(10.0, 0.0);
+        let first = sketch.add_line(a, b);
+        let c = sketch.add_point(0.0, 10.0);
+        let d = sketch.add_point(10.0, 10.0);
+        let second = sketch.add_line(c, d);
+        sketch.constraints.push(Constraint::Angle {
+            a: first,
+            b: second,
+            value: 45.0,
+        });
+
+        sketch.solve().unwrap();
+
+        let first_direction = {
+            let line = sketch.lines[0].clone();
+            let pa = sketch.point(line.a).unwrap();
+            let pb = sketch.point(line.b).unwrap();
+            [pb.x - pa.x, pb.y - pa.y]
+        };
+        let second_direction = {
+            let line = sketch.lines[1].clone();
+            let pa = sketch.point(line.a).unwrap();
+            let pb = sketch.point(line.b).unwrap();
+            [pb.x - pa.x, pb.y - pa.y]
+        };
+        let angle = (second_direction[0] * first_direction[1]
+            - second_direction[1] * first_direction[0])
+            .atan2(
+                second_direction[0] * first_direction[0]
+                    + second_direction[1] * first_direction[1],
+            )
+            .to_degrees()
+            .abs();
+        assert!((angle - 45.0).abs() < 1e-3, "angle is {angle}");
+    }
+
+    /// The line-distance constraint slides the second line's distance.
+    #[test]
+    fn a_line_distance_constraint_moves_the_second_line() {
+        let mut sketch = Sketch::new("lines");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(20.0, 0.0);
+        let first = sketch.add_line(a, b);
+        let c = sketch.add_point(0.0, 3.0);
+        let d = sketch.add_point(20.0, 3.0);
+        let second = sketch.add_line(c, d);
+        sketch.constraints.push(Constraint::LineDistance {
+            a: first,
+            b: second,
+            value: 8.0,
+        });
+
+        sketch.solve().unwrap();
+
+        let moved = sketch.point(c).unwrap();
+        assert!((moved.y - 8.0).abs() < 1e-3, "the line did not move: {moved:?}");
+    }
+
+    /// A dimension stores its text position and the direction it measures.
+    #[test]
+    fn a_dimension_keeps_its_placement_and_orientation() {
+        let mut sketch = Sketch::new("layout");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(30.0, 40.0);
+        let index = sketch.constraints.len();
+        assert!(sketch.add_dimension_constraint(
+            Constraint::Distance { a, b, value: 50.0 },
+            true,
+            true,
+            Some([10.0, 60.0]),
+            DimensionOrientation::Horizontal,
+        ));
+        assert_eq!(sketch.dimension_text_position(index), Some([10.0, 60.0]));
+        assert_eq!(
+            sketch.dimension_orientation(index),
+            DimensionOrientation::Horizontal
+        );
+
+        assert!(sketch.set_dimension_layout(
+            index,
+            Some([20.0, 70.0]),
+            DimensionOrientation::Vertical
+        ));
+        assert_eq!(sketch.dimension_text_position(index), Some([20.0, 70.0]));
+        assert_eq!(
+            sketch.dimension_orientation(index),
+            DimensionOrientation::Vertical
+        );
+    }
+
+    /// An angle is a dimension too: it can be driven, promoted and removed.
+    #[test]
+    fn an_angle_dimension_is_a_dimension() {
+        let mut sketch = Sketch::new("angle dimension");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(10.0, 0.0);
+        let first = sketch.add_line(a, b);
+        let c = sketch.add_point(0.0, 10.0);
+        let d = sketch.add_point(10.0, 10.0);
+        let second = sketch.add_line(c, d);
+        let index = sketch.constraints.len();
+        assert!(sketch.add_dimension_constraint(
+            Constraint::Angle {
+                a: first,
+                b: second,
+                value: 90.0,
+            },
+            true,
+            false,
+            Some([5.0, 5.0]),
+            DimensionOrientation::Aligned,
+        ));
+        assert_eq!(sketch.dimension_value(index), Some(90.0));
+        assert_eq!(sketch.dimension_is_driving(index), Some(true));
+        assert!(sketch.dimension_is_weak(index));
+        assert!(sketch.promote_dimension(index));
+        assert!(!sketch.dimension_is_weak(index));
+        assert!(sketch.set_dimension_value(index, 60.0));
+        assert_eq!(sketch.dimension_value(index), Some(60.0));
+        assert!(sketch.remove_constraint(index));
+        assert!(sketch.constraints.is_empty());
     }
 }
 

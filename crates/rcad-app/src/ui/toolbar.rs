@@ -243,6 +243,7 @@ pub fn feature_kind_icon_id(kind: &FeatureKind) -> Option<&'static str> {
         FeatureKind::Loft { .. } => "features-swept-blend",
         FeatureKind::Boundary { .. } => "surfaces-surface-boundary",
         FeatureKind::Thicken { .. } => "surfaces-surface-thicken",
+        FeatureKind::Sketch { .. } => "sketch-sketch",
         // The rcad-icons files are datum/datum-plane.png etc, so the id is
         // "datum-datum-plane" - the category is part of the file name too.
         FeatureKind::Construction { kind, .. } => match kind {

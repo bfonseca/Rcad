@@ -9,6 +9,7 @@ use rcad_doc::{ConstructionKind, FeatureKind, Part};
 use std::collections::HashMap;
 
 use super::toolbar::{IconTextures, IconTheme, ToolbarAction};
+use crate::sketch_ui::SketchTool;
 
 /// How long the button must be held to open the group menu instead of acting.
 const LONG_PRESS_SECONDS: f64 = 0.35;
@@ -57,6 +58,8 @@ pub enum FloatingAction {
     /// `None` means every datum kind, `Some` means just that one.
     ToggleDatums(Option<DatumKind>),
     Toolbar(ToolbarAction),
+    /// Arm a sketch tool (the dropdowns pick the mode).
+    SketchTool(SketchTool),
     /// Leave component placement mode.
     CancelPlacement,
 }
@@ -65,6 +68,10 @@ pub enum FloatingAction {
 enum Group {
     Datums,
     Analysis,
+    /// Sketch tool groups: click arms the common mode, hold opens the list.
+    Rectangles,
+    Circles,
+    Polygons,
 }
 
 /// The floating bar state.
@@ -180,24 +187,49 @@ impl FloatingBar {
                             );
                         });
 
-                        // Second row: only while a sketch is being edited.
+                        // While a sketch is being edited the bar shows the
+                        // drawing tools, then the constraints and the command
+                        // tools, so nothing lives only in a menu.
                         if sketching {
                             ui.separator();
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
+                                self.sketch_tool_button(ui, "sketch-line", "Line (L)", SketchTool::Line, theme, on_action);
+                                self.sketch_tool_button(ui, "curves-curve-composite", "Polyline: click segments, close on the first point, right-click stops", SketchTool::LineChain, theme, on_action);
+                                self.group_button(ui, Group::Rectangles, "sketch-rectangle", theme, on_action);
+                                self.group_button(ui, Group::Circles, "sketch-circle-center", theme, on_action);
+                                self.group_button(ui, Group::Polygons, "sketch-polygon", theme, on_action);
+                                self.sketch_tool_button(ui, "sketch-arc-3point", "3-point arc", SketchTool::Arc3Point, theme, on_action);
+                                self.sketch_tool_button(ui, "sketch-spline", "Spline (Enter to finish)", SketchTool::Spline, theme, on_action);
+                                self.sketch_tool_button(ui, "sketch-point", "Point (P)", SketchTool::Point, theme, on_action);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
                                 for (icon, tooltip, action) in [
-                                    ("sketch-line", "Line (L)", ToolbarAction::SketchLine),
-                                    ("sketch-rectangle", "Rectangle (R)", ToolbarAction::SketchRectangle),
-                                    ("sketch-circle-center", "Circle", ToolbarAction::SketchCircle),
-                                    ("sketch-arc-3point", "Arc", ToolbarAction::SketchArc),
-                                    ("sketch-spline", "Spline", ToolbarAction::SketchSpline),
-                                    ("sketch-point", "Point (P)", ToolbarAction::SketchPoint),
                                     ("sketch-trim", "Trim", ToolbarAction::SketchTrim),
+                                    ("sketch-extend-line", "Extend", ToolbarAction::SketchExtend),
                                     ("sketch-offset-edge", "Offset", ToolbarAction::SketchOffset),
                                     ("sketch-mirror-sketch", "Mirror", ToolbarAction::SketchMirror),
+                                    ("edit-pattern-direction", "Pattern", ToolbarAction::SketchPattern),
+                                    ("sketch-project-edge", "Project references", ToolbarAction::SketchProjectReferences),
+                                    ("sketch-dimension", "Dimension", ToolbarAction::SketchDimension),
+                                ] {
+                                    self.icon_button(ui, icon, tooltip, theme, on_action, || {
+                                        FloatingAction::Toolbar(action.clone())
+                                    });
+                                }
+                                ui.separator();
+                                for (icon, tooltip, action) in [
                                     ("constraints-horizontal", "Horizontal", ToolbarAction::SketchConstraintHorizontal),
                                     ("constraints-vertical", "Vertical", ToolbarAction::SketchConstraintVertical),
-                                    ("sketch-dimension", "Dimension", ToolbarAction::SketchDimension),
+                                    ("constraints-parallel", "Parallel", ToolbarAction::SketchConstraintParallel),
+                                    ("constraints-perpendicular", "Perpendicular", ToolbarAction::SketchConstraintPerpendicular),
+                                    ("constraints-tangent", "Tangent", ToolbarAction::SketchConstraintTangent),
+                                    ("constraints-equal", "Equal", ToolbarAction::SketchConstraintEqual),
+                                    ("constraints-symmetric", "Symmetric", ToolbarAction::SketchConstraintSymmetric),
+                                    ("constraints-concentric", "Concentric", ToolbarAction::SketchConstraintConcentric),
+                                    ("constraints-midpoint", "Midpoint", ToolbarAction::SketchConstraintMidpoint),
+                                    ("constraints-coincident", "Coincident", ToolbarAction::SketchConstraintCoincident),
                                 ] {
                                     self.icon_button(ui, icon, tooltip, theme, on_action, || {
                                         FloatingAction::Toolbar(action.clone())
@@ -258,6 +290,18 @@ impl FloatingBar {
                 "Click: measure. Hold: choose an analysis tool.",
                 FloatingAction::Toolbar(ToolbarAction::AnalysisMeasure),
             ),
+            Group::Rectangles => (
+                "Click: rectangle from two corners. Hold: centre or skewed rectangle.",
+                FloatingAction::SketchTool(SketchTool::Rectangle),
+            ),
+            Group::Circles => (
+                "Click: circle from its centre. Hold: diameter or tangent circle.",
+                FloatingAction::SketchTool(SketchTool::Circle),
+            ),
+            Group::Polygons => (
+                "Click: triangle. Hold: triangle, pentagon or hexagon.",
+                FloatingAction::SketchTool(SketchTool::Polygon(3)),
+            ),
         };
 
         let response = self.icon_response(ui, icon, tooltip, theme);
@@ -296,6 +340,21 @@ impl FloatingBar {
         if response.clicked() {
             on_action(make());
         }
+    }
+
+    /// A button that arms one sketch tool.
+    fn sketch_tool_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        icon: &'static str,
+        tooltip: &str,
+        tool: SketchTool,
+        theme: IconTheme,
+        on_action: &mut dyn FnMut(FloatingAction),
+    ) {
+        self.icon_button(ui, icon, tooltip, theme, on_action, || {
+            FloatingAction::SketchTool(tool)
+        });
     }
 
     fn icon_response(
@@ -372,6 +431,19 @@ impl FloatingBar {
                             ] {
                                 if ui.button(label).clicked() {
                                     chosen = Some(FloatingAction::Toolbar(action));
+                                }
+                            }
+                        }
+                        Group::Rectangles | Group::Circles | Group::Polygons => {
+                            let (title, tools): (&str, &[SketchTool]) = match group {
+                                Group::Rectangles => ("Rectangle", &SketchTool::RECTANGLES),
+                                Group::Circles => ("Circle", &SketchTool::CIRCLES),
+                                _ => ("Polygon", &SketchTool::POLYGONS),
+                            };
+                            ui.label(egui::RichText::new(title).strong());
+                            for tool in tools {
+                                if ui.button(tool.label()).clicked() {
+                                    chosen = Some(FloatingAction::SketchTool(*tool));
                                 }
                             }
                         }

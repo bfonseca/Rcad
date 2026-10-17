@@ -21,7 +21,10 @@ use rcad_doc::{
 use rcad_features;
 use rcad_occt::OcctBackend;
 use rcad_param::{ShapeCache};
-use rcad_sketch::{ReferenceGeometryKind, Sketch};
+use rcad_sketch::{
+    Constraint, DimensionOrientation, ReferenceGeometryKind, Sketch, SketchReference,
+    SketchReferenceRole,
+};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use crossbeam_channel::{bounded, Sender, Receiver};
@@ -143,6 +146,13 @@ pub struct RcadApp {
     /// True once the dimension menu has been drawn a frame, so the click that
     /// opened it does not close it straight away.
     dimension_menu_was_shown: bool,
+    /// The sketch feature being edited, when the session opened an existing one.
+    /// None means OK will add a new Sketch feature to the history.
+    sketch_feature: Option<Uuid>,
+    /// What the dynamic dimension tool has picked so far.
+    dimension_picks: Vec<(Uuid, sketch_ui::SketchEntityKind)>,
+    /// Which direction the next linear dimension measures along.
+    dimension_orientation: DimensionOrientation,
     /// The sketch point the mouse is dragging.
     dragging_point: Option<Uuid>,
     /// Parameters the command tools read from the sketch strip.
@@ -231,14 +241,17 @@ pub enum SelectionQuery {
 }
 
 /// The in-place value editor of a sketch dimension.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DimensionEditor {
-    /// Index of the Distance constraint in the sketch.
+    /// Index of the dimension constraint in the sketch.
     pub index: usize,
     /// The value as the user is typing it.
-    pub value: f64,
-    /// Where the editor opens, in screen points.
+    pub text: String,
+    /// Where the editor opens when the dimension is not on screen.
     pub at: egui::Pos2,
+    /// True until the field has taken the focus and selected its text, so
+    /// typing replaces the value instead of appending to it.
+    pub fresh: bool,
 }
 
 /// Transient state for the feature dialog's "add parameter" row.
@@ -323,6 +336,9 @@ impl RcadApp {
             selected_dimension: None,
             dimension_menu: None,
             dimension_menu_was_shown: false,
+            sketch_feature: None,
+            dimension_picks: Vec::new(),
+            dimension_orientation: DimensionOrientation::default(),
             dragging_point: None,
             tool_params: sketch_ui::ToolParams::default(),
             viewport_rect: None,
@@ -861,6 +877,10 @@ impl RcadApp {
                             draft: &self.sketch_draft,
                             cursor: sketch_cursor,
                             selected_dimension: self.selected_dimension,
+                            editing_dimension: self
+                                .dimension_editor
+                                .as_ref()
+                                .map(|editor| editor.index),
                         },
                     );
                 }
@@ -2261,9 +2281,41 @@ impl RcadApp {
         self.undo_stack.push(self.project.clone());
         let mut sketch = rcad_sketch::Sketch::new("Sketch1");
 
+        // The orientation reference is what the plane came from; the second one
+        // is automatic: the coordinate system at the origin (or the plane's own
+        // normal) fixes the remaining direction.
+        let (orientation_label, orientation_reference) = self
+            .selection
+            .items()
+            .iter()
+            .find_map(|item| match item {
+                Selected::Datum { feature, label } => Some((label.clone(), Some(feature.to_string()))),
+                Selected::Face {
+                    reference, label, ..
+                } => Some((label.clone(), Some(reference.clone()))),
+                _ => None,
+            })
+            .unwrap_or_else(|| ("Default plane".to_string(), None));
+
         match self.selection_plane() {
             Some((origin, normal, x_direction)) => {
                 sketch.set_sketch_plane(origin, normal, x_direction);
+                sketch.set_references(
+                    SketchReference {
+                        reference: orientation_reference,
+                        label: orientation_label,
+                        role: SketchReferenceRole::Orientation,
+                        origin,
+                        direction: x_direction,
+                    },
+                    SketchReference {
+                        reference: None,
+                        label: "CYS (origin)".to_string(),
+                        role: SketchReferenceRole::Automatic,
+                        origin: [0.0; 3],
+                        direction: normal,
+                    },
+                );
                 self.sketch_plane = Some((origin, normal, x_direction));
                 self.sketch_plane_reference = self.selection_plane_reference();
                 // A sketch is drawn face-on. From the default orbit direction
@@ -2283,6 +2335,22 @@ impl RcadApp {
                 // No plane in the selection: ask for one and wait for it. The
                 // grid is not drawn while the sketch has no plane of its own.
                 sketch.in_placement_mode = true;
+                sketch.set_references(
+                    SketchReference {
+                        reference: None,
+                        label: orientation_label,
+                        role: SketchReferenceRole::Orientation,
+                        origin: [0.0; 3],
+                        direction: [1.0, 0.0, 0.0],
+                    },
+                    SketchReference {
+                        reference: None,
+                        label: "CYS (origin)".to_string(),
+                        role: SketchReferenceRole::Automatic,
+                        origin: [0.0; 3],
+                        direction: [0.0, 0.0, 1.0],
+                    },
+                );
                 self.sketch_plane = Some(([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]));
                 self.sketch_plane_reference = None;
                 self.status = Some(
@@ -2293,7 +2361,7 @@ impl RcadApp {
         }
 
         // A fresh sketch starts with no tool, no selection, no history and no
-        // open editor.
+        // open editor. It also starts a new session: OK will add a feature.
         self.sketch_draft.begin(SketchTool::Select);
         self.sketch_selection.clear();
         self.sketch_hover = None;
@@ -2303,7 +2371,177 @@ impl RcadApp {
         self.selected_dimension = None;
         self.dimension_menu = None;
         self.dragging_point = None;
+        self.sketch_feature = None;
+        self.dimension_picks.clear();
+        self.dimension_orientation = DimensionOrientation::default();
         self.sketch = Some(sketch);
+    }
+
+    /// Open an existing Sketch feature for editing.
+    pub fn edit_sketch_feature(&mut self, feature: Uuid) -> Result<(), String> {
+        if self.sketch.is_some() {
+            return Err("Finish (OK) or cancel the sketch that is open first.".to_string());
+        }
+        let part = self
+            .get_active_part()
+            .ok_or_else(|| "No active part.".to_string())?;
+        let candidate = part
+            .features
+            .iter()
+            .find(|candidate| candidate.id == feature)
+            .ok_or_else(|| "That feature no longer exists.".to_string())?;
+        let FeatureKind::Sketch { sketch } = &candidate.kind else {
+            return Err("That feature is not a sketch.".to_string());
+        };
+        let sketch = sketch.clone();
+        let name = candidate.name.clone();
+        let (origin, normal, x_direction) = (
+            sketch.plane_origin,
+            sketch.plane_normal,
+            sketch.plane_x_axis,
+        );
+        let mut camera = self.camera.clone();
+        camera.look_from(glam::Vec3::new(
+            normal[0] as f32,
+            normal[1] as f32,
+            normal[2] as f32,
+        ));
+        self.camera = camera;
+        self.needs_fit = false;
+        self.sketch_plane = Some((origin, normal, x_direction));
+        self.sketch_plane_reference = sketch
+            .reference(SketchReferenceRole::Orientation)
+            .and_then(|reference| reference.reference.clone());
+        self.sketch_draft.begin(SketchTool::Select);
+        self.sketch_selection.clear();
+        self.sketch_hover = None;
+        self.sketch_undo.clear();
+        self.sketch_redo.clear();
+        self.dimension_editor = None;
+        self.selected_dimension = None;
+        self.dimension_menu = None;
+        self.dragging_point = None;
+        self.dimension_picks.clear();
+        self.dimension_orientation = DimensionOrientation::default();
+        self.sketch_feature = Some(feature);
+        self.sketch = Some(sketch);
+        self.last_error = None;
+        self.status = Some(format!("Editing {name}. OK keeps the changes, Cancel drops them."));
+        Ok(())
+    }
+
+    /// OK: keep the sketch. An empty sketch is not added to the history.
+    pub fn confirm_sketch(&mut self) {
+        let Some(sketch) = self.sketch.clone() else {
+            return;
+        };
+        if !sketch_has_geometry(&sketch) {
+            self.status =
+                Some("The sketch is empty: nothing was added to the history.".to_string());
+            self.close_sketch_session();
+            return;
+        }
+        self.undo_stack.push(self.project.clone());
+        let editing = self.sketch_feature;
+        let mut feature_name = None;
+        if let Some(part) = self.get_active_part_mut() {
+            let updated = editing.and_then(|id| {
+                part.features
+                    .iter_mut()
+                    .find(|feature| feature.id == id)
+                    .map(|feature| {
+                        feature.kind = FeatureKind::Sketch {
+                            sketch: sketch.clone(),
+                        };
+                        feature.name.clone()
+                    })
+            });
+            feature_name = match updated {
+                Some(name) => Some(name),
+                None => {
+                    let name = rcad_features::unique_feature_name(part, "Sketch");
+                    part.features.push(Feature::new(
+                        name.clone(),
+                        FeatureKind::Sketch {
+                            sketch: sketch.clone(),
+                        },
+                    ));
+                    Some(name)
+                }
+            };
+        }
+        self.rebuild_active_part();
+        self.last_error = None;
+        self.status = Some(match feature_name {
+            Some(name) => format!("{name} saved in the history."),
+            None => "Sketch saved.".to_string(),
+        });
+        self.close_sketch_session();
+    }
+
+    /// Cancel: leave the sketch without keeping anything.
+    pub fn cancel_sketch(&mut self) {
+        self.status = Some("Sketch cancelled; nothing was saved.".to_string());
+        self.last_error = None;
+        self.close_sketch_session();
+    }
+
+    /// Leave the sketch edit session and drop its transient state.
+    fn close_sketch_session(&mut self) {
+        self.sketch = None;
+        self.sketch_plane = None;
+        self.sketch_plane_reference = None;
+        self.sketch_feature = None;
+        self.sketch_draft.begin(SketchTool::Select);
+        self.sketch_selection.clear();
+        self.sketch_hover = None;
+        self.sketch_undo.clear();
+        self.sketch_redo.clear();
+        self.dimension_editor = None;
+        self.selected_dimension = None;
+        self.dimension_menu = None;
+        self.dragging_point = None;
+        self.dimension_picks.clear();
+    }
+
+    /// The sketch to sweep with an extrude or a revolve: the open one, else the
+    /// selected Sketch feature, else the last one in the tree.
+    fn sketch_for_sweep(&self) -> Option<(Sketch, Option<SketchPlacement>)> {
+        if let Some(sketch) = &self.sketch {
+            let placement = self
+                .sketch_plane
+                .map(|(origin, normal, x_direction)| SketchPlacement {
+                    origin,
+                    normal,
+                    x_direction,
+                    reference: self.sketch_plane_reference.clone(),
+                });
+            return Some((sketch.clone(), placement));
+        }
+        let part = self.get_active_part()?;
+        let selected = self.selection.items().iter().find_map(|item| match item {
+            Selected::Feature { feature, .. } => Some(*feature),
+            _ => None,
+        });
+        let is_sketch = |feature: &&Feature| matches!(feature.kind, FeatureKind::Sketch { .. });
+        let chosen = selected
+            .and_then(|id| part.features.iter().find(|feature| feature.id == id && is_sketch(&feature)))
+            .or_else(|| part.features.iter().rev().find(is_sketch))?;
+        let FeatureKind::Sketch { sketch } = &chosen.kind else {
+            return None;
+        };
+        let reference = sketch
+            .reference(SketchReferenceRole::Orientation)
+            .and_then(|reference| reference.reference.clone());
+        Some((
+            sketch.clone(),
+            Some(SketchPlacement {
+                origin: sketch.plane_origin,
+                normal: sketch.plane_normal,
+                x_direction: sketch.plane_x_axis,
+                reference,
+            }),
+        ))
     }
 
     /// The placement plane of the first planar reference in the selection.
@@ -2402,6 +2640,11 @@ impl RcadApp {
         if self.dragging_point.take().is_some() {
             return;
         }
+        if !self.dimension_picks.is_empty() {
+            self.dimension_picks.clear();
+            self.status = Some("Dimension pick cancelled.".to_string());
+            return;
+        }
         if self.sketch_draft.cancel() {
             let tool = self.sketch_draft.tool();
             self.status = Some(format!("{}: {}", tool.label(), tool.hint()));
@@ -2440,6 +2683,19 @@ impl RcadApp {
     pub fn sketch_cursor(&self, rect: egui::Rect, pos: egui::Pos2) -> Option<[f64; 2]> {
         let plane = self.sketch_plane?;
         let raw = sketch_ui::screen_to_sketch(pos, rect, &self.camera, plane)?;
+        // The polyline snaps to the points it already has, so the user can
+        // close the loop exactly on the first one.
+        if self.sketch_draft.tool() == SketchTool::LineChain {
+            for point in self.sketch_draft.pending_points() {
+                if let Some(screen) =
+                    sketch_ui::sketch_to_screen(rect, &self.camera, plane, *point)
+                {
+                    if screen.distance(pos) <= sketch_ui::CHAIN_SNAP_RADIUS {
+                        return Some(*point);
+                    }
+                }
+            }
+        }
         Some(if self.settings.sketch_snap {
             sketch_ui::snap_to_grid(raw, GRID_SPACING)
         } else {
@@ -2512,30 +2768,48 @@ impl RcadApp {
                     consumed = true;
                 }
             }
-            // The dimension tool takes the entity under the cursor and
-            // dimensions it at the size it has now.
+            // The dynamic dimension tool: pick one or two things, then click
+            // empty space to place the text there.
             SketchTool::Dimension => {
-                if let Some(hit) =
-                    sketch_ui::hit_test(&sketch, rect, &self.camera, plane, pos, HIT_RADIUS)
-                {
-                    let before = sketch.clone();
-                    let selection = vec![hit.id];
-                    match sketch_ui::apply_constraint(
-                        &mut sketch,
-                        &selection,
-                        ConstraintAction::Dimension,
-                    ) {
-                        Ok(message) => {
-                            self.push_sketch_snapshot(before);
-                            self.last_error = None;
-                            self.status = Some(message);
-                            let _ = sketch.solve();
-                            self.sketch_selection = selection;
-                        }
-                        Err(message) => self.last_error = Some(message),
+                let hit = sketch_ui::hit_test(&sketch, rect, &self.camera, plane, pos, HIT_RADIUS);
+                match hit {
+                    Some(hit) => {
+                        self.dimension_picks.push((hit.id, hit.kind));
+                        self.selected_dimension = None;
+                        self.status = Some(if self.dimension_picks.len() == 1 {
+                            "Click a second entity for an angle or a distance, or click empty space to place the dimension.".to_string()
+                        } else {
+                            "Click empty space to place the dimension.".to_string()
+                        });
                     }
-                    consumed = true;
+                    None => {
+                        if self.dimension_picks.is_empty() {
+                            self.status =
+                                Some("Click a line or a point to dimension.".to_string());
+                        } else {
+                            let picks = std::mem::take(&mut self.dimension_picks);
+                            let before = sketch.clone();
+                            match place_dimension(
+                                &mut sketch,
+                                &picks,
+                                cursor,
+                                self.dimension_orientation,
+                            ) {
+                                Ok(message) => {
+                                    self.push_sketch_snapshot(before);
+                                    self.last_error = None;
+                                    self.status = Some(message);
+                                    let _ = sketch.solve();
+                                }
+                                Err(message) => {
+                                    self.dimension_picks = picks;
+                                    self.last_error = Some(message);
+                                }
+                            }
+                        }
+                    }
                 }
+                consumed = true;
             }
             // The command tools act on the entity under the cursor. Dimension
             // is handled above, so what is left here is trim, extend, offset,
@@ -2621,6 +2895,15 @@ impl RcadApp {
             SketchEdit::Line(_) => self.status = Some("Line drawn.".to_string()),
             SketchEdit::Rectangle(_) => self.status = Some("Rectangle drawn.".to_string()),
             SketchEdit::Circle(_) => self.status = Some("Circle drawn.".to_string()),
+            SketchEdit::LineChain(_) => {
+                self.status = Some("Segment added: click on or right-click to stop.".to_string())
+            }
+            SketchEdit::Closed(_) => {
+                // A closed loop ends the polyline tool by itself.
+                self.sketch_draft.begin(SketchTool::Select);
+                self.status = Some("Polyline closed.".to_string());
+            }
+            SketchEdit::Polygon(_) => self.status = Some("Polygon drawn.".to_string()),
             SketchEdit::Arc(_) => self.status = Some("Arc drawn.".to_string()),
             SketchEdit::Spline(_) => self.status = Some("Spline drawn.".to_string()),
             SketchEdit::TooSmall => {
@@ -2657,6 +2940,21 @@ impl RcadApp {
         if !self.finish_sketch_shape() {
             self.solve_sketch();
         }
+    }
+
+    /// Right-click in a sketch: leave whatever tool or pick sequence is
+    /// active, keeping the geometry already created.
+    pub fn cancel_sketch_operation(&mut self) {
+        let cancelled = self.sketch_draft.cancel();
+        let had_picks = !self.dimension_picks.is_empty();
+        self.dimension_picks.clear();
+        self.dimension_editor = None;
+        self.dimension_menu = None;
+        self.status = Some(if cancelled || had_picks {
+            "Sketch tool cancelled; the geometry drawn so far stays.".to_string()
+        } else {
+            "Already in Select: click an entity to select it.".to_string()
+        });
     }
 
     /// Move a sketch point to a place in sketch coordinates and re-solve.
@@ -2733,6 +3031,27 @@ impl RcadApp {
                     return (true, cursor);
                 }
             }
+        }
+
+        // While the value field is open a click only takes the focus away from
+        // it (which commits the value); it must not also draw or pick behind it.
+        if self.dimension_editor.is_some()
+            && ui.input(|i| i.pointer.any_click())
+        {
+            return (true, cursor);
+        }
+
+        // The crosshair cursor is only for the tools that build geometry; a
+        // picking tool leaves the system cursor alone.
+        if response.hovered() && self.sketch_draft.tool().creates_geometry() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+
+        // A right-click that was not on a dimension leaves the current tool or
+        // the pending picks, keeping the geometry already drawn.
+        if ui.input(|i| i.pointer.secondary_clicked()) {
+            self.cancel_sketch_operation();
+            return (true, cursor);
         }
 
         // Dragging a point moves it, so the constraints can be felt.
@@ -2812,18 +3131,24 @@ impl RcadApp {
         }
         self.selected_dimension = Some(index);
         self.dimension_menu = None;
-        self.dimension_editor = Some(DimensionEditor { index, value, at });
-        self.status = Some("Editing dimension: type a value, or drive it.".to_string());
+        self.dimension_editor = Some(DimensionEditor {
+            index,
+            text: sketch_ui::format_length(value),
+            at,
+            fresh: true,
+        });
+        self.status = Some("Editing dimension: type a value and press Enter.".to_string());
     }
 
     /// The dimension the in-place editor is showing.
     pub fn edited_dimension(&self) -> Option<usize> {
-        self.dimension_editor.map(|editor| editor.index)
+        self.dimension_editor.as_ref().map(|editor| editor.index)
     }
 
     /// The dimension the buttons act on: the edited one, or the selected one.
     fn active_dimension(&self) -> Option<usize> {
         self.dimension_editor
+            .as_ref()
             .map(|editor| editor.index)
             .or(self.selected_dimension)
     }
@@ -2834,7 +3159,7 @@ impl RcadApp {
             return;
         };
         if let Some(editor) = self.dimension_editor.as_mut() {
-            editor.value = value;
+            editor.text = sketch_ui::format_length(value);
         }
         let Some(sketch) = self.sketch.as_mut() else {
             return;
@@ -3080,77 +3405,100 @@ impl RcadApp {
         }
     }
 
-    /// The in-place value editor of a dimension, next to it in the viewport.
+    /// The in-place value editor of a dimension: a field over the number
+    /// itself, with no window around it.
+    ///
+    /// Typing Enter or clicking anywhere else commits the value; Escape drops
+    /// it. The dimension keeps its last value until then.
     fn draw_dimension_editor(&mut self, ctx: &egui::Context) {
-        let Some(editor) = self.dimension_editor else {
+        let Some(editor) = self.dimension_editor.as_ref() else {
             return;
         };
-        let Some(sketch) = self.sketch.as_ref() else {
-            self.dimension_editor = None;
-            return;
-        };
-        let Some(current) = sketch.dimension_value(editor.index) else {
-            self.dimension_editor = None;
-            return;
-        };
-        let driving = sketch.dimension_is_driving(editor.index).unwrap_or(true);
-        let weak = sketch.dimension_is_weak(editor.index);
+        let index = editor.index;
+        let fallback = editor.at;
+        let at = self
+            .sketch
+            .as_ref()
+            .and_then(|sketch| {
+                let rect = self.viewport_rect?;
+                let plane = self.sketch_plane?;
+                let dimension = sketch_ui::dimensions(sketch)
+                    .into_iter()
+                    .find(|dimension| dimension.constraint_index == index)?;
+                sketch_ui::dimension_screen_geometry(rect, &self.camera, plane, &dimension)
+                    .map(|screen| screen.text)
+            })
+            .unwrap_or(fallback);
 
-        let mut value = editor.value;
-        let mut close = false;
-        let mut apply = None;
-        let mut toggle = false;
-        let mut promote = false;
-        let mut delete = false;
-        egui::Window::new("Dimension")
-            .id(egui::Id::new("rcad_dimension_editor"))
-            .title_bar(false)
-            .resizable(false)
-            .fixed_pos(editor.at + egui::vec2(14.0, 14.0))
+        let mut text = self
+            .dimension_editor
+            .as_ref()
+            .map(|editor| editor.text.clone())
+            .unwrap_or_default();
+        let mut fresh = self
+            .dimension_editor
+            .as_ref()
+            .map(|editor| editor.fresh)
+            .unwrap_or(false);
+        let mut commit = false;
+        let mut cancel = false;
+        egui::Area::new(egui::Id::new("rcad_dimension_editor"))
+            .fixed_pos(at + egui::vec2(-30.0, -12.0))
+            .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Value");
-                    let response = ui.add(egui::DragValue::new(&mut value).speed(0.1));
-                    if response.changed() {
-                        apply = Some(value);
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut text)
+                        .desired_width(54.0)
+                        .horizontal_align(egui::Align::Center)
+                        .font(egui::FontId::proportional(12.0)),
+                );
+                if fresh {
+                    // Typing replaces the value, the way Creo edits a
+                    // dimension in place.
+                    response.request_focus();
+                    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+                        let end = egui::text::CCursor::new(text.chars().count());
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(0),
+                            end,
+                        )));
+                        state.store(ui.ctx(), response.id);
                     }
-                });
-                ui.horizontal(|ui| {
-                    let mut is_driving = driving;
-                    if ui.checkbox(&mut is_driving, "Driving").changed() {
-                        toggle = true;
-                    }
-                    if weak && ui.button("Promote").clicked() {
-                        promote = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() {
-                        delete = true;
-                    }
-                    if ui.button("Close").clicked() {
-                        close = true;
+                    fresh = false;
+                }
+                if response.lost_focus() {
+                    commit = true;
+                }
+                ui.input(|input| {
+                    if input.key_pressed(egui::Key::Escape) {
+                        cancel = true;
                     }
                 });
             });
 
-        if let Some(value) = apply {
-            self.apply_dimension_value(value);
+        if let Some(editor) = self.dimension_editor.as_mut() {
+            editor.text = text.clone();
+            editor.fresh = fresh;
         }
-        if toggle {
-            self.toggle_selected_dimension_driving();
-        }
-        if promote {
-            self.promote_selected_dimension();
-        }
-        if delete {
-            self.delete_selected_dimension();
-            close = true;
-        }
-        if close || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if cancel {
             self.dimension_editor = None;
+            self.status = Some("Dimension edit cancelled.".to_string());
+            return;
         }
-        let _ = current;
+        if commit {
+            let parsed = text.trim().replace(',', ".").parse::<f64>();
+            match parsed {
+                Ok(value) if value > 0.0 => {
+                    self.apply_dimension_value(value);
+                    self.dimension_editor = None;
+                }
+                _ => {
+                    self.last_error =
+                        Some("A dimension needs a positive number.".to_string());
+                    self.dimension_editor = None;
+                }
+            }
+        }
     }
 
     /// The sketch strip, above the status bar: what the sketch is, how
@@ -3176,6 +3524,18 @@ impl RcadApp {
         let constraints = sketch.constraints.len();
         let dimensions = sketch_ui::dimensions(sketch).len();
         let references = sketch.reference_geometry.len();
+        let reference_labels: Vec<String> = sketch
+            .references
+            .iter()
+            .map(|reference| {
+                let role = if reference.role == SketchReferenceRole::Orientation {
+                    "R1"
+                } else {
+                    "R2"
+                };
+                format!("{role}: {}", reference.label)
+            })
+            .collect();
         let (colour, verdict) = match dof.status {
             rcad_sketch::ConstraintStatus::FullyConstrained => {
                 (egui::Color32::from_rgb(120, 220, 120), "fully constrained")
@@ -3202,17 +3562,21 @@ impl RcadApp {
                 )
             })
         });
+        let picks = self.dimension_picks.len();
+        let orientation = self.dimension_orientation;
+        let editing = self.dimension_editor.is_some();
 
         egui::TopBottomPanel::bottom("sketch_panel").show(ctx, |ui| {
+            // Row 1: what the sketch is, how constrained it is, and the two
+            // ways out of the session.
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("Sketch {name}")).strong());
                 if placing {
                     ui.label("waiting for a plane: select a planar face or datum plane");
                 } else {
                     ui.colored_label(colour, verdict);
-                    ui.separator();
                     ui.label(format!(
-                        "DOF {}/{} constrained — {} free",
+                        "DOF {}/{} — {} free",
                         dof.constrained_dof, dof.total_dof, dof.free_dof
                     ));
                     if dof.redundant_constraints > 0 {
@@ -3221,46 +3585,70 @@ impl RcadApp {
                             format!("{} redundant", dof.redundant_constraints),
                         );
                     }
-                    ui.separator();
-                    ui.label(format!(
-                        "{points} points · {lines} lines · {circles} circles · {arcs} arcs · {splines} splines"
-                    ));
-                    ui.separator();
-                    ui.label(format!(
-                        "{constraints} constraints · {dimensions} dimensions"
-                    ));
-                    if weak > 0 {
-                        ui.label(format!("· {weak} weak"));
-                    }
-                    if driven > 0 {
-                        ui.label(format!("· {driven} driven"));
-                    }
-                    if references > 0 {
-                        ui.label(format!("· {references} references"));
-                    }
                 }
                 ui.separator();
-                ui.checkbox(&mut self.settings.sketch_snap, "Snap to grid");
+                ui.checkbox(&mut self.settings.sketch_snap, "Snap");
                 if ui.button("Solve").clicked() {
                     self.solve_sketch();
                 }
+                ui.separator();
+                let ok = ui
+                    .add(egui::Button::new(egui::RichText::new("OK").strong()))
+                    .on_hover_text("Keep this sketch in the model history");
+                if ok.clicked() {
+                    self.confirm_sketch();
+                }
+                if ui
+                    .button("Cancel")
+                    .on_hover_text("Leave the sketch without saving it")
+                    .clicked()
+                {
+                    self.cancel_sketch();
+                }
             });
+            // Row 2: the tool, what the sketch holds and the two references.
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!("Tool: {} — {}", tool.label(), tool.hint()))
                         .size(11.0),
                 );
                 if pending {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(255, 210, 90),
-                        "click pending (Esc cancels)",
-                    );
+                    ui.colored_label(egui::Color32::from_rgb(255, 210, 90), "click pending");
                 }
                 if selected > 0 {
                     ui.label(format!("· {selected} selected"));
                 }
                 ui.separator();
-                if let Some((value, driving, weak)) = dimension_info {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{points} points · {lines} lines · {circles} circles · {arcs} arcs · {splines} splines · {constraints} constraints · {dimensions} dimensions"
+                    ))
+                    .size(11.0),
+                );
+                if weak > 0 {
+                    ui.label(egui::RichText::new(format!("· {weak} weak")).size(11.0));
+                }
+                if driven > 0 {
+                    ui.label(egui::RichText::new(format!("· {driven} driven")).size(11.0));
+                }
+                if references > 0 {
+                    ui.label(egui::RichText::new(format!("· {references} refs")).size(11.0));
+                }
+                if !reference_labels.is_empty() {
+                    ui.separator();
+                    ui.label(egui::RichText::new(reference_labels.join("  ·  ")).size(11.0))
+                        .on_hover_text("The two references that position the sketch");
+                }
+            });
+            // Row 3: the dimension being looked at, how it measures, and the
+            // tool parameters.
+            ui.horizontal(|ui| {
+                if editing {
+                    ui.label(
+                        egui::RichText::new("Editing the value: Enter commits, Esc cancels")
+                            .size(11.0),
+                    );
+                } else if let Some((value, driving, weak)) = dimension_info {
                     ui.label(format!(
                         "Dimension ({}{}): {}",
                         if driving { "driving" } else { "driven" },
@@ -3276,7 +3664,7 @@ impl RcadApp {
                     {
                         self.toggle_selected_dimension_driving();
                     }
-                    if ui.button("Edit…").clicked() {
+                    if ui.button("Edit").clicked() {
                         let at = ctx
                             .input(|input| input.pointer.hover_pos())
                             .unwrap_or_else(|| ctx.screen_rect().center());
@@ -3289,14 +3677,41 @@ impl RcadApp {
                     }
                 } else {
                     ui.label(
-                        egui::RichText::new("Dimension: click to select, double-click to edit")
-                            .size(11.0),
+                        egui::RichText::new(
+                            "Dimension: click one to select, double-click to edit in place",
+                        )
+                        .size(11.0),
                     );
+                }
+                if tool == SketchTool::Dimension {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Measure along:").size(11.0));
+                    for (label, value) in [
+                        ("Aligned", DimensionOrientation::Aligned),
+                        ("Horizontal", DimensionOrientation::Horizontal),
+                        ("Vertical", DimensionOrientation::Vertical),
+                    ] {
+                        if ui.selectable_label(orientation == value, label).clicked() {
+                            self.dimension_orientation = value;
+                        }
+                    }
+                    if picks > 0 {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 210, 90),
+                            format!("{picks} picked: click empty space"),
+                        );
+                    }
                 }
                 ui.separator();
                 ui.label(egui::RichText::new("Offset").size(11.0));
                 ui.add(
                     egui::DragValue::new(&mut self.tool_params.offset_distance)
+                        .speed(0.5)
+                        .range(0.1..=500.0),
+                );
+                ui.label(egui::RichText::new("Circle R").size(11.0));
+                ui.add(
+                    egui::DragValue::new(&mut self.tool_params.circle_radius)
                         .speed(0.5)
                         .range(0.1..=500.0),
                 );
@@ -3318,6 +3733,25 @@ impl RcadApp {
         self.sketch_plane_reference = None;
         let mut sketch = rcad_sketch::Sketch::new("Sketch1");
         sketch.set_standard_plane(rcad_sketch::StandardPlane::XY);
+        sketch.set_references(
+            SketchReference {
+                reference: None,
+                label: "TOP_PLANE".to_string(),
+                role: SketchReferenceRole::Orientation,
+                origin: [0.0; 3],
+                direction: [1.0, 0.0, 0.0],
+            },
+            SketchReference {
+                reference: None,
+                label: "CYS (origin)".to_string(),
+                role: SketchReferenceRole::Automatic,
+                origin: [0.0; 3],
+                direction: [0.0, 0.0, 1.0],
+            },
+        );
+        self.sketch_feature = None;
+        self.dimension_picks.clear();
+        self.dimension_editor = None;
         let corners = sketch.add_rectangle(-30.0, -20.0, 30.0, 20.0);
         sketch.add_circle(0.0, 4.0, 7.0);
 
@@ -3359,44 +3793,58 @@ impl RcadApp {
     }
     
     pub fn extrude_sketch(&mut self) {
-        // The sketch plane travels with the profile, so the sweep follows the
-        // normal of the plane the sketch was drawn on.
-        let placement = self
-            .sketch_plane
-            .map(|(origin, normal, x_direction)| SketchPlacement {
-                origin,
-                normal,
-                x_direction,
-                reference: self.sketch_plane_reference.clone(),
-            });
-        if let Some(sketch) = &self.sketch {
-            if let Some(profile) = sketch.to_profile() {
+        if self.sketch.is_some() {
+            self.last_error = Some(
+                "Finish (OK) or cancel the sketch before extruding it.".to_string(),
+            );
+            return;
+        }
+        let Some((sketch, placement)) = self.sketch_for_sweep() else {
+            self.last_error = Some("There is no sketch to extrude.".to_string());
+            return;
+        };
+        match sketch.to_profile() {
+            Some(profile) => {
                 if let Err(e) = self.extrude_sketch_internal(profile, 10.0, placement) {
                     self.last_error = Some(format!("Extrude failed: {e}"));
                 }
+            }
+            None => {
+                self.last_error = Some("The sketch has no profile to extrude.".to_string());
             }
         }
     }
     
     pub fn revolve_sketch(&mut self) {
-        let placement = self
-            .sketch_plane
-            .map(|(origin, normal, x_direction)| SketchPlacement {
-                origin,
-                normal,
-                x_direction,
-                reference: self.sketch_plane_reference.clone(),
-            });
-        if let Some(sketch) = &self.sketch {
-            if let Some(profile) = sketch.to_profile() {
+        if self.sketch.is_some() {
+            self.last_error = Some(
+                "Finish (OK) or cancel the sketch before revolving it.".to_string(),
+            );
+            return;
+        }
+        let Some((sketch, placement)) = self.sketch_for_sweep() else {
+            self.last_error = Some("There is no sketch to revolve.".to_string());
+            return;
+        };
+        match sketch.to_profile() {
+            Some(profile) => {
                 if let Err(e) = self.revolve_sketch_internal(profile, 360.0, placement) {
                     self.last_error = Some(format!("Revolve failed: {e}"));
                 }
+            }
+            None => {
+                self.last_error = Some("The sketch has no profile to revolve.".to_string());
             }
         }
     }
     
     pub fn add_box_feature(&mut self) {
+        if self.sketch.is_some() {
+            self.last_error = Some(
+                "Finish (OK) or cancel the sketch before another feature.".to_string(),
+            );
+            return;
+        }
         if let Err(e) = self.add_box_feature_internal() {
             self.last_error = Some(format!("Add box failed: {e}"));
         }
@@ -3474,6 +3922,15 @@ impl RcadApp {
     // ===== Toolbar Action Handlers =====
     
     fn handle_toolbar_action(&mut self, action: ToolbarAction) {
+        // While a sketch is being edited no other feature may start: the body
+        // the feature would build on is not in the tree yet. OK or Cancel ends
+        // the session first.
+        if self.sketch.is_some() && !action_allowed_while_sketching(&action) {
+            self.last_error = Some(
+                "Finish the sketch with OK, or cancel it, before another feature.".to_string(),
+            );
+            return;
+        }
         match action {
             ToolbarAction::NewDocument => self.new_document(),
             ToolbarAction::OpenDocument => self.open_document(),
@@ -3703,6 +4160,7 @@ impl RcadApp {
         match action {
             FloatingAction::ToggleDatums(kind) => self.toggle_datums(kind),
             FloatingAction::Toolbar(action) => self.handle_toolbar_action(action),
+            FloatingAction::SketchTool(tool) => self.set_sketch_tool(tool),
             FloatingAction::CancelPlacement => {
                 self.placing_component = false;
                 self.status = Some("Component placement cancelled.".to_string());
@@ -3785,8 +4243,20 @@ impl RcadApp {
                 self.history_overlay.open_context_menu(feature_id, pos);
             }
             HistoryOverlayAction::EditDefinition(feature_id) => {
-                // TODO: Open Edit Definition dashboard
-                self.last_error = Some(format!("Edit Definition for feature {:?} - TODO", feature_id));
+                // A sketch opens back into its editor; every other feature
+                // opens the feature dialog.
+                let is_sketch = self
+                    .get_active_part()
+                    .and_then(|part| part.features.iter().find(|feature| feature.id == feature_id))
+                    .map(|feature| matches!(feature.kind, FeatureKind::Sketch { .. }))
+                    .unwrap_or(false);
+                if is_sketch {
+                    if let Err(message) = self.edit_sketch_feature(feature_id) {
+                        self.last_error = Some(message);
+                    }
+                } else {
+                    self.show_relations_dialog = Some(feature_id);
+                }
             }
             HistoryOverlayAction::SuppressFeature(feature_id) => {
                 if let Some(part) = self.get_active_part_mut() {
@@ -3994,6 +4464,9 @@ impl Default for RcadApp {
             selected_dimension: None,
             dimension_menu: None,
             dimension_menu_was_shown: false,
+            sketch_feature: None,
+            dimension_picks: Vec::new(),
+            dimension_orientation: DimensionOrientation::default(),
             dragging_point: None,
             tool_params: sketch_ui::ToolParams::default(),
             viewport_rect: None,
@@ -4141,6 +4614,233 @@ fn face_boundary_segments(mesh: &TriangleMesh, face: &str) -> Vec<[[f64; 3]; 2]>
         .filter(|(count, _, _)| *count == 1)
         .map(|(_, a, b)| [a, b])
         .collect()
+}
+
+
+
+/// Actions that may run while a sketch is being edited: the sketch tools, the
+/// view, undo/redo and help. A model feature would build on a body the sketch
+/// has not been added to yet, so it has to wait for OK.
+fn action_allowed_while_sketching(action: &ToolbarAction) -> bool {
+    matches!(
+        action,
+        ToolbarAction::Undo
+            | ToolbarAction::Redo
+            | ToolbarAction::ViewFront
+            | ToolbarAction::ViewBack
+            | ToolbarAction::ViewLeft
+            | ToolbarAction::ViewRight
+            | ToolbarAction::ViewTop
+            | ToolbarAction::ViewBottom
+            | ToolbarAction::ViewIso
+            | ToolbarAction::ViewReset
+            | ToolbarAction::ViewPerspective
+            | ToolbarAction::ViewOrthographic
+            | ToolbarAction::ViewShaded
+            | ToolbarAction::ViewWireframe
+            | ToolbarAction::ViewZoomFit
+            | ToolbarAction::ViewPrevious
+            | ToolbarAction::SketchLine
+            | ToolbarAction::SketchRectangle
+            | ToolbarAction::SketchCircle
+            | ToolbarAction::SketchArc
+            | ToolbarAction::SketchSpline
+            | ToolbarAction::SketchPoint
+            | ToolbarAction::SketchTrim
+            | ToolbarAction::SketchExtend
+            | ToolbarAction::SketchOffset
+            | ToolbarAction::SketchMirror
+            | ToolbarAction::SketchPattern
+            | ToolbarAction::SketchProjectReferences
+            | ToolbarAction::SketchConstraintHorizontal
+            | ToolbarAction::SketchConstraintVertical
+            | ToolbarAction::SketchConstraintParallel
+            | ToolbarAction::SketchConstraintPerpendicular
+            | ToolbarAction::SketchConstraintTangent
+            | ToolbarAction::SketchConstraintEqual
+            | ToolbarAction::SketchConstraintSymmetric
+            | ToolbarAction::SketchConstraintConcentric
+            | ToolbarAction::SketchConstraintMidpoint
+            | ToolbarAction::SketchConstraintCoincident
+            | ToolbarAction::SketchDimension
+            | ToolbarAction::ToolsOptions
+            | ToolbarAction::HelpShortcuts
+            | ToolbarAction::HelpAbout
+    )
+}
+
+/// True when the sketch has anything worth keeping in the history.
+fn sketch_has_geometry(sketch: &Sketch) -> bool {
+    !sketch.points.is_empty()
+        || !sketch.lines.is_empty()
+        || !sketch.circles.is_empty()
+        || !sketch.arcs.is_empty()
+        || !sketch.splines.is_empty()
+}
+
+
+/// Turn the dynamic dimension tool's picks and the placement click into a
+/// dimension on the sketch.
+///
+/// One line becomes its length - along the line, or projected on the sketch X
+/// or Y axis. Two lines become an angle, or the distance between them when they
+/// are parallel. Two points (a circle or arc centre counts as a point) become a
+/// distance. The click position is where the text goes.
+fn place_dimension(
+    sketch: &mut Sketch,
+    picks: &[(Uuid, sketch_ui::SketchEntityKind)],
+    at: [f64; 2],
+    orientation: DimensionOrientation,
+) -> Result<String, String> {
+    use sketch_ui::SketchEntityKind;
+
+    let line = |sketch: &Sketch, id: Uuid| -> Option<(Uuid, Uuid, [f64; 2], [f64; 2])> {
+        let line = sketch.lines.iter().find(|line| line.id == id)?;
+        let a = sketch.point(line.a)?;
+        let b = sketch.point(line.b)?;
+        Some((line.a, line.b, [a.x, a.y], [b.x, b.y]))
+    };
+    let entity_point = |sketch: &Sketch,
+                        id: Uuid,
+                        kind: SketchEntityKind|
+     -> Option<(Uuid, [f64; 2])> {
+        let point = match kind {
+            SketchEntityKind::Point => id,
+            SketchEntityKind::Circle => sketch
+                .circles
+                .iter()
+                .find(|circle| circle.id == id)?
+                .center,
+            SketchEntityKind::Arc => sketch
+                .arcs
+                .iter()
+                .find(|arc| arc.id == id)?
+                .center,
+            SketchEntityKind::Line => return None,
+        };
+        let point = sketch.point(point)?;
+        Some((point.id, [point.x, point.y]))
+    };
+
+    let (constraint, description) = match picks {
+        [(id, SketchEntityKind::Line)] => {
+            let (first, second, a, b) =
+                line(sketch, *id).ok_or_else(|| "That line is gone.".to_string())?;
+            let value = match orientation {
+                DimensionOrientation::Aligned => (b[0] - a[0]).hypot(b[1] - a[1]),
+                DimensionOrientation::Horizontal => (b[0] - a[0]).abs(),
+                DimensionOrientation::Vertical => (b[1] - a[1]).abs(),
+            };
+            if value < 1e-9 {
+                return Err("That dimension would be zero.".to_string());
+            }
+            let constraint = match orientation {
+                DimensionOrientation::Aligned => Constraint::Distance {
+                    a: first,
+                    b: second,
+                    value,
+                },
+                DimensionOrientation::Horizontal => Constraint::HorizontalDistance {
+                    a: first,
+                    b: second,
+                    value,
+                },
+                DimensionOrientation::Vertical => Constraint::VerticalDistance {
+                    a: first,
+                    b: second,
+                    value,
+                },
+            };
+            (
+                constraint,
+                format!("Length dimension: {}.", sketch_ui::format_length(value)),
+            )
+        }
+        [(a, kind_a), (b, kind_b)] => {
+            let first_line = line(sketch, *a);
+            let second_line = line(sketch, *b);
+            if let (Some(first), Some(second)) = (first_line, second_line) {
+                let d1 = [first.3[0] - first.2[0], first.3[1] - first.2[1]];
+                let d2 = [second.3[0] - second.2[0], second.3[1] - second.2[1]];
+                let angle = sketch_ui::angle_between(d1, d2);
+                if angle < 10.0 || angle > 170.0 {
+                    let value =
+                        sketch_ui::line_distance((first.2, first.3), (second.2, second.3));
+                    if value < 1e-9 {
+                        return Err(
+                            "Those lines cross: pick a distance between two that do not.".to_string()
+                        );
+                    }
+                    (
+                        Constraint::LineDistance {
+                            a: *a,
+                            b: *b,
+                            value,
+                        },
+                        format!("Distance dimension: {}.", sketch_ui::format_length(value)),
+                    )
+                } else {
+                    (
+                        Constraint::Angle {
+                            a: *a,
+                            b: *b,
+                            value: angle,
+                        },
+                        format!("Angle dimension: {}°.", sketch_ui::format_length(angle)),
+                    )
+                }
+            } else if first_line.is_none() && second_line.is_none() {
+                let (first_id, first) = entity_point(sketch, *a, *kind_a)
+                    .ok_or_else(|| "Pick two points or two lines.".to_string())?;
+                let (second_id, second) = entity_point(sketch, *b, *kind_b)
+                    .ok_or_else(|| "Pick two points or two lines.".to_string())?;
+                let value = match orientation {
+                    DimensionOrientation::Aligned => {
+                        (second[0] - first[0]).hypot(second[1] - first[1])
+                    }
+                    DimensionOrientation::Horizontal => (second[0] - first[0]).abs(),
+                    DimensionOrientation::Vertical => (second[1] - first[1]).abs(),
+                };
+                if value < 1e-9 {
+                    return Err("That dimension would be zero.".to_string());
+                }
+                let constraint = match orientation {
+                    DimensionOrientation::Aligned => Constraint::Distance {
+                        a: first_id,
+                        b: second_id,
+                        value,
+                    },
+                    DimensionOrientation::Horizontal => Constraint::HorizontalDistance {
+                        a: first_id,
+                        b: second_id,
+                        value,
+                    },
+                    DimensionOrientation::Vertical => Constraint::VerticalDistance {
+                        a: first_id,
+                        b: second_id,
+                        value,
+                    },
+                };
+                (
+                    constraint,
+                    format!("Distance dimension: {}.", sketch_ui::format_length(value)),
+                )
+            } else {
+                return Err(
+                    "Pick two points or two lines (or one line for its length).".to_string()
+                );
+            }
+        }
+        [] => return Err("Click a line or a point to dimension.".to_string()),
+        _ => {
+            return Err("A dimension takes one line or two things, not more.".to_string())
+        }
+    };
+
+    if !sketch.add_dimension_constraint(constraint, true, true, Some(at), orientation) {
+        return Err("Could not add that dimension.".to_string());
+    }
+    Ok(description)
 }
 
 /// The plane of a mesh triangle: its centre, its normal and an x direction in
@@ -4929,10 +5629,18 @@ mod interaction_tests {
         app.new_sketch();
         app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
         app.solve_sketch();
+        // OK puts the sketch in the history; only then can a feature use it.
+        app.confirm_sketch();
 
         app.extrude_sketch();
 
         let part = app.project.parts.first().unwrap();
+        assert!(
+            part.features
+                .iter()
+                .any(|feature| matches!(feature.kind, FeatureKind::Sketch { .. })),
+            "OK should have added the sketch to the history"
+        );
         assert!(
             part.features
                 .iter()
@@ -4950,8 +5658,14 @@ mod interaction_tests {
         let _ = app.create_default_datum_geometry();
         app.new_sketch();
         app.sketch_plane = Some(([0.0; 3], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]));
+        // The sketch itself carries the plane the feature will follow.
+        app.sketch
+            .as_mut()
+            .unwrap()
+            .set_sketch_plane([0.0; 3], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
         app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
         app.solve_sketch();
+        app.confirm_sketch();
 
         app.extrude_sketch();
 
@@ -5061,8 +5775,13 @@ mod interaction_tests {
         let _ = app.create_default_datum_geometry();
         app.new_sketch();
         app.sketch_plane = Some(([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
+        app.sketch
+            .as_mut()
+            .unwrap()
+            .set_sketch_plane([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
         app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
         app.solve_sketch();
+        app.confirm_sketch();
 
         app.revolve_sketch();
 
@@ -5306,9 +6025,28 @@ mod interaction_tests {
         app.sketch_plane = Some(([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]));
         app.sketch_plane_reference = None;
         app.camera.look_from(glam::Vec3::Z);
-        // The test owns the camera: the first automatic fit would move it.
+        // The test owns the camera and the snap: the user settings may have
+        // either turned off, and a test must not depend on them.
         app.needs_fit = false;
-        app.sketch = Some(Sketch::new("Sketch1"));
+        app.settings.sketch_snap = true;
+        let mut sketch = Sketch::new("Sketch1");
+        sketch.set_references(
+            SketchReference {
+                reference: None,
+                label: "XY".to_string(),
+                role: SketchReferenceRole::Orientation,
+                origin: [0.0; 3],
+                direction: [1.0, 0.0, 0.0],
+            },
+            SketchReference {
+                reference: None,
+                label: "CYS (origin)".to_string(),
+                role: SketchReferenceRole::Automatic,
+                origin: [0.0; 3],
+                direction: [0.0, 0.0, 1.0],
+            },
+        );
+        app.sketch = Some(sketch);
         app.sketch_draft.begin(SketchTool::Select);
         app.sketch_selection.clear();
     }
@@ -5468,6 +6206,9 @@ mod interaction_tests {
         // The bottom side runs from (-25, -25) to (25, -25): 50 mm.
         let midpoint = screen_of(&app, [0.0, -25.0]);
         assert!(app.sketch_click(viewport_rect(), midpoint, ClickMode::PLAIN));
+        // The first click only picks the line; the second one places the text.
+        let placement = screen_of(&app, [0.0, -40.0]);
+        assert!(app.sketch_click(viewport_rect(), placement, ClickMode::PLAIN));
 
         let sketch = app.sketch.as_ref().unwrap();
         let dimensions = sketch_ui::dimensions(sketch);
@@ -5478,6 +6219,73 @@ mod interaction_tests {
             dimensions[0]
         );
         assert!(dimensions[0].driving);
+        // The text went where the user clicked, not to a default offset.
+        let placed = dimensions[0].text_position.expect("a placed text");
+        assert!(
+            (placed[0]).abs() < 1e-6 && (placed[1] + 40.0).abs() < 1e-6,
+            "the text was placed at {placed:?}"
+        );
+    }
+
+    /// Two lines dimensioned together become an angle, or a distance when they
+    /// are parallel.
+    #[test]
+    fn the_dimension_tool_measures_between_two_lines() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
+        app.set_sketch_tool(SketchTool::Dimension);
+
+        // The bottom side and the right side meet at a right angle.
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [0.0, -25.0]),
+            ClickMode::PLAIN
+        ));
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [25.0, 0.0]),
+            ClickMode::PLAIN
+        ));
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [40.0, -40.0]),
+            ClickMode::PLAIN
+        ));
+        let dimensions = sketch_ui::dimensions(app.sketch.as_ref().unwrap());
+        assert_eq!(dimensions.len(), 1);
+        assert!(
+            matches!(dimensions[0].kind, sketch_ui::DimensionKind::Angular { .. }),
+            "two perpendicular lines should give an angle: {:?}",
+            dimensions[0].kind
+        );
+        assert!((dimensions[0].value - 90.0).abs() < 1e-6);
+
+        // Two parallel sides (bottom and top) give the distance between them.
+        app.dimension_picks.clear();
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [0.0, -25.0]),
+            ClickMode::PLAIN
+        ));
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [0.0, 25.0]),
+            ClickMode::PLAIN
+        ));
+        assert!(app.sketch_click(
+            viewport_rect(),
+            screen_of(&app, [30.0, 0.0]),
+            ClickMode::PLAIN
+        ));
+        let dimensions = sketch_ui::dimensions(app.sketch.as_ref().unwrap());
+        assert_eq!(dimensions.len(), 2);
+        assert!(
+            matches!(dimensions[1].kind, sketch_ui::DimensionKind::LineDistance { .. }),
+            "parallel sides should give a distance: {:?}",
+            dimensions[1].kind
+        );
+        assert!((dimensions[1].value - 50.0).abs() < 1e-6);
     }
 
     /// The select tool only consumes a click that lands on sketch geometry, so
@@ -5515,6 +6323,336 @@ mod interaction_tests {
         assert_eq!(sketch.constraint_status(), "under-constrained");
     }
 
+
+
+
+    /// The sketch feature, with its references, survives a save and a reload.
+    #[test]
+    fn a_sketch_feature_survives_a_save_and_reload() {
+        let root = temp_project_dir();
+        let mut app = RcadApp::default();
+        app.open_project_folder(root.clone());
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(0.0, 0.0, 20.0, 10.0);
+        app.confirm_sketch();
+
+        let path = root.join("sketch.rcad");
+        app.project.save(&path).expect("save");
+        let loaded = rcad_doc::Project::load(&path).expect("load");
+        let sketch = loaded.parts[0]
+            .features
+            .iter()
+            .find_map(|feature| match &feature.kind {
+                FeatureKind::Sketch { sketch } => Some(sketch),
+                _ => None,
+            })
+            .expect("the sketch feature is in the document");
+        assert_eq!(sketch.lines.len(), 4);
+        assert_eq!(sketch.references.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Clicking anywhere else commits the inline value too.
+    #[test]
+    fn clicking_elsewhere_commits_the_inline_dimension() {
+        let mut session = Session::new(RcadApp::default());
+        open_xy_sketch(&mut session.app);
+        let corners = session
+            .app
+            .sketch
+            .as_mut()
+            .unwrap()
+            .add_rectangle(0.0, 0.0, 50.0, 30.0);
+        let index = session.app.sketch.as_ref().unwrap().constraints.len();
+        session
+            .app
+            .sketch
+            .as_mut()
+            .unwrap()
+            .add_dimension(corners[0], corners[1], 50.0, true, true);
+        session
+            .app
+            .open_dimension_editor(index, egui::Pos2::new(200.0, 200.0));
+        session.frame();
+        session.run_step(vec![egui::Event::Text("80".to_string())]);
+
+        // A click in the viewport, away from the field, commits it.
+        let elsewhere = viewport_of(&session.app).center();
+        session.click(elsewhere);
+        session.frame();
+
+        assert!(
+            session.app.dimension_editor.is_none(),
+            "clicking elsewhere must close the field"
+        );
+        assert_eq!(
+            session.app.sketch.as_ref().unwrap().dimension_value(index),
+            Some(80.0)
+        );
+    }
+
+    /// A new sketch records the two references that position it: the
+    /// orientation one from the selection and the automatic CYS one.
+    #[test]
+    fn a_new_sketch_records_its_two_positioning_references() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        let plane = app
+            .project
+            .parts
+            .first()
+            .unwrap()
+            .features
+            .iter()
+            .find(|feature| {
+                matches!(
+                    &feature.kind,
+                    FeatureKind::Construction {
+                        kind: ConstructionKind::Plane,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let plane_id = plane.id;
+        let plane_name = plane.name.clone();
+        app.selection.replace(Selected::Datum {
+            feature: plane_id,
+            label: plane_name.clone(),
+        });
+
+        app.new_sketch();
+
+        let sketch = app.sketch.as_ref().expect("a sketch");
+        assert_eq!(sketch.references.len(), 2);
+        let orientation = sketch
+            .reference(SketchReferenceRole::Orientation)
+            .expect("the orientation reference");
+        assert_eq!(orientation.label, plane_name);
+        assert_eq!(orientation.reference, Some(plane_id.to_string()));
+        let automatic = sketch
+            .reference(SketchReferenceRole::Automatic)
+            .expect("the automatic reference");
+        assert_eq!(automatic.label, "CYS (origin)");
+    }
+
+    /// OK puts the sketch in the history; an empty sketch is not history.
+    #[test]
+    fn ok_saves_the_sketch_and_an_empty_sketch_is_not_saved() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.confirm_sketch();
+        assert!(app.sketch.is_none(), "OK closes the session");
+        assert!(
+            !app.project.parts[0]
+                .features
+                .iter()
+                .any(|feature| matches!(feature.kind, FeatureKind::Sketch { .. })),
+            "an empty sketch must not enter the history"
+        );
+
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(0.0, 0.0, 10.0, 10.0);
+        app.confirm_sketch();
+        assert!(app.sketch.is_none());
+        assert!(
+            app.project.parts[0]
+                .features
+                .iter()
+                .any(|feature| matches!(feature.kind, FeatureKind::Sketch { .. })),
+            "the sketch with geometry should be in the history"
+        );
+    }
+
+    /// Cancel leaves without saving anything.
+    #[test]
+    fn cancel_discards_the_sketch() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(0.0, 0.0, 10.0, 10.0);
+        app.cancel_sketch();
+        assert!(app.sketch.is_none());
+        assert!(!app.project.parts[0]
+            .features
+            .iter()
+            .any(|feature| matches!(feature.kind, FeatureKind::Sketch { .. })));
+    }
+
+    /// Editing a stored sketch and cancelling keeps the stored one untouched.
+    #[test]
+    fn cancelling_an_edit_keeps_the_stored_sketch() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(0.0, 0.0, 10.0, 10.0);
+        app.confirm_sketch();
+        let feature = app.project.parts[0]
+            .features
+            .iter()
+            .find(|feature| matches!(feature.kind, FeatureKind::Sketch { .. }))
+            .unwrap()
+            .id;
+
+        app.edit_sketch_feature(feature).expect("opens the sketch");
+        assert_eq!(app.sketch_feature, Some(feature));
+        app.sketch.as_mut().unwrap().add_circle(0.0, 0.0, 5.0);
+        app.cancel_sketch();
+
+        let FeatureKind::Sketch { sketch } = &app.project.parts[0]
+            .features
+            .iter()
+            .find(|candidate| candidate.id == feature)
+            .unwrap()
+            .kind
+        else {
+            panic!("the sketch feature is gone");
+        };
+        assert_eq!(sketch.lines.len(), 4, "the stored sketch is untouched");
+        assert!(sketch.circles.is_empty(), "the cancelled circle is gone");
+    }
+
+    /// A sketch feature double-clicked in the tree opens its editor.
+    #[test]
+    fn a_sketch_feature_opens_from_the_tree() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.add_sketch_rectangle(0.0, 0.0, 10.0, 10.0);
+        app.confirm_sketch();
+        assert!(app.sketch.is_none());
+        let feature = app.project.parts[0]
+            .features
+            .iter()
+            .find(|feature| matches!(feature.kind, FeatureKind::Sketch { .. }))
+            .unwrap()
+            .id;
+
+        app.handle_history_action(HistoryOverlayAction::EditDefinition(feature));
+
+        assert!(app.sketch.is_some());
+        assert_eq!(app.sketch_feature, Some(feature));
+        assert_eq!(app.sketch.as_ref().unwrap().lines.len(), 4);
+    }
+
+    /// No other feature may start while a sketch is being edited.
+    #[test]
+    fn another_feature_is_blocked_while_a_sketch_is_edited() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        let before = app.project.parts[0].features.len();
+
+        app.handle_toolbar_action(ToolbarAction::ModelBox);
+
+        assert_eq!(app.project.parts[0].features.len(), before);
+        assert!(app
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Finish the sketch"));
+        // The sketch tools still work.
+        app.set_sketch_tool(SketchTool::Line);
+        assert_eq!(app.sketch_draft.tool(), SketchTool::Line);
+    }
+
+    /// A polyline closes on its first point and leaves the tool by itself.
+    #[test]
+    fn a_polyline_in_the_viewport_closes_and_ends_the_tool() {
+        let mut app = RcadApp::default();
+        open_xy_sketch(&mut app);
+        app.set_sketch_tool(SketchTool::LineChain);
+        for point in [[0.0, 0.0], [20.0, 0.0], [20.0, 20.0]] {
+            let at = screen_of(&app, point);
+            assert!(app.sketch_click(viewport_rect(), at, ClickMode::PLAIN));
+        }
+        // The cursor snaps onto the first point, so the loop closes exactly.
+        let near_first = screen_of(&app, [0.4, 0.4]);
+        assert!(app.sketch_click(viewport_rect(), near_first, ClickMode::PLAIN));
+
+        assert_eq!(app.sketch.as_ref().unwrap().lines.len(), 3);
+        assert_eq!(app.sketch_draft.tool(), SketchTool::Select);
+    }
+
+    /// The in-place dimension editor commits on Enter, with no window around it.
+    #[test]
+    fn the_inline_dimension_editor_commits_on_enter() {
+        let mut session = Session::new(RcadApp::default());
+        open_xy_sketch(&mut session.app);
+        let corners = session
+            .app
+            .sketch
+            .as_mut()
+            .unwrap()
+            .add_rectangle(0.0, 0.0, 50.0, 30.0);
+        let index = session.app.sketch.as_ref().unwrap().constraints.len();
+        session
+            .app
+            .sketch
+            .as_mut()
+            .unwrap()
+            .add_dimension(corners[0], corners[1], 50.0, true, true);
+        session
+            .app
+            .open_dimension_editor(index, egui::Pos2::new(200.0, 200.0));
+        // The field takes the keyboard on the first frame.
+        session.frame();
+        session.run_step(vec![egui::Event::Text("70".to_string())]);
+        session.run_step(vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }]);
+        session.frame();
+
+        assert_eq!(
+            session.app.sketch.as_ref().unwrap().dimension_value(index),
+            Some(70.0)
+        );
+        assert!(
+            session.app.dimension_editor.is_none(),
+            "Enter commits and closes the field"
+        );
+    }
+
+    /// While a text field has the keyboard, shortcuts do not fire.
+    #[test]
+    fn shortcuts_do_not_fire_while_a_dimension_is_being_typed() {
+        let mut session = Session::new(RcadApp::default());
+        open_xy_sketch(&mut session.app);
+        let corners = session
+            .app
+            .sketch
+            .as_mut()
+            .unwrap()
+            .add_rectangle(0.0, 0.0, 50.0, 30.0);
+        let index = session.app.sketch.as_ref().unwrap().constraints.len();
+        session
+            .app
+            .sketch
+            .as_mut()
+            .unwrap()
+            .add_dimension(corners[0], corners[1], 50.0, true, true);
+        session.app.set_sketch_tool(SketchTool::Select);
+        session
+            .app
+            .open_dimension_editor(index, egui::Pos2::new(200.0, 200.0));
+        session.frame();
+
+        // "P" arms the Point tool normally; while typing it must not.
+        session.run_step(vec![egui::Event::Key {
+            key: egui::Key::P,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }]);
+
+        assert_eq!(
+            session.app.sketch_draft.tool(),
+            SketchTool::Select,
+            "a shortcut fired while the dimension was being typed"
+        );
+    }
+
     /// A dimension can be edited in place: the value changes and the geometry
     /// follows, because a driving dimension drives.
     #[test]
@@ -5525,6 +6663,9 @@ mod interaction_tests {
         app.set_sketch_tool(SketchTool::Dimension);
         let bottom = screen_of(&app, [25.0, 0.0]);
         assert!(app.sketch_click(viewport_rect(), bottom, ClickMode::PLAIN));
+        // The second click places the text; the first only picked the line.
+        let placement = screen_of(&app, [25.0, -20.0]);
+        assert!(app.sketch_click(viewport_rect(), placement, ClickMode::PLAIN));
 
         let index = app
             .sketch
@@ -5828,6 +6969,9 @@ mod interaction_tests {
         let first = temp_project_dir();
         let second = temp_project_dir();
         let mut app = RcadApp::default();
+        // The test is about the order it creates, not about the settings file.
+        app.settings.recent_projects.clear();
+        app.settings.last_project = None;
         app.open_project_folder(first.clone());
         app.open_project_folder(second.clone());
         app.open_project_folder(first.clone());
@@ -5860,6 +7004,7 @@ fn feature_kind_label(kind: &FeatureKind) -> &'static str {
         FeatureKind::Loft { .. } => "Loft",
         FeatureKind::Boundary { .. } => "Boundary surface",
         FeatureKind::Thicken { .. } => "Thicken",
+        FeatureKind::Sketch { .. } => "Sketch",
         FeatureKind::Construction { kind, .. } => match kind {
             ConstructionKind::Plane => "Datum plane",
             ConstructionKind::Axis => "Datum axis",

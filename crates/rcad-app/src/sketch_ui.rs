@@ -10,7 +10,7 @@
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 use glam::Vec3;
-use rcad_sketch::{Constraint, ConstraintStrength, Sketch};
+use rcad_sketch::{Constraint, DimensionOrientation, Sketch, SketchReferenceRole};
 use uuid::Uuid;
 
 use crate::camera::OrbitCamera;
@@ -29,8 +29,15 @@ pub const GRID_EXTENT: f32 = 50.0;
 /// How close, in pixels, a click must be to a sketch entity to hit it.
 pub const HIT_RADIUS: f32 = 6.0;
 
+/// How close, in pixels, a polyline click must be to one of its own points to
+/// snap onto it (which is how the user closes the loop).
+pub const CHAIN_SNAP_RADIUS: f32 = 11.0;
+
 /// How far a dimension line is drawn from the geometry it measures.
 const DIMENSION_OFFSET: f32 = 16.0;
+
+/// Radius, in points, of the target circle on the polyline's first point.
+const CLOSE_MARKER: f32 = 8.0;
 
 const GEOMETRY: Color32 = Color32::from_rgb(225, 228, 235);
 const SELECTED: Color32 = Color32::from_rgb(255, 170, 60);
@@ -52,13 +59,30 @@ pub enum SketchTool {
     Select,
     Point,
     Line,
+    /// Connected lines: each click adds a segment; closing on the first point
+    /// or a right-click ends the chain.
+    LineChain,
+    /// Two opposite corners of an axis-aligned rectangle.
     Rectangle,
+    /// The centre and one corner of an axis-aligned rectangle.
+    RectangleCenter,
+    /// Two adjacent corners and then a point that sets the width: a rotated
+    /// rectangle.
+    RectangleSkewed,
+    /// The centre and a point on the circle.
     Circle,
+    /// Two points at opposite ends of a diameter.
+    CircleDiameter,
+    /// Two lines; the radius comes from the strip and the side from the click.
+    CircleTangent,
+    /// A regular polygon: the centre, then a vertex. The number of sides is
+    /// part of the tool.
+    Polygon(u8),
     /// Three clicks: the start, the end, and a point the arc passes through.
     Arc3Point,
     /// Click the control points, then Enter to finish the spline.
     Spline,
-    /// Clicks a line and dimensions its length.
+    /// The dynamic dimension tool: pick one or two things, then place the text.
     Dimension,
     /// Clicks a line and trims the clicked end back to its nearest crossing.
     Trim,
@@ -73,14 +97,42 @@ pub enum SketchTool {
 }
 
 impl SketchTool {
+    /// The rectangle tools, for the floating bar's dropdown.
+    pub const RECTANGLES: [SketchTool; 3] = [
+        SketchTool::Rectangle,
+        SketchTool::RectangleCenter,
+        SketchTool::RectangleSkewed,
+    ];
+    /// The circle tools, for the floating bar's dropdown.
+    pub const CIRCLES: [SketchTool; 3] = [
+        SketchTool::Circle,
+        SketchTool::CircleDiameter,
+        SketchTool::CircleTangent,
+    ];
+    /// The polygon tools, for the floating bar's dropdown.
+    pub const POLYGONS: [SketchTool; 3] = [
+        SketchTool::Polygon(3),
+        SketchTool::Polygon(5),
+        SketchTool::Polygon(6),
+    ];
+
     /// The name the sketch panel and the status bar show.
     pub fn label(self) -> &'static str {
         match self {
             SketchTool::Select => "Select",
             SketchTool::Point => "Point",
             SketchTool::Line => "Line",
+            SketchTool::LineChain => "Polyline",
             SketchTool::Rectangle => "Rectangle",
+            SketchTool::RectangleCenter => "Rectangle (centre)",
+            SketchTool::RectangleSkewed => "Skewed rectangle",
             SketchTool::Circle => "Circle",
+            SketchTool::CircleDiameter => "Circle (diameter)",
+            SketchTool::CircleTangent => "Circle (tangent)",
+            SketchTool::Polygon(3) => "Triangle",
+            SketchTool::Polygon(5) => "Pentagon",
+            SketchTool::Polygon(6) => "Hexagon",
+            SketchTool::Polygon(_) => "Polygon",
             SketchTool::Arc3Point => "3-Point Arc",
             SketchTool::Spline => "Spline",
             SketchTool::Dimension => "Dimension",
@@ -98,8 +150,14 @@ impl SketchTool {
             self,
             SketchTool::Point
                 | SketchTool::Line
+                | SketchTool::LineChain
                 | SketchTool::Rectangle
+                | SketchTool::RectangleCenter
+                | SketchTool::RectangleSkewed
                 | SketchTool::Circle
+                | SketchTool::CircleDiameter
+                | SketchTool::CircleTangent
+                | SketchTool::Polygon(_)
                 | SketchTool::Arc3Point
                 | SketchTool::Spline
         )
@@ -115,6 +173,7 @@ impl SketchTool {
                 | SketchTool::Offset
                 | SketchTool::Mirror
                 | SketchTool::Pattern
+                | SketchTool::CircleTangent
         )
     }
 
@@ -124,11 +183,23 @@ impl SketchTool {
             SketchTool::Select => "Click a sketch entity to select it; Ctrl adds.",
             SketchTool::Point => "Click to place a point.",
             SketchTool::Line => "Click the two ends of the line.",
+            SketchTool::LineChain => {
+                "Click to add segments; close on the first point or right-click to stop."
+            }
             SketchTool::Rectangle => "Click two opposite corners of the rectangle.",
+            SketchTool::RectangleCenter => "Click the centre, then a corner.",
+            SketchTool::RectangleSkewed => {
+                "Click two adjacent corners, then a point for the width."
+            }
             SketchTool::Circle => "Click the centre, then a point on the circle.",
+            SketchTool::CircleDiameter => "Click two points at opposite ends of the diameter.",
+            SketchTool::CircleTangent => "Click two lines; the radius comes from the strip.",
+            SketchTool::Polygon(_) => "Click the centre, then a vertex.",
             SketchTool::Arc3Point => "Click the start, the end, then a point on the arc.",
             SketchTool::Spline => "Click the control points, then Enter to finish.",
-            SketchTool::Dimension => "Click a line to dimension its length; double-click to edit.",
+            SketchTool::Dimension => {
+                "Click a line or point, then the second one or the empty space for the text."
+            }
             SketchTool::Trim => "Click the end of a line to trim it to its nearest crossing.",
             SketchTool::Extend => "Click the line to grow, then the entity it should reach.",
             SketchTool::Offset => "Click a line to offset it by the strip's distance.",
@@ -145,6 +216,11 @@ pub enum SketchEdit {
     Pending,
     Point(Uuid),
     Line(Uuid),
+    /// A segment of the polyline: the chain continues.
+    LineChain(Uuid),
+    /// The polyline closed on its first point; the tool is done.
+    Closed(Uuid),
+    Polygon(Vec<Uuid>),
     Rectangle([Uuid; 4]),
     Circle(Uuid),
     Arc(Uuid),
@@ -165,6 +241,9 @@ impl SketchEdit {
             self,
             SketchEdit::Point(_)
                 | SketchEdit::Line(_)
+                | SketchEdit::LineChain(_)
+                | SketchEdit::Closed(_)
+                | SketchEdit::Polygon(_)
                 | SketchEdit::Rectangle(_)
                 | SketchEdit::Circle(_)
                 | SketchEdit::Arc(_)
@@ -182,6 +261,8 @@ impl SketchEdit {
 pub struct SketchDraft {
     tool: SketchTool,
     points: Vec<[f64; 2]>,
+    /// The points the polyline has already created in the sketch.
+    chain: Vec<Uuid>,
     entities: Vec<Uuid>,
 }
 
@@ -209,20 +290,20 @@ impl SketchDraft {
     pub fn begin(&mut self, tool: SketchTool) {
         self.tool = tool;
         self.points.clear();
+        self.chain.clear();
         self.entities.clear();
     }
 
-    /// Escape: drop the collected clicks or picks, then leave the tool.
+    /// Escape or a right-click: drop the collected clicks or picks, then leave
+    /// the tool. The geometry already created stays.
     ///
     /// Returns true when something was actually cancelled, so the caller can
     /// fall back to clearing the selection only when the sketch had nothing to
     /// cancel.
     pub fn cancel(&mut self) -> bool {
-        if !self.points.is_empty() {
+        if !self.points.is_empty() || !self.chain.is_empty() || !self.entities.is_empty() {
             self.points.clear();
-            return true;
-        }
-        if !self.entities.is_empty() {
+            self.chain.clear();
             self.entities.clear();
             return true;
         }
@@ -247,15 +328,11 @@ impl SketchDraft {
                 if self.points.len() < 2 {
                     return SketchEdit::Pending;
                 }
-                let first = self.points[0];
-                let second = self.points[1];
-                let dx = second[0] - first[0];
-                let dy = second[1] - first[1];
+                let (first, second) = (self.points[0], self.points[1]);
+                let (dx, dy) = (second[0] - first[0], second[1] - first[1]);
                 let edit = match self.tool {
                     SketchTool::Line => {
                         if dx.hypot(dy) < 1e-9 {
-                            // Keep the first click: the next one can still end
-                            // the line.
                             self.points.truncate(1);
                             return SketchEdit::TooSmall;
                         }
@@ -284,6 +361,94 @@ impl SketchDraft {
                 self.points.clear();
                 edit
             }
+            SketchTool::RectangleCenter => {
+                self.points.push(point);
+                if self.points.len() < 2 {
+                    return SketchEdit::Pending;
+                }
+                let centre = self.points[0];
+                let corner = self.points[1];
+                let (dx, dy) = ((corner[0] - centre[0]).abs(), (corner[1] - centre[1]).abs());
+                if dx < 1e-9 || dy < 1e-9 {
+                    self.points.truncate(1);
+                    return SketchEdit::TooSmall;
+                }
+                self.points.clear();
+                SketchEdit::Rectangle(sketch.add_rectangle(
+                    centre[0] - dx,
+                    centre[1] - dy,
+                    centre[0] + dx,
+                    centre[1] + dy,
+                ))
+            }
+            SketchTool::RectangleSkewed => {
+                self.points.push(point);
+                if self.points.len() < 3 {
+                    return SketchEdit::Pending;
+                }
+                let corners =
+                    skewed_rectangle_corners(self.points[0], self.points[1], self.points[2]);
+                match corners {
+                    Some(corners) => {
+                        self.points.clear();
+                        SketchEdit::Polygon(add_quad(sketch, corners))
+                    }
+                    None => {
+                        self.points.pop();
+                        SketchEdit::Refused("A skewed rectangle needs two distinct corners.")
+                    }
+                }
+            }
+            SketchTool::Polygon(sides) => {
+                self.points.push(point);
+                if self.points.len() < 2 {
+                    return SketchEdit::Pending;
+                }
+                let (centre, vertex) = (self.points[0], self.points[1]);
+                if (vertex[0] - centre[0]).hypot(vertex[1] - centre[1]) < 1e-9 {
+                    self.points.pop();
+                    return SketchEdit::TooSmall;
+                }
+                let corners = regular_polygon(centre, vertex, sides.max(3) as usize);
+                self.points.clear();
+                SketchEdit::Polygon(add_closed_loop(sketch, &corners))
+            }
+            SketchTool::CircleDiameter => {
+                self.points.push(point);
+                if self.points.len() < 2 {
+                    return SketchEdit::Pending;
+                }
+                let (a, b) = (self.points[0], self.points[1]);
+                if (b[0] - a[0]).hypot(b[1] - a[1]) < 1e-9 {
+                    self.points.pop();
+                    return SketchEdit::TooSmall;
+                }
+                let (centre, radius) = circle_from_diameter(a, b);
+                self.points.clear();
+                SketchEdit::Circle(sketch.add_circle(centre[0], centre[1], radius))
+            }
+            SketchTool::LineChain => {
+                if self.chain.is_empty() {
+                    let id = sketch.add_point(point[0], point[1]);
+                    self.chain.push(id);
+                    self.points.push(point);
+                    return SketchEdit::Pending;
+                }
+                let first = self.points[0];
+                let last = *self.chain.last().expect("a chain has a point");
+                let closes = (point[0] - first[0]).hypot(point[1] - first[1]) < 1e-6;
+                let next = sketch.add_point(point[0], point[1]);
+                let line = sketch.add_line(last, next);
+                if closes {
+                    self.points.clear();
+                    self.chain.clear();
+                    SketchEdit::Closed(line)
+                } else {
+                    self.chain.push(next);
+                    self.points.push(point);
+                    SketchEdit::LineChain(line)
+                }
+            }
             SketchTool::Arc3Point => {
                 self.points.push(point);
                 if self.points.len() < 3 {
@@ -298,8 +463,6 @@ impl SketchDraft {
                         SketchEdit::Arc(arc)
                     }
                     None => {
-                        // Keep the first two clicks so another third one can
-                        // still bend the arc.
                         self.points.pop();
                         SketchEdit::Refused(
                             "The three points are on a line: no arc passes through them.",
@@ -330,6 +493,170 @@ impl SketchDraft {
         self.points.clear();
         Some(SketchEdit::Spline(spline))
     }
+}
+
+/// The circle that has two points at opposite ends of a diameter.
+pub fn circle_from_diameter(a: [f64; 2], b: [f64; 2]) -> ([f64; 2], f64) {
+    let centre = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+    (centre, (b[0] - a[0]).hypot(b[1] - a[1]) * 0.5)
+}
+
+/// Where two infinite lines cross, or None when they are parallel.
+pub fn line_intersection(
+    a1: [f64; 2],
+    a2: [f64; 2],
+    b1: [f64; 2],
+    b2: [f64; 2],
+) -> Option<[f64; 2]> {
+    let d1 = [a2[0] - a1[0], a2[1] - a1[1]];
+    let d2 = [b2[0] - b1[0], b2[1] - b1[1]];
+    let denom = d1[0] * d2[1] - d1[1] * d2[0];
+    if denom.abs() < 1e-12 {
+        return None;
+    }
+    let t = ((b1[0] - a1[0]) * d2[1] - (b1[1] - a1[1]) * d2[0]) / denom;
+    Some([a1[0] + d1[0] * t, a1[1] + d1[1] * t])
+}
+
+/// The corners of a rectangle whose first edge runs from ~a~ to ~b~ and whose
+/// width is the perpendicular distance from ~point~ to that edge.
+///
+/// None when the edge has no length or the point sits on it: there would be no
+/// rectangle to draw.
+pub fn skewed_rectangle_corners(
+    a: [f64; 2],
+    b: [f64; 2],
+    point: [f64; 2],
+) -> Option<[[f64; 2]; 4]> {
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    let length = dx.hypot(dy);
+    if length < 1e-9 {
+        return None;
+    }
+    let (ux, uy) = (dx / length, dy / length);
+    let (nx, ny) = (-uy, ux);
+    let width = (point[0] - a[0]) * nx + (point[1] - a[1]) * ny;
+    if width.abs() < 1e-9 {
+        return None;
+    }
+    Some([
+        a,
+        b,
+        [b[0] + nx * width, b[1] + ny * width],
+        [a[0] + nx * width, a[1] + ny * width],
+    ])
+}
+
+/// The corners of a regular polygon: the first vertex is ~vertex~, the rest go
+/// round the circumcircle around ~centre~.
+pub fn regular_polygon(centre: [f64; 2], vertex: [f64; 2], sides: usize) -> Vec<[f64; 2]> {
+    let sides = sides.max(3);
+    let dx = vertex[0] - centre[0];
+    let dy = vertex[1] - centre[1];
+    let radius = dx.hypot(dy);
+    let start = dy.atan2(dx);
+    let step = std::f64::consts::TAU / sides as f64;
+    (0..sides)
+        .map(|index| {
+            let angle = start + step * index as f64;
+            [
+                centre[0] + radius * angle.cos(),
+                centre[1] + radius * angle.sin(),
+            ]
+        })
+        .collect()
+}
+
+/// A circle of ~radius~ tangent to both lines, on the side nearest ~near~.
+///
+/// Each line is offset by the radius on both sides; the four crossings of the
+/// offset lines are the possible centres, and the one closest to the click wins.
+pub fn circle_tangent_to_two_lines(
+    first: ([f64; 2], [f64; 2]),
+    second: ([f64; 2], [f64; 2]),
+    radius: f64,
+    near: [f64; 2],
+) -> Option<([f64; 2], f64)> {
+    if radius <= 0.0 {
+        return None;
+    }
+    let normal = |line: ([f64; 2], [f64; 2])| -> Option<[f64; 2]> {
+        let dx = line.1[0] - line.0[0];
+        let dy = line.1[1] - line.0[1];
+        let length = dx.hypot(dy);
+        (length > 1e-12).then(|| [-dy / length, dx / length])
+    };
+    let na = normal(first)?;
+    let nb = normal(second)?;
+    let mut best: Option<([f64; 2], f64)> = None;
+    for sign_a in [-1.0, 1.0] {
+        for sign_b in [-1.0, 1.0] {
+            let a1 = [
+                first.0[0] + na[0] * radius * sign_a,
+                first.0[1] + na[1] * radius * sign_a,
+            ];
+            let a2 = [
+                first.1[0] + na[0] * radius * sign_a,
+                first.1[1] + na[1] * radius * sign_a,
+            ];
+            let b1 = [
+                second.0[0] + nb[0] * radius * sign_b,
+                second.0[1] + nb[1] * radius * sign_b,
+            ];
+            let b2 = [
+                second.1[0] + nb[0] * radius * sign_b,
+                second.1[1] + nb[1] * radius * sign_b,
+            ];
+            if let Some(centre) = line_intersection(a1, a2, b1, b2) {
+                let distance = (centre[0] - near[0]).hypot(centre[1] - near[1]);
+                if best.map_or(true, |(_, best)| distance < best) {
+                    best = Some((centre, distance));
+                }
+            }
+        }
+    }
+    best.map(|(centre, _)| (centre, radius))
+}
+
+/// Add the four corners of a rectangle as a closed loop, keeping it a rectangle
+/// with two parallels and one perpendicular.
+fn add_quad(sketch: &mut Sketch, corners: [[f64; 2]; 4]) -> Vec<Uuid> {
+    let lines = add_closed_loop(sketch, &corners);
+    if lines.len() == 4 {
+        sketch.constraints.push(Constraint::Parallel {
+            a: lines[0],
+            b: lines[2],
+        });
+        sketch.constraints.push(Constraint::Parallel {
+            a: lines[1],
+            b: lines[3],
+        });
+        sketch.constraints.push(Constraint::Perpendicular {
+            a: lines[0],
+            b: lines[1],
+        });
+    }
+    lines
+}
+
+/// Add points round a loop, with equal-length constraints between the sides, so
+/// a regular polygon stays regular.
+fn add_closed_loop(sketch: &mut Sketch, corners: &[[f64; 2]]) -> Vec<Uuid> {
+    let points: Vec<Uuid> = corners
+        .iter()
+        .map(|corner| sketch.add_point(corner[0], corner[1]))
+        .collect();
+    let lines: Vec<Uuid> = (0..points.len())
+        .map(|index| sketch.add_line(points[index], points[(index + 1) % points.len()]))
+        .collect();
+    for line in lines.iter().skip(1) {
+        sketch.constraints.push(Constraint::EqualLength {
+            a: lines[0],
+            b: *line,
+        });
+    }
+    lines
 }
 
 /// Round a sketch coordinate to the nearest grid line.
@@ -537,31 +864,57 @@ pub fn constraint_glyphs(sketch: &Sketch) -> Vec<ConstraintGlyph> {
             Constraint::Concentric { a, .. } => push(anchor_of(sketch, *a), "concentric"),
             Constraint::Midpoint { point, .. } => push(point_of(sketch, *point), "M"),
             Constraint::Fixed { point } => push(point_of(sketch, *point), "F"),
-            Constraint::Distance { .. } => {}
+            // Dimensions are drawn as dimensions, not as glyphs.
+            Constraint::Distance { .. }
+            | Constraint::Angle { .. }
+            | Constraint::LineDistance { .. }
+            | Constraint::HorizontalDistance { .. }
+            | Constraint::VerticalDistance { .. } => {}
         }
     }
     glyphs
 }
 
-/// A length dimension the viewport draws between two points.
+/// How a dimension is drawn and what it measures.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DimensionKind {
+    /// A length between two points, measured along the line or projected on an
+    /// axis.
+    Linear {
+        a: [f64; 2],
+        b: [f64; 2],
+        orientation: DimensionOrientation,
+    },
+    /// The angle between two lines.
+    Angular {
+        first: ([f64; 2], [f64; 2]),
+        second: ([f64; 2], [f64; 2]),
+    },
+    /// The perpendicular distance between two parallel lines.
+    LineDistance {
+        first: ([f64; 2], [f64; 2]),
+        second: ([f64; 2], [f64; 2]),
+    },
+}
+
+/// A dimension the viewport draws.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DimensionAnnotation {
-    /// The two points the dimension measures.
-    pub a: [f64; 2],
-    pub b: [f64; 2],
-    /// The value the constraint holds the distance at.
+    pub kind: DimensionKind,
+    /// The value the constraint holds, or the measurement a driven one reports.
     pub value: f64,
-    /// The distance the geometry has right now: the two differ while a sketch
-    /// is not solved yet.
+    /// What the geometry measures right now; the two differ while unsolved.
     pub measured: f64,
     pub text: String,
     /// False for a driven (reference) dimension.
     pub driving: bool,
     /// Weak dimensions come from the Intent Manager, not from the user.
     pub weak: bool,
-    /// Where the dimension's `Distance` constraint sits in `Sketch::constraints`,
-    /// so an edit can reach it.
+    /// Where the dimension's constraint sits in `Sketch::constraints`, so an
+    /// edit can reach it.
     pub constraint_index: usize,
+    /// Where the user placed the text, in sketch coordinates.
+    pub text_position: Option<[f64; 2]>,
 }
 
 /// Format a length the way a dimension is written: no trailing zeros.
@@ -574,81 +927,318 @@ pub fn format_length(value: f64) -> String {
     format!("{rounded}")
 }
 
-/// Every Distance constraint, ready to draw.
+/// The two ends of a line, when the line exists.
+fn line_points(sketch: &Sketch, id: Uuid) -> Option<([f64; 2], [f64; 2])> {
+    let line = sketch.lines.iter().find(|line| line.id == id)?;
+    Some((point_of(sketch, line.a)?, point_of(sketch, line.b)?))
+}
+
+/// The unsigned angle between two directions, in degrees.
+pub fn angle_between(a: [f64; 2], b: [f64; 2]) -> f64 {
+    (a[0] * b[1] - a[1] * b[0])
+        .atan2(a[0] * b[0] + a[1] * b[1])
+        .to_degrees()
+        .abs()
+}
+
+/// The perpendicular distance between two lines (0 when they cross).
+pub fn line_distance(first: ([f64; 2], [f64; 2]), second: ([f64; 2], [f64; 2])) -> f64 {
+    let dx = first.1[0] - first.0[0];
+    let dy = first.1[1] - first.0[1];
+    let length = dx.hypot(dy);
+    if length < 1e-12 {
+        return 0.0;
+    }
+    ((second.0[0] - first.0[0]) * dy - (second.0[1] - first.0[1]) * dx).abs() / length
+}
+
+/// Every dimension the sketch holds, ready to draw.
 ///
-/// The strength and driving flag come from `constrained_constraints` when the
-/// dimension was added through `Sketch::add_dimension`; a dimension pushed
-/// straight into `constraints` counts as a strong, driving one.
+/// The value, strength, driving flag and placement all come from the Intent
+/// Manager record, so editing a dimension edits what is drawn.
 pub fn dimensions(sketch: &Sketch) -> Vec<DimensionAnnotation> {
     let mut dimensions = Vec::new();
     for (constraint_index, constraint) in sketch.constraints.iter().enumerate() {
-        let Constraint::Distance { a, b, value } = constraint else {
-            continue;
+        let driving = sketch
+            .dimension_is_driving(constraint_index)
+            .unwrap_or(true);
+        let weak = sketch.dimension_is_weak(constraint_index);
+        let text_position = sketch.dimension_text_position(constraint_index);
+        let orientation = sketch.dimension_orientation(constraint_index);
+        let (kind, value, measured, text) = match constraint {
+            Constraint::Distance { a, b, value } => {
+                let (Some(pa), Some(pb)) = (point_of(sketch, *a), point_of(sketch, *b)) else {
+                    continue;
+                };
+                let measured = match orientation {
+                    DimensionOrientation::Aligned => (pb[0] - pa[0]).hypot(pb[1] - pa[1]),
+                    DimensionOrientation::Horizontal => (pb[0] - pa[0]).abs(),
+                    DimensionOrientation::Vertical => (pb[1] - pa[1]).abs(),
+                };
+                let shown = if driving { *value } else { measured };
+                (
+                    DimensionKind::Linear {
+                        a: pa,
+                        b: pb,
+                        orientation,
+                    },
+                    *value,
+                    measured,
+                    format_length(shown),
+                )
+            }
+            Constraint::HorizontalDistance { a, b, value } => {
+                let (Some(pa), Some(pb)) = (point_of(sketch, *a), point_of(sketch, *b)) else {
+                    continue;
+                };
+                let measured = (pb[0] - pa[0]).abs();
+                let shown = if driving { *value } else { measured };
+                (
+                    DimensionKind::Linear {
+                        a: pa,
+                        b: pb,
+                        orientation: DimensionOrientation::Horizontal,
+                    },
+                    *value,
+                    measured,
+                    format_length(shown),
+                )
+            }
+            Constraint::VerticalDistance { a, b, value } => {
+                let (Some(pa), Some(pb)) = (point_of(sketch, *a), point_of(sketch, *b)) else {
+                    continue;
+                };
+                let measured = (pb[1] - pa[1]).abs();
+                let shown = if driving { *value } else { measured };
+                (
+                    DimensionKind::Linear {
+                        a: pa,
+                        b: pb,
+                        orientation: DimensionOrientation::Vertical,
+                    },
+                    *value,
+                    measured,
+                    format_length(shown),
+                )
+            }
+            Constraint::Angle { a, b, value } => {
+                let (Some(first), Some(second)) =
+                    (line_points(sketch, *a), line_points(sketch, *b))
+                else {
+                    continue;
+                };
+                let d1 = [first.1[0] - first.0[0], first.1[1] - first.0[1]];
+                let d2 = [second.1[0] - second.0[0], second.1[1] - second.0[1]];
+                let measured = angle_between(d1, d2);
+                let shown = if driving { *value } else { measured };
+                (
+                    DimensionKind::Angular { first, second },
+                    *value,
+                    measured,
+                    format!("{}°", format_length(shown)),
+                )
+            }
+            Constraint::LineDistance { a, b, value } => {
+                let (Some(first), Some(second)) =
+                    (line_points(sketch, *a), line_points(sketch, *b))
+                else {
+                    continue;
+                };
+                let measured = line_distance(first, second);
+                let shown = if driving { *value } else { measured };
+                (
+                    DimensionKind::LineDistance { first, second },
+                    *value,
+                    measured,
+                    format_length(shown),
+                )
+            }
+            _ => continue,
         };
-        let (Some(pa), Some(pb)) = (point_of(sketch, *a), point_of(sketch, *b)) else {
-            continue;
-        };
-        let recorded = sketch.constrained_constraints.iter().find(|recorded| {
-            matches!(&recorded.constraint, Constraint::Distance { a: ra, b: rb, .. }
-                if ra == a && rb == b)
-        });
-        let driving = recorded.map(|recorded| recorded.is_driving).unwrap_or(true);
-        let weak = recorded
-            .map(|recorded| recorded.strength == ConstraintStrength::Weak)
-            .unwrap_or(false);
-        let measured = (pb[0] - pa[0]).hypot(pb[1] - pa[1]);
-        let text = format_length(*value);
         dimensions.push(DimensionAnnotation {
-            a: pa,
-            b: pb,
-            value: *value,
+            kind,
+            value,
             measured,
             text,
             driving,
             weak,
             constraint_index,
+            text_position,
         });
     }
     dimensions
 }
 
-/// The screen geometry of a dimension: the two measured points, the offset
-/// dimension line, and where the value is written.
+/// What a dimension looks like on screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DimensionScreenKind {
+    /// A measured line between two points.
+    Linear {
+        a: Pos2,
+        b: Pos2,
+        line_a: Pos2,
+        line_b: Pos2,
+    },
+    /// An arc of `radius` around a vertex, starting at `start_angle`.
+    Angular {
+        centre: Pos2,
+        radius: f32,
+        start_angle: f32,
+        sweep: f32,
+    },
+    /// The perpendicular between two lines.
+    LineDistance { from: Pos2, to: Pos2 },
+}
+
+/// The screen geometry of a dimension: what to draw and where the text goes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DimensionScreen {
-    pub a: Pos2,
-    pub b: Pos2,
-    pub line_a: Pos2,
-    pub line_b: Pos2,
+    pub kind: DimensionScreenKind,
     pub text: Pos2,
 }
 
-/// Where a dimension lands on screen, using the same offset the drawing uses.
+/// Where two screen-space lines cross.
+fn screen_line_intersection(a1: Pos2, a2: Pos2, b1: Pos2, b2: Pos2) -> Option<Pos2> {
+    let d1 = a2 - a1;
+    let d2 = b2 - b1;
+    let denom = d1.x * d2.y - d1.y * d2.x;
+    if denom.abs() < 1e-6 {
+        return None;
+    }
+    let t = ((b1.x - a1.x) * d2.y - (b1.y - a1.y) * d2.x) / denom;
+    Some(a1 + d1 * t)
+}
+
+/// Where a dimension lands on screen.
+///
+/// The text position is the one the user clicked when placing the dimension;
+/// without one the drawing picks the classic offset. A linear dimension then
+/// runs along itself, or horizontally/vertically at the text's height/column.
 pub fn dimension_screen_geometry(
     rect: Rect,
     camera: &OrbitCamera,
     plane: SketchPlane,
     dimension: &DimensionAnnotation,
 ) -> Option<DimensionScreen> {
-    let a = sketch_to_screen(rect, camera, plane, dimension.a)?;
-    let b = sketch_to_screen(rect, camera, plane, dimension.b)?;
-    let direction = b - a;
-    let length = direction.length();
-    if length < 1e-3 {
-        return None;
+    let to_screen = |point: [f64; 2]| sketch_to_screen(rect, camera, plane, point);
+    let placed = dimension.text_position.and_then(to_screen);
+    match &dimension.kind {
+        DimensionKind::Linear { a, b, orientation } => {
+            let pa = to_screen(*a)?;
+            let pb = to_screen(*b)?;
+            let (line_a, line_b, default_text) = match orientation {
+                DimensionOrientation::Horizontal => {
+                    let y = placed.map(|text| text.y).unwrap_or(pa.y - DIMENSION_OFFSET);
+                    let line_a = Pos2::new(pa.x, y);
+                    let line_b = Pos2::new(pb.x, y);
+                    let text = placed
+                        .unwrap_or(Pos2::new(line_a.x + (line_b.x - line_a.x) * 0.5, y - 11.0));
+                    (line_a, line_b, text)
+                }
+                DimensionOrientation::Vertical => {
+                    let x = placed.map(|text| text.x).unwrap_or(pa.x - DIMENSION_OFFSET);
+                    let line_a = Pos2::new(x, pa.y);
+                    let line_b = Pos2::new(x, pb.y);
+                    let text = placed
+                        .unwrap_or(Pos2::new(x - 11.0, line_a.y + (line_b.y - line_a.y) * 0.5));
+                    (line_a, line_b, text)
+                }
+                DimensionOrientation::Aligned => {
+                    let direction = pb - pa;
+                    let length = direction.length();
+                    if length < 1e-3 {
+                        return None;
+                    }
+                    let along = direction / length;
+                    let normal = Vec2::new(-along.y, along.x);
+                    let offset = placed
+                        .map(|text| (text - (pa + (pb - pa) * 0.5)).dot(normal))
+                        .unwrap_or(DIMENSION_OFFSET);
+                    let line_a = pa + normal * offset;
+                    let line_b = pb + normal * offset;
+                    let text = placed.unwrap_or(line_a + (line_b - line_a) * 0.5 + normal * 11.0);
+                    (line_a, line_b, text)
+                }
+            };
+            Some(DimensionScreen {
+                kind: DimensionScreenKind::Linear {
+                    a: pa,
+                    b: pb,
+                    line_a,
+                    line_b,
+                },
+                text: default_text,
+            })
+        }
+        DimensionKind::Angular { first, second } => {
+            let first_a = to_screen(first.0)?;
+            let first_b = to_screen(first.1)?;
+            let second_a = to_screen(second.0)?;
+            let second_b = to_screen(second.1)?;
+            let centre = screen_line_intersection(first_a, first_b, second_a, second_b)?;
+            let text = placed.unwrap_or_else(|| {
+                let a = first_b - centre;
+                let b = second_b - centre;
+                let sum = (a.normalized() + b.normalized()) * 40.0;
+                centre
+                    + if sum.length() < 1.0 {
+                        Vec2::new(30.0, -30.0)
+                    } else {
+                        sum
+                    }
+            });
+            let radius = (text - centre).length().max(18.0);
+            let start_angle = (first_b - centre).angle();
+            let end_angle = (second_b - centre).angle();
+            let mut sweep = end_angle - start_angle;
+            while sweep > std::f32::consts::PI {
+                sweep -= std::f32::consts::TAU;
+            }
+            while sweep < -std::f32::consts::PI {
+                sweep += std::f32::consts::TAU;
+            }
+            Some(DimensionScreen {
+                kind: DimensionScreenKind::Angular {
+                    centre,
+                    radius,
+                    start_angle,
+                    sweep,
+                },
+                text,
+            })
+        }
+        DimensionKind::LineDistance { first, second } => {
+            let first_a = to_screen(first.0)?;
+            let first_b = to_screen(first.1)?;
+            let second_a = to_screen(second.0)?;
+            let second_b = to_screen(second.1)?;
+            let direction = first_b - first_a;
+            let length = direction.length();
+            if length < 1e-3 {
+                return None;
+            }
+            let along = direction / length;
+            let normal = Vec2::new(-along.y, along.x);
+            let text = placed
+                .unwrap_or_else(|| first_a + (first_b - first_a) * 0.5 + normal * DIMENSION_OFFSET);
+            let project = |line_a: Pos2, line_b: Pos2| {
+                let line = line_b - line_a;
+                let line_length = line.length();
+                if line_length < 1e-3 {
+                    line_a
+                } else {
+                    line_a + line / line_length * (text - line_a).dot(line / line_length)
+                }
+            };
+            Some(DimensionScreen {
+                kind: DimensionScreenKind::LineDistance {
+                    from: project(first_a, first_b),
+                    to: project(second_a, second_b),
+                },
+                text,
+            })
+        }
     }
-    let along = direction / length;
-    let normal = Vec2::new(-along.y, along.x);
-    let offset = normal * DIMENSION_OFFSET;
-    let line_a = a + offset;
-    let line_b = b + offset;
-    Some(DimensionScreen {
-        a,
-        b,
-        line_a,
-        line_b,
-        text: line_a + (line_b - line_a) * 0.5 + normal * 11.0,
-    })
 }
 
 /// The index in `Sketch::constraints` of the dimension under a screen position.
@@ -665,10 +1255,38 @@ pub fn dimension_hit_test(
         let Some(screen) = dimension_screen_geometry(rect, camera, plane, &dimension) else {
             continue;
         };
-        let distance = distance_to_segment(pos, screen.line_a, screen.line_b)
-            .min(pos.distance(screen.text))
-            .min(distance_to_segment(pos, screen.a, screen.line_a))
-            .min(distance_to_segment(pos, screen.b, screen.line_b));
+        let distance = match screen.kind {
+            DimensionScreenKind::Linear {
+                a,
+                b,
+                line_a,
+                line_b,
+            } => distance_to_segment(pos, line_a, line_b)
+                .min(pos.distance(screen.text))
+                .min(distance_to_segment(pos, a, line_a))
+                .min(distance_to_segment(pos, b, line_b)),
+            DimensionScreenKind::Angular {
+                centre,
+                radius,
+                start_angle,
+                sweep,
+            } => {
+                let mut distance = pos.distance(screen.text);
+                let mut previous = None;
+                for step in 0..=24 {
+                    let angle = start_angle + sweep * step as f32 / 24.0;
+                    let point = centre + Vec2::new(angle.cos(), angle.sin()) * radius;
+                    if let Some(previous) = previous {
+                        distance = distance.min(distance_to_segment(pos, previous, point));
+                    }
+                    previous = Some(point);
+                }
+                distance
+            }
+            DimensionScreenKind::LineDistance { from, to } => {
+                distance_to_segment(pos, from, to).min(pos.distance(screen.text))
+            }
+        };
         if distance <= threshold && best.map_or(true, |(_, best)| distance < best) {
             best = Some((dimension.constraint_index, distance));
         }
@@ -920,6 +1538,8 @@ pub struct ToolParams {
     pub offset_distance: f64,
     pub pattern_count: usize,
     pub pattern_spacing: f64,
+    /// Radius of a circle drawn tangent to two lines.
+    pub circle_radius: f64,
 }
 
 impl Default for ToolParams {
@@ -928,6 +1548,7 @@ impl Default for ToolParams {
             offset_distance: 5.0,
             pattern_count: 3,
             pattern_spacing: 10.0,
+            circle_radius: 10.0,
         }
     }
 }
@@ -971,6 +1592,43 @@ pub fn command_step(
                 .extend_entity(line, hit.id)
                 .map_err(|error| error.to_string())?;
             Ok("Line extended to the target.".to_string())
+        }
+        SketchTool::CircleTangent => {
+            if hit.kind != SketchEntityKind::Line {
+                return Err("Pick two lines for the tangent circle.".to_string());
+            }
+            picks.push(hit.id);
+            if picks.len() < 2 {
+                return Ok("Now click the second line.".to_string());
+            }
+            let (first_line, second_line) = (picks[0], picks[1]);
+            picks.clear();
+            let ends = |sketch: &Sketch, id: Uuid| -> Option<([f64; 2], [f64; 2])> {
+                let line = sketch.lines.iter().find(|line| line.id == id)?;
+                Some((point_of(sketch, line.a)?, point_of(sketch, line.b)?))
+            };
+            let (Some(first), Some(second)) = (ends(sketch, first_line), ends(sketch, second_line))
+            else {
+                return Err("One of the lines is gone.".to_string());
+            };
+            match circle_tangent_to_two_lines(first, second, params.circle_radius, cursor) {
+                Some((centre, radius)) => {
+                    let circle = sketch.add_circle(centre[0], centre[1], radius);
+                    sketch.constraints.push(Constraint::Tangent {
+                        a: circle,
+                        b: first_line,
+                    });
+                    sketch.constraints.push(Constraint::Tangent {
+                        a: circle,
+                        b: second_line,
+                    });
+                    Ok(format!(
+                        "Tangent circle of radius {}.",
+                        format_length(radius)
+                    ))
+                }
+                None => Err("Those lines are parallel: no finite tangent circle.".to_string()),
+            }
         }
         SketchTool::Offset => {
             if hit.kind != SketchEntityKind::Line {
@@ -1036,7 +1694,6 @@ pub enum ConstraintAction {
     Concentric,
     Midpoint,
     Coincident,
-    Dimension,
 }
 
 impl ConstraintAction {
@@ -1051,7 +1708,6 @@ impl ConstraintAction {
             ConstraintAction::Concentric => "select two circles or arcs",
             ConstraintAction::Midpoint => "select a point and a line",
             ConstraintAction::Coincident => "select two points",
-            ConstraintAction::Dimension => "select a line, or two points",
         }
     }
 }
@@ -1196,36 +1852,6 @@ pub fn apply_constraint(
             });
             Ok("Symmetric added about the selected line.".to_string())
         }
-        ConstraintAction::Dimension => {
-            let (a, b, label) = if lines.len() == 1 && points.is_empty() {
-                let line = sketch
-                    .lines
-                    .iter()
-                    .find(|line| line.id == lines[0])
-                    .ok_or_else(|| "the selected line is gone".to_string())?;
-                (line.a, line.b, "line")
-            } else if points.len() == 2 && lines.is_empty() && curves.is_empty() {
-                (points[0], points[1], "points")
-            } else {
-                return need("select a line, or exactly two points");
-            };
-            if sketch.constraints.iter().any(|constraint| {
-                matches!(constraint, Constraint::Distance { a: ra, b: rb, .. }
-                    if (ra == &a && rb == &b) || (ra == &b && rb == &a))
-            }) {
-                return Err("that distance already has a dimension".to_string());
-            }
-            let (Some(pa), Some(pb)) = (point_of(sketch, a), point_of(sketch, b)) else {
-                return Err("the selected geometry has no points".to_string());
-            };
-            let value = (pb[0] - pa[0]).hypot(pb[1] - pa[1]);
-            sketch.add_dimension(a, b, value, true, true);
-            Ok(format!(
-                "Dimension added: {} = {}",
-                label,
-                format_length(value)
-            ))
-        }
     }
 }
 
@@ -1255,6 +1881,9 @@ pub struct OverlayState<'a> {
     /// The dimension selected in the viewport, by its index in the sketch
     /// constraints.
     pub selected_dimension: Option<usize>,
+    /// The dimension whose value is being edited in place: its number is not
+    /// drawn, the editor shows itself.
+    pub editing_dimension: Option<usize>,
 }
 
 /// Draw the open sketch: its geometry, its constraints, its dimensions, the
@@ -1416,17 +2045,63 @@ pub fn draw_sketch_overlay(
 
     for dimension in dimensions(sketch) {
         let selected = state.selected_dimension == Some(dimension.constraint_index);
-        draw_dimension(&painter, rect, camera, plane, &dimension, selected);
+        let editing = state.editing_dimension == Some(dimension.constraint_index);
+        draw_dimension(&painter, rect, camera, plane, &dimension, selected, editing);
+    }
+
+    // The two references that position the sketch: R1 along the X axis, R2
+    // along the Y axis, so the coordinate system is anchored to something the
+    // user (and the feature) can name.
+    if let Some(origin) = sketch_to_screen(rect, camera, plane, [0.0, 0.0]) {
+        for (role, direction, sign) in [
+            (SketchReferenceRole::Orientation, Vec2::new(1.0, 0.0), 1.0),
+            (SketchReferenceRole::Automatic, Vec2::new(0.0, 1.0), 1.0),
+        ] {
+            if let Some(reference) = sketch.reference(role) {
+                painter.text(
+                    origin + direction * 70.0 * sign,
+                    Align2::CENTER_CENTER,
+                    format!(
+                        "{}: {}",
+                        if role == SketchReferenceRole::Orientation {
+                            "R1"
+                        } else {
+                            "R2"
+                        },
+                        reference.label
+                    ),
+                    FontId::proportional(10.0),
+                    CONSTRAINT,
+                );
+            }
+        }
     }
 
     // The shape the clicks so far would finish.
     if let Some(cursor) = state.cursor {
         let tool = state.draft.tool();
         let screen = |point: [f64; 2]| sketch_to_screen(rect, camera, plane, point);
+        let pending = state.draft.pending();
         match tool {
-            SketchTool::Rectangle => {
-                if let Some(first) = state.draft.pending() {
-                    let corners = [first, [cursor[0], first[1]], cursor, [first[0], cursor[1]]];
+            SketchTool::Rectangle | SketchTool::RectangleCenter => {
+                if let Some(centre) = pending {
+                    let corners: [[f64; 2]; 4] = if tool == SketchTool::Rectangle {
+                        [
+                            centre,
+                            [cursor[0], centre[1]],
+                            cursor,
+                            [centre[0], cursor[1]],
+                        ]
+                    } else {
+                        let dx = (cursor[0] - centre[0]).abs();
+                        let dy = (cursor[1] - centre[1]).abs();
+                        [
+                            [centre[0] - dx, centre[1] - dy],
+                            [centre[0] + dx, centre[1] - dy],
+                            [centre[0] + dx, centre[1] + dy],
+                            [centre[0] - dx, centre[1] + dy],
+                        ]
+                    };
                     let corners: Vec<Pos2> = corners
                         .iter()
                         .filter_map(|corner| screen(*corner))
@@ -1436,27 +2111,70 @@ pub fn draw_sketch_overlay(
                     }
                 }
             }
+            SketchTool::RectangleSkewed => match state.draft.pending_points() {
+                [first] => {
+                    if let (Some(a), Some(b)) = (screen(*first), screen(cursor)) {
+                        painter.line_segment([a, b], Stroke::new(1.0_f32, PREVIEW));
+                    }
+                }
+                [first, second] => {
+                    if let Some(corners) = skewed_rectangle_corners(*first, *second, cursor) {
+                        let corners: Vec<Pos2> = corners
+                            .iter()
+                            .filter_map(|corner| screen(*corner))
+                            .collect();
+                        if corners.len() == 4 {
+                            painter.add(Shape::closed_line(corners, Stroke::new(1.4_f32, PREVIEW)));
+                        }
+                    } else if let (Some(a), Some(b)) = (screen(*first), screen(*second)) {
+                        painter.line_segment([a, b], Stroke::new(1.0_f32, PREVIEW));
+                    }
+                }
+                _ => {}
+            },
             SketchTool::Line => {
-                if let (Some(first), Some(end)) = (state.draft.pending(), screen(cursor)) {
+                if let (Some(first), Some(end)) = (pending, screen(cursor)) {
                     if let Some(start) = screen(first) {
                         painter.line_segment([start, end], Stroke::new(1.4_f32, PREVIEW));
                     }
                 }
             }
+            SketchTool::LineChain => {
+                let mut points = state.draft.pending_points().to_vec();
+                points.push(cursor);
+                let samples: Vec<Pos2> = points.iter().filter_map(|point| screen(*point)).collect();
+                if samples.len() >= 2 {
+                    painter.add(Shape::line(samples, Stroke::new(1.4_f32, PREVIEW)));
+                }
+                // The closing point is the first one: show it as a target.
+                if let Some(first) = state.draft.pending_points().first() {
+                    if let Some(target) = screen(*first) {
+                        painter.circle_stroke(target, CLOSE_MARKER, Stroke::new(1.4_f32, PREVIEW));
+                    }
+                }
+            }
             SketchTool::Circle => {
-                if let Some(first) = state.draft.pending() {
-                    let radius = (cursor[0] - first[0]).hypot(cursor[1] - first[1]);
-                    let samples: Vec<Pos2> = (0..=64)
-                        .filter_map(|step| {
-                            let angle = step as f64 / 64.0 * std::f64::consts::TAU;
-                            screen([
-                                first[0] + radius * angle.cos(),
-                                first[1] + radius * angle.sin(),
-                            ])
-                        })
-                        .collect();
-                    if samples.len() >= 2 {
-                        painter.add(Shape::line(samples, Stroke::new(1.4_f32, PREVIEW)));
+                if let Some(first) = pending {
+                    draw_preview_circle(&painter, &screen, first, cursor);
+                }
+            }
+            SketchTool::CircleDiameter => {
+                if let Some(first) = pending {
+                    let (centre, radius) = circle_from_diameter(first, cursor);
+                    draw_preview_circle(&painter, &screen, centre, [centre[0] + radius, centre[1]]);
+                }
+            }
+            SketchTool::Polygon(sides) => {
+                if let Some(centre) = pending {
+                    if (cursor[0] - centre[0]).hypot(cursor[1] - centre[1]) > 1e-9 {
+                        let corners = regular_polygon(centre, cursor, sides.max(3) as usize);
+                        let corners: Vec<Pos2> = corners
+                            .iter()
+                            .filter_map(|corner| screen(*corner))
+                            .collect();
+                        if corners.len() >= 3 {
+                            painter.add(Shape::closed_line(corners, Stroke::new(1.4_f32, PREVIEW)));
+                        }
                     }
                 }
             }
@@ -1508,26 +2226,51 @@ pub fn draw_sketch_overlay(
         }
     }
 
-    // Where the next click would land, and at which grid node.
-    if let Some(cursor) = state.cursor {
-        if let Some(screen) = sketch_to_screen(rect, camera, plane, cursor) {
-            let stroke = Stroke::new(1.0_f32, PREVIEW);
-            painter.line_segment(
-                [screen - Vec2::new(7.0, 0.0), screen + Vec2::new(7.0, 0.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [screen - Vec2::new(0.0, 7.0), screen + Vec2::new(0.0, 7.0)],
-                stroke,
-            );
-            painter.text(
-                screen + Vec2::new(10.0, 14.0),
-                Align2::LEFT_TOP,
-                format!("{:.1}, {:.1}", cursor[0], cursor[1]),
-                FontId::monospace(11.0),
-                TEXT,
-            );
+    // The snap cross and the coordinate readout belong to the tools that build
+    // geometry; with a picking tool the system cursor is left alone.
+    if state.draft.tool().creates_geometry() {
+        if let Some(cursor) = state.cursor {
+            if let Some(screen) = sketch_to_screen(rect, camera, plane, cursor) {
+                let stroke = Stroke::new(1.0_f32, PREVIEW);
+                painter.line_segment(
+                    [screen - Vec2::new(7.0, 0.0), screen + Vec2::new(7.0, 0.0)],
+                    stroke,
+                );
+                painter.line_segment(
+                    [screen - Vec2::new(0.0, 7.0), screen + Vec2::new(0.0, 7.0)],
+                    stroke,
+                );
+                painter.text(
+                    screen + Vec2::new(10.0, 14.0),
+                    Align2::LEFT_TOP,
+                    format!("{:.1}, {:.1}", cursor[0], cursor[1]),
+                    FontId::monospace(11.0),
+                    TEXT,
+                );
+            }
         }
+    }
+}
+
+/// The ghost circle of a circle tool: centre and a point on it.
+fn draw_preview_circle(
+    painter: &egui::Painter,
+    screen: &impl Fn([f64; 2]) -> Option<Pos2>,
+    centre: [f64; 2],
+    on: [f64; 2],
+) {
+    let radius = (on[0] - centre[0]).hypot(on[1] - centre[1]);
+    let samples: Vec<Pos2> = (0..=64)
+        .filter_map(|step| {
+            let angle = step as f64 / 64.0 * std::f64::consts::TAU;
+            screen([
+                centre[0] + radius * angle.cos(),
+                centre[1] + radius * angle.sin(),
+            ])
+        })
+        .collect();
+    if samples.len() >= 2 {
+        painter.add(Shape::line(samples, Stroke::new(1.4_f32, PREVIEW)));
     }
 }
 
@@ -1538,17 +2281,11 @@ fn draw_dimension(
     plane: SketchPlane,
     dimension: &DimensionAnnotation,
     selected: bool,
+    editing: bool,
 ) {
     let Some(screen) = dimension_screen_geometry(rect, camera, plane, dimension) else {
         return;
     };
-    let (a, b) = (screen.a, screen.b);
-    let (line_a, line_b) = (screen.line_a, screen.line_b);
-    let direction = b - a;
-    // The geometry helper only returns a dimension with a real length.
-    let along = direction / direction.length();
-    let normal = Vec2::new(-along.y, along.x);
-
     let colour = if selected {
         SELECTED
     } else if !dimension.driving {
@@ -1561,17 +2298,74 @@ fn draw_dimension(
     let thin = Stroke::new(1.0_f32, colour);
     let body = Stroke::new(if selected { 2.2_f32 } else { 1.4_f32 }, colour);
 
-    // The extension lines from the geometry to the dimension line.
-    painter.line_segment([a, line_a], thin);
-    painter.line_segment([b, line_b], thin);
-    // The dimension line, with an arrowhead at each end.
-    painter.line_segment([line_a, line_b], body);
-    for (tip, sign) in [(line_a, 1.0), (line_b, -1.0)] {
-        let back = tip + along * sign * 9.0;
-        painter.line_segment([tip, back + normal * 3.0], body);
-        painter.line_segment([tip, back - normal * 3.0], body);
+    match screen.kind {
+        DimensionScreenKind::Linear {
+            a,
+            b,
+            line_a,
+            line_b,
+        } => {
+            let direction = line_b - line_a;
+            let length = direction.length();
+            if length < 1e-3 {
+                return;
+            }
+            let along = direction / length;
+            let normal = Vec2::new(-along.y, along.x);
+            // Extension lines from the geometry to the dimension line.
+            painter.line_segment([a, line_a], thin);
+            painter.line_segment([b, line_b], thin);
+            painter.line_segment([line_a, line_b], body);
+            for (tip, sign) in [(line_a, 1.0), (line_b, -1.0)] {
+                let back = tip + along * sign * 9.0;
+                painter.line_segment([tip, back + normal * 3.0], body);
+                painter.line_segment([tip, back - normal * 3.0], body);
+            }
+        }
+        DimensionScreenKind::Angular {
+            centre,
+            radius,
+            start_angle,
+            sweep,
+        } => {
+            let samples: Vec<Pos2> = (0..=24)
+                .map(|step| {
+                    let angle = start_angle + sweep * step as f32 / 24.0;
+                    centre + Vec2::new(angle.cos(), angle.sin()) * radius
+                })
+                .collect();
+            for pair in samples.windows(2) {
+                painter.line_segment([pair[0], pair[1]], body);
+            }
+            // A short extension of each line out to the arc.
+            if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
+                painter.line_segment([centre, *first], thin);
+                painter.line_segment([centre, *last], thin);
+                painter.circle_filled(*first, 2.0, colour);
+                painter.circle_filled(*last, 2.0, colour);
+            }
+        }
+        DimensionScreenKind::LineDistance { from, to } => {
+            let direction = to - from;
+            let length = direction.length();
+            if length < 1e-3 {
+                return;
+            }
+            let along = direction / length;
+            let normal = Vec2::new(-along.y, along.x);
+            painter.line_segment([from, to], body);
+            for (tip, sign) in [(from, 1.0), (to, -1.0)] {
+                let back = tip + along * sign * 9.0;
+                painter.line_segment([tip, back + normal * 3.0], body);
+                painter.line_segment([tip, back - normal * 3.0], body);
+            }
+        }
     }
 
+    if editing {
+        // The in-place editor draws its own field over the number.
+        return;
+    }
     let text = if dimension.driving {
         dimension.text.clone()
     } else {
@@ -1849,25 +2643,6 @@ mod tests {
                 .iter()
                 .any(|constraint| matches!(constraint, Constraint::Perpendicular { .. }))
         );
-    }
-
-    #[test]
-    fn the_dimension_action_measures_the_selected_line() {
-        let mut sketch = Sketch::new("test");
-        let a = sketch.add_point(0.0, 0.0);
-        let b = sketch.add_point(3.0, 4.0);
-        let line = sketch.add_line(a, b);
-
-        let message =
-            apply_constraint(&mut sketch, &[line], ConstraintAction::Dimension).expect("dimension");
-        assert!(message.contains('5'), "{message}");
-        let dimensions = dimensions(&sketch);
-        assert_eq!(dimensions.len(), 1);
-        assert_eq!(dimensions[0].value, 5.0);
-        assert!(dimensions[0].driving);
-
-        // A second dimension on the same pair is refused, not doubled.
-        assert!(apply_constraint(&mut sketch, &[line], ConstraintAction::Dimension).is_err());
     }
 
     #[test]
@@ -2153,6 +2928,223 @@ mod tests {
         let point = sketch.point(id).unwrap();
         assert_eq!([point.x, point.y], [5.0, 7.0]);
         assert!(!move_point(&mut sketch, Uuid::new_v4(), [0.0, 0.0]));
+    }
+
+    #[test]
+    fn the_centre_rectangle_is_centred_on_the_first_click() {
+        let mut sketch = Sketch::new("test");
+        let mut draft = SketchDraft::default();
+        draft.begin(SketchTool::RectangleCenter);
+        draft.click(&mut sketch, [10.0, 10.0]);
+        assert!(matches!(
+            draft.click(&mut sketch, [30.0, 20.0]),
+            SketchEdit::Rectangle(_)
+        ));
+        let corners: Vec<[f64; 2]> = sketch.points.iter().map(|p| [p.x, p.y]).collect();
+        for expected in [[-10.0, 0.0], [30.0, 0.0], [30.0, 20.0], [-10.0, 20.0]] {
+            assert!(
+                corners.contains(&expected),
+                "corner {expected:?} missing from {corners:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_skewed_rectangle_follows_the_first_edge() {
+        let mut sketch = Sketch::new("test");
+        let mut draft = SketchDraft::default();
+        draft.begin(SketchTool::RectangleSkewed);
+        // First edge along +X, width 5 upwards.
+        draft.click(&mut sketch, [0.0, 0.0]);
+        draft.click(&mut sketch, [10.0, 0.0]);
+        assert!(matches!(
+            draft.click(&mut sketch, [0.0, 5.0]),
+            SketchEdit::Polygon(_)
+        ));
+        let corners: Vec<[f64; 2]> = sketch.points.iter().map(|p| [p.x, p.y]).collect();
+        for expected in [[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]] {
+            assert!(
+                corners.contains(&expected),
+                "corner {expected:?} missing from {corners:?}"
+            );
+        }
+        // It stays a rectangle: two parallels and one perpendicular.
+        assert!(
+            sketch
+                .constraints
+                .iter()
+                .any(|constraint| matches!(constraint, Constraint::Parallel { .. }))
+        );
+        assert!(
+            sketch
+                .constraints
+                .iter()
+                .any(|constraint| matches!(constraint, Constraint::Perpendicular { .. }))
+        );
+    }
+
+    #[test]
+    fn the_polygon_tools_build_a_regular_polygon() {
+        for (sides, tool) in [
+            (3, SketchTool::Polygon(3)),
+            (5, SketchTool::Polygon(5)),
+            (6, SketchTool::Polygon(6)),
+        ] {
+            let mut sketch = Sketch::new("test");
+            let mut draft = SketchDraft::default();
+            draft.begin(tool);
+            draft.click(&mut sketch, [0.0, 0.0]);
+            assert!(matches!(
+                draft.click(&mut sketch, [10.0, 0.0]),
+                SketchEdit::Polygon(_)
+            ));
+            assert_eq!(sketch.points.len(), sides, "{tool:?}");
+            assert_eq!(sketch.lines.len(), sides, "{tool:?}");
+            // Every side is the same length.
+            let lengths: Vec<f64> = sketch
+                .lines
+                .iter()
+                .map(|line| {
+                    let a = sketch.point(line.a).unwrap();
+                    let b = sketch.point(line.b).unwrap();
+                    (b.x - a.x).hypot(b.y - a.y)
+                })
+                .collect();
+            let first = lengths[0];
+            assert!(
+                lengths.iter().all(|length| (length - first).abs() < 1e-6),
+                "{lengths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_diameter_circle_puts_both_points_on_the_rim() {
+        let mut sketch = Sketch::new("test");
+        let mut draft = SketchDraft::default();
+        draft.begin(SketchTool::CircleDiameter);
+        draft.click(&mut sketch, [-10.0, 0.0]);
+        assert!(matches!(
+            draft.click(&mut sketch, [10.0, 0.0]),
+            SketchEdit::Circle(_)
+        ));
+        assert_eq!(sketch.circles.len(), 1);
+        let circle = &sketch.circles[0];
+        let centre = sketch.point(circle.center).unwrap();
+        assert!((centre.x).abs() < 1e-9 && (centre.y).abs() < 1e-9);
+        assert!((circle.radius - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_polyline_snaps_closed_and_leaves_the_tool() {
+        let mut sketch = Sketch::new("test");
+        let mut draft = SketchDraft::default();
+        draft.begin(SketchTool::LineChain);
+        draft.click(&mut sketch, [0.0, 0.0]);
+        draft.click(&mut sketch, [10.0, 0.0]);
+        draft.click(&mut sketch, [10.0, 10.0]);
+        // The app snaps the closing click exactly onto the first point.
+        assert!(matches!(
+            draft.click(&mut sketch, [0.0, 0.0]),
+            SketchEdit::Closed(_)
+        ));
+        assert_eq!(sketch.lines.len(), 3);
+        assert_eq!(draft.pending_points().len(), 0);
+        assert_eq!(
+            draft.tool(),
+            SketchTool::LineChain,
+            "the app leaves the tool"
+        );
+    }
+
+    #[test]
+    fn a_tangent_circle_sits_on_both_lines() {
+        // Two lines meeting at a right angle: a circle of radius 5 fits in the
+        // corner at (5, 5).
+        let first = ([-20.0, 0.0], [20.0, 0.0]);
+        let second = ([0.0, -20.0], [0.0, 20.0]);
+        let (centre, radius) =
+            circle_tangent_to_two_lines(first, second, 5.0, [5.0, 5.0]).expect("a circle");
+        assert!((radius - 5.0).abs() < 1e-9);
+        assert!(
+            (centre[0] - 5.0).abs() < 1e-6 && (centre[1] - 5.0).abs() < 1e-6,
+            "{centre:?}"
+        );
+
+        // Parallel lines never meet, so no tangent circle of that radius.
+        let parallel = ([0.0, 10.0], [10.0, 10.0]);
+        assert!(circle_tangent_to_two_lines(first, parallel, 5.0, [0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn angle_and_line_distance_helpers_agree_with_hand_values() {
+        assert!((angle_between([1.0, 0.0], [0.0, 1.0]) - 90.0).abs() < 1e-9);
+        assert!((angle_between([1.0, 0.0], [1.0, 0.0])).abs() < 1e-9);
+        assert!((angle_between([1.0, 0.0], [-1.0, 0.0]) - 180.0).abs() < 1e-9);
+        let distance = line_distance(([0.0, 0.0], [20.0, 0.0]), ([0.0, 7.0], [20.0, 7.0]));
+        assert!((distance - 7.0).abs() < 1e-9, "{distance}");
+    }
+
+    #[test]
+    fn an_angle_constraint_is_drawn_as_an_angular_dimension() {
+        let camera = top_camera();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let plane = xy_plane();
+        let mut sketch = Sketch::new("test");
+        let a = sketch.add_point(-20.0, 0.0);
+        let b = sketch.add_point(20.0, 0.0);
+        let first = sketch.add_line(a, b);
+        let c = sketch.add_point(0.0, -20.0);
+        let d = sketch.add_point(0.0, 20.0);
+        let second = sketch.add_line(c, d);
+        sketch.add_dimension_constraint(
+            Constraint::Angle {
+                a: first,
+                b: second,
+                value: 90.0,
+            },
+            true,
+            true,
+            Some([10.0, 10.0]),
+            DimensionOrientation::Aligned,
+        );
+
+        let dimensions = dimensions(&sketch);
+        assert_eq!(dimensions.len(), 1);
+        assert!(matches!(dimensions[0].kind, DimensionKind::Angular { .. }));
+        assert_eq!(dimensions[0].text, "90°");
+        let screen =
+            dimension_screen_geometry(rect, &camera, plane, &dimensions[0]).expect("on screen");
+        assert!(matches!(screen.kind, DimensionScreenKind::Angular { .. }));
+        assert_eq!(
+            dimension_hit_test(&sketch, rect, &camera, plane, screen.text, HIT_RADIUS),
+            Some(dimensions[0].constraint_index)
+        );
+    }
+
+    #[test]
+    fn a_horizontal_dimension_measures_the_x_distance() {
+        let mut sketch = Sketch::new("test");
+        let a = sketch.add_point(0.0, 0.0);
+        let b = sketch.add_point(30.0, 40.0);
+        sketch.add_dimension_constraint(
+            Constraint::HorizontalDistance { a, b, value: 30.0 },
+            true,
+            true,
+            Some([15.0, 60.0]),
+            DimensionOrientation::Horizontal,
+        );
+        let dimensions = dimensions(&sketch);
+        assert_eq!(dimensions.len(), 1);
+        assert_eq!(dimensions[0].measured, 30.0);
+        assert_eq!(dimensions[0].text, "30");
+        assert!(matches!(
+            dimensions[0].kind,
+            DimensionKind::Linear {
+                orientation: DimensionOrientation::Horizontal,
+                ..
+            }
+        ));
     }
 
     #[test]

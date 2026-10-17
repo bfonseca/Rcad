@@ -530,6 +530,7 @@ fn feature_kind_name(kind: &FeatureKind) -> &'static str {
         FeatureKind::Loft { .. } => "Loft",
         FeatureKind::Boundary { .. } => "Boundary",
         FeatureKind::Thicken { .. } => "Thicken",
+        FeatureKind::Sketch { .. } => "Sketch",
     }
 }
 

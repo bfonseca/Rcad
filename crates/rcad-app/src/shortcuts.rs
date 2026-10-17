@@ -132,6 +132,13 @@ impl Shortcuts {
 
 /// Handle all keyboard shortcuts for the application
 pub fn handle_shortcuts(app: &mut crate::app::RcadApp, ctx: &egui::Context, shortcuts: &Shortcuts) {
+    // While a text field has the keyboard, every digit and letter belongs to
+    // it: no shortcut may fire (a dimension value of "50" must not extrude,
+    // for instance). This applies to every text field in the application.
+    if ctx.wants_keyboard_input() || ctx.memory(|memory| memory.focused().is_some()) {
+        return;
+    }
+
     // Viewport navigation (no modifiers for number keys)
     if shortcuts.plain_pressed(ctx, shortcuts.view_front) {
         app.set_view_front();

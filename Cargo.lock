@@ -3388,6 +3388,7 @@ dependencies = [
  "chrono",
  "glam 0.30.10",
  "rcad-geom",
+ "rcad-sketch",
  "rmp-serde",
  "serde",
  "thiserror 2.0.21",
