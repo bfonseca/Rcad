@@ -111,14 +111,35 @@ visíveis no sólido. Sensação de “sólido”, não de “malha”.
   cilíndrico = 1 face em vez de ~32), mas **D2/D3 deixam de ser “depois de B”**:
   o custo superlinear por feature tem de ser atacado em paralelo com B.
 
-### A1 — Configuração do render target
-- [ ] Em `crates/rcad-app/src/main.rs`, configurar `eframe::NativeOptions` com
-      `depth_buffer: 24`, `stencil_buffer: 8` e `multisampling: 4` (valor a confirmar na A0/A7).
-- [ ] Confirmar que o egui continua a desenhar por cima sem artefactos.
-- [ ] Limitar o pipeline novo aos sólidos; grelha, eixos, anotações e sketch continuam no egui.
-- **Aceitação:** a app arranca sem erros de validação WGPU e o HUD do egui não muda.
+### A1 — Configuração do render target ✅
+- [x] Em `crates/rcad-app/src/main.rs`, configurar `eframe::NativeOptions` com
+      `msaa=4`, `depth=24` e `stencil=8` (constantes `MSAA_SAMPLES`, `DEPTH_BITS`,
+      `STENCIL_BITS`) e registar a configuração no arranque (`framebuffer: ...`).
+- [x] Confirmar que o egui continua a desenhar por cima sem artefactos.
+- [x] Manter grelha, eixos, anotações e sketch no egui; os sólidos continuam no painter até A2.
+- **Aceitação:** a app arranca e o HUD não muda. **Validado no renderer `glow`**; o
+  renderer WGPU não é validável nesta máquina (ver abaixo).
+
+**Resultado A1 (2026-10-17):**
+- Configuração aplicada: **4× MSAA, depth 24, stencil 8**, com log de arranque
+  reproduzível.
+- Validado com `--renderer glow` (X11 + llvmpipe): demo e chapa de 8 furos capturam
+  corretamente; toolbar, árvore, seleção e texto do egui desenham por cima sem artefactos.
+- **Limitação do ambiente:** não há GPU nem Vulkan utilizável (`vulkaninfo` não encontra
+  dispositivo) e o backend WGPU falha no `Surface::configure`; o modo `glow` é o único
+  executável aqui. Por isso:
+  - a validação "sem erros de validação WGPU" fica **pendente de hardware ou lavapipe**;
+  - A2 pode ser implementado e compilado, mas o Gate A visual exige GPU (ou um driver
+    Vulkan software instalado).
+- Custo do MSAA em software: frame time da chapa passou de ~8,4 ms para ~18 ms no
+  llvmpipe. Em GPU o custo é muito menor; **não comparar números de frame entre A0 e A1
+  sem notar a configuração**. Os tempos de kernel/rebuild (D) não são afetados.
+- As costuras entre triângulos da chapa continuam visíveis: o A1 prepara o *framebuffer*,
+  mas só o A2 (pipeline real) resolve o problema visual.
 
 ### A2 — Pipeline WGPU do viewport
+- [ ] Validar o pipeline num ambiente com GPU (ou lavapipe instalado); este ambiente de
+      desenvolvimento não tem nenhum.
 - [ ] Criar `crates/rcad-app/src/render/` com o `egui_wgpu::CallbackTrait`.
 - [ ] Criar `crates/rcad-app/shaders/cad_material.wgsl`.
 - [ ] Subir `TriangleMesh` para buffers de vértice/índice (sem copiar normais calculadas no CPU).
@@ -323,6 +344,7 @@ Com o build novo, o utilizador deve conseguir, sem tocar em código:
 | Otimizar sem medir | D0 obrigatório; métricas antes/depois por bloco |
 | Perder o trabalho já feito em referências | C0 parte do naming existente; não reescrever o que está testado |
 | Rebuild superlinear (medido no A0: ~4× por duplicação de furos) | D2/D3 em paralelo com B; medir cada alteração e manter o alvo de ≤500 ms para a chapa de 8 furos |
+| Ambiente sem GPU/Vulkan: o renderer WGPU não arranca e não pode ser validado localmente | Validar em hardware ou instalar um driver Vulkan software (lavapipe); manter o fallback `--renderer glow` para CI/screenshots |
 | Ambiente de medição (GPU vs software) | Registar o ambiente de cada medição; não comparar maçãs com laranjas |
 
 ---
@@ -354,8 +376,9 @@ Com o build novo, o utilizador deve conseguir, sem tocar em código:
 
 ## 12. Próximo passo imediato
 
-**A1** — configurar `eframe::NativeOptions` com depth/stencil/MSAA e começar o
-pipeline WGPU do viewport. O A0 está concluído e o “antes” está congelado em
+**A2** — criar o módulo `render/`, o shader `cad_material.wgsl` e o primeiro
+pipeline WGPU para os sólidos. A1 está concluído; a validação WGPU final fica
+dependente de um ambiente com GPU (ou lavapipe). O “antes” está congelado em
 [foundation-baseline.md](foundation-baseline.md).
 
 *Documento criado em 2026-10-17. Atualizar o estado das tarefas à medida que avançam.*

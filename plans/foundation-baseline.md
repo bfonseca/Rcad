@@ -137,6 +137,12 @@ por frame a 1400×900). O gargalo é o rebuild. O Bloco A é sobretudo uma
 **correção de qualidade visual** (depth, MSAA, arestas, sombreamento suave), não
 uma otimização de FPS. Num GPU real espera-se muito mais folga.
 
+> **Nota pós-A1 (2026-10-17):** o A1 ligou MSAA 4×, depth 24 e stencil 8. No
+> llvmpipe o frame time da chapa passou para ~18 ms; em GPU o custo é muito
+> menor. Os números desta secção são o “antes” (sem MSAA) e **não devem ser
+> comparados diretamente** com medições feitas depois do A1 sem notar a
+> configuração. Os tempos de rebuild/tesselação e de picking não são afetados.
+
 ---
 
 ## 6. Correções de infraestrutura feitas durante o A0
