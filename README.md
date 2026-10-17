@@ -300,7 +300,7 @@ and its state reconciliation.
 - [x] STEP/STL export through OCCT; STEP import in the kernel (not in the UI)
 - [x] MCP server (`rcad-mcp`, stdio, 13 tools + 3 resources; no prompts/TCP)
 - [x] CI workflow (`.github/workflows/ci.yml`): build + test blocking, clippy/fmt advisory
-- [x] 287 tests passing (3 ignored measurements) and a warning-free
+- [x] 287 tests passing (4 ignored measurements) and a warning-free
       `cargo check --workspace --all-targets`
 - [x] **WGPU solid pipeline** (depth 24/stencil 8, 4x MSAA, Blinn-Phong, per-face colours,
       selection/hover tint) with the painter kept as fallback — foundation A2/A3. Validated

@@ -733,6 +733,143 @@ mod tests {
         // default); a successful submission is the smoke test.
     }
 
+    /// The real app configuration is 4x MSAA plus a resolve target. Validate
+    /// that the pipeline's sample count, depth attachment and render pass agree;
+    /// a mismatch here is exactly what would fail only in the window.
+    #[test]
+    #[ignore = "needs a GPU (or software Vulkan/GL); run with --ignored --nocapture"]
+    fn headless_pipeline_accepts_the_apps_msaa_configuration() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let Some(adapter) = instance
+            .enumerate_adapters(wgpu::Backends::all())
+            .into_iter()
+            .next()
+        else {
+            eprintln!("no wgpu adapter available; skipping the MSAA smoke test");
+            return;
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("rcad headless MSAA device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("headless device");
+        let (width, height) = (128u32, 128u32);
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let msaa = 4;
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("msaa color"),
+            size,
+            mip_level_count: 1,
+            sample_count: msaa,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let resolve = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("msaa resolve"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("msaa depth"),
+            size,
+            mip_level_count: 1,
+            sample_count: msaa,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24PlusStencil8,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let resolve_view = resolve.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut resources = SolidResources::new(
+            &device,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            Some(wgpu::TextureFormat::Depth24PlusStencil8),
+            msaa,
+        );
+        let vertices = [
+            SolidVertex {
+                position: [0.0, 0.5, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                color: [1.0, 0.0, 0.0],
+            },
+            SolidVertex {
+                position: [-0.5, -0.5, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                color: [0.0, 1.0, 0.0],
+            },
+            SolidVertex {
+                position: [0.5, -0.5, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                color: [0.0, 0.0, 1.0],
+            },
+        ];
+        resources.upload(
+            &device,
+            &queue,
+            &vertices,
+            &[0, 1, 2],
+            SolidUniforms {
+                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                eye: [0.0, 0.0, 1.0, 1.0],
+                light: [0.0, 0.0, 1.0, 0.0],
+            },
+        );
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("msaa encoder"),
+        });
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("msaa pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        resolve_target: Some(&resolve_view),
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Discard,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                })
+                .forget_lifetime();
+            pass.set_pipeline(&resources.pipeline);
+            pass.set_bind_group(0, &resources.bind_group, &[]);
+            pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
+            pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..resources.index_count, 0, 0..1);
+        }
+        queue.submit(Some(encoder.finish()));
+        // No readback needed: creating the pipeline at sample_count=4 and drawing
+        // into a 4x MSAA attachment with a resolve target is the validation.
+    }
+
     /// Render the real demo mesh with the A2 pipeline into an offscreen
     /// texture, read it back and save a PNG for inspection. Ignored by default:
     /// needs a GPU (llvmpipe works). This is the closest thing to a visual A2

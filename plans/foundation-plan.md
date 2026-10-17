@@ -157,7 +157,9 @@ visíveis no sólido. Sensação de “sólido”, não de “malha”.
     cria o pipeline/depth/draw e passa na validação do WGPU;
   - `cargo test -p rcad-app headless_render_of_the_demo_writes_a_png -- --ignored --nocapture`
     corre o caminho real `prepare`+`paint` sobre a malha da demo (OCCT) e grava
-    `target/a2-headless-demo.png`; a imagem mostra o sólido sombreado com o corte cilíndrico.
+    `target/a2-headless-demo.png`; a imagem mostra o sólido sombreado com o corte cilíndrico;
+  - `headless_pipeline_accepts_the_apps_msaa_configuration` valida a configuração real de
+    **4× MSAA + resolve target + Depth24PlusStencil8**.
 - O que ainda **não** foi validado: a janela WGPU real (o `Surface::configure` falha neste
   ambiente). O Gate A visual tem de ser corrido no hardware do utilizador.
 
@@ -207,7 +209,7 @@ depois de B/D, a medição deve ser repetida.
 ### A7 — Gate A (aceitação visual + números)
 - [ ] Comparação lado a lado com as imagens A0 (sem facetas, com arestas, sem serrilhado).
 - [ ] FPS e tempo de picking dentro do orçamento definido em D.
-- [ ] Nenhuma regressão na suite (287 testes, 3 medições ignoradas); `cargo check
+- [ ] Nenhuma regressão na suite (287 testes, 4 medições ignoradas); `cargo check
       --workspace --all-targets` com 0 avisos.
 - **O utilizador valida visualmente antes de passar ao Bloco B.**
 
