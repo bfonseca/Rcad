@@ -284,3 +284,6 @@ por fazer; Sweep/VSS/Loft multi-sketch ficam para o bloco seguinte.
 **Fechar o Bloco C** — C4 (roles estáveis), C5 (reparação ligada ao grafo), C2 (contagem/
 destaque e Rename) e o Gate C com o guião do utilizador; os follow-ups do Bloco B
 (Loft/Boundary/BSpline) ficam na mesma fila. O “antes” continua congelado nas imagens desta página.
+
+O retrato consolidado (feito/testado, pendente e próximos passos) está em
+[status-2026-10-18.md](status-2026-10-18.md).

@@ -495,3 +495,6 @@ destaque e Rename), C6 (Gate C com o guião do utilizador) e os follow-ups do Bl
 [foundation-baseline.md](foundation-baseline.md).
 
 *Documento criado em 2026-10-17. Atualizar o estado das tarefas à medida que avançam.*
+
+**Retrato consolidado:** [status-2026-10-18.md](status-2026-10-18.md) — feito/testado,
+pendente e ordem dos próximos passos.

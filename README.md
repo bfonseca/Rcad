@@ -283,11 +283,14 @@ reference/parent-child dependency layer, with performance measured throughout. F
 Hole, Pattern, Shell, Mirror, assembly and drawings are deliberately postponed until that base
 is solid.
 
+**Current snapshot (2026-10-18):** [plans/status-2026-10-18.md](plans/status-2026-10-18.md) —
+what is done and tested, what is still missing and the recommended next steps.
+
 See [instructions.md](instructions.md) for the long-term product scope and
 [plans/implementation-tasks.md](plans/implementation-tasks.md) for the historical task backlog
 and its state reconciliation.
 
-### Current Status (verified 2026-10-17, commit `b898185`)
+### Current Status (verified 2026-10-18, code commit `c58b9b5`)
 - [x] Project gate and `rcad.toml` manifest (project folder, per-project surface colours,
       recent projects, auto-open last; tolerances, global variables and project functions are
       parsed and edited but not applied yet)
