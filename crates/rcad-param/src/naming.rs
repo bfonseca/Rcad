@@ -986,8 +986,9 @@ mod tests {
         let zs: Vec<f32> = result.display_mesh.positions.iter().map(|p| p[2]).collect();
         let lowest = zs.iter().cloned().fold(f32::INFINITY, f32::min);
         let highest = zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        assert!((lowest - 8.0).abs() < 1e-2, "sits on the face: {lowest}");
-        assert!(highest >= 12.0 - 1e-2, "swept from it: {highest}");
+        // The base box and the material added on top form one body now.
+        assert!((lowest - 0.0).abs() < 1e-2, "the base box is still there: {lowest}");
+        assert!(highest >= 12.0 - 1e-2, "the profile swept from the face: {highest}");
     }
 
     /// A plane reference that is gone is reported, and the last known numbers are

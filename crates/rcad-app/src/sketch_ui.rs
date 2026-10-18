@@ -82,8 +82,9 @@ pub enum SketchTool {
     Polygon(u8),
     /// Three clicks: the start, the end, and a point the arc passes through.
     Arc3Point,
-    /// Click a line near the end the arc should start on, then the arc's end.
-    /// The arc leaves that end along the line, so it is tangent by construction.
+    /// Click a line near the end the arc starts on, then either a point for a
+    /// free endpoint or a second line. With a second line the arc is tangent to
+    /// both lines, like a Creo fillet arc.
     ArcTangent,
     /// Three clicks (start, end, shoulder); the rho comes from the strip.
     Conic,
@@ -212,7 +213,7 @@ impl SketchTool {
             SketchTool::Polygon(_) => "Click the centre, then a vertex.",
             SketchTool::Arc3Point => "Click the start, the end, then a point on the arc.",
             SketchTool::ArcTangent => {
-                "Click a line near the end the arc starts on, then the arc's end."
+                "Click a line near the end the arc starts on, then a second line for a two-line tangent arc (or a point for a free end)."
             }
             SketchTool::Conic => "Click the start, the end, then a point the curve passes through.",
             SketchTool::Text => "Click where the text goes, then type it.",
@@ -920,6 +921,84 @@ pub fn tangent_arc(
 }
 
 /// Where \`point\` lands when dropped perpendicular on the line through \`a\` and \`b\`.
+/// The arc that leaves `start` along `direction` and is also tangent to the
+/// line through `line_a` and `line_b`. The centre is the intersection of the
+/// normal to the first line and the line offset by the radius from the second;
+/// the two possible sides are tried and the one nearest the cursor wins.
+pub fn tangent_arc_to_line(
+    start: [f64; 2],
+    direction: [f64; 2],
+    line_a: [f64; 2],
+    line_b: [f64; 2],
+    near: [f64; 2],
+) -> Option<([f64; 2], f64, f64, f64)> {
+    let length = direction[0].hypot(direction[1]);
+    if length < 1e-9 {
+        return None;
+    }
+    let (dx, dy) = (direction[0] / length, direction[1] / length);
+    let (lx, ly) = (line_b[0] - line_a[0], line_b[1] - line_a[1]);
+    let line_length = lx.hypot(ly);
+    if line_length < 1e-9 {
+        return None;
+    }
+    let (lx, ly) = (lx / line_length, ly / line_length);
+    let normal = [-dy, dx];
+    let line_normal = [-ly, lx];
+    let side_hint = (near[0] - start[0]) * normal[0] + (near[1] - start[1]) * normal[1];
+    let side = if side_hint.abs() < 1e-12 { 1.0 } else { side_hint.signum() };
+    let normal = [normal[0] * side, normal[1] * side];
+
+    let mut best: Option<(([f64; 2], f64, f64, f64), f64)> = None;
+    for sign in [1.0_f64, -1.0] {
+        let offset = (start[0] - line_a[0]) * line_normal[0]
+            + (start[1] - line_a[1]) * line_normal[1];
+        let dot = normal[0] * line_normal[0] + normal[1] * line_normal[1];
+        let denominator = dot - sign;
+        if denominator.abs() < 1e-12 {
+            continue;
+        }
+        let radius = -offset / denominator;
+        if !radius.is_finite() || radius <= 1e-9 {
+            continue;
+        }
+        let centre = [start[0] + normal[0] * radius, start[1] + normal[1] * radius];
+        let touch = [
+            centre[0] - line_normal[0] * sign * radius,
+            centre[1] - line_normal[1] * sign * radius,
+        ];
+        let start_angle = (start[1] - centre[1]).atan2(start[0] - centre[0]);
+        let end_angle = (touch[1] - centre[1]).atan2(touch[0] - centre[0]);
+        let mut sweep = end_angle - start_angle;
+        while sweep > std::f64::consts::PI {
+            sweep -= std::f64::consts::TAU;
+        }
+        while sweep < -std::f64::consts::PI {
+            sweep += std::f64::consts::TAU;
+        }
+        let radial = [start[0] - centre[0], start[1] - centre[1]];
+        let counter_clockwise = [-radial[1], radial[0]];
+        let tangent = if sweep >= 0.0 {
+            counter_clockwise
+        } else {
+            [-counter_clockwise[0], -counter_clockwise[1]]
+        };
+        if tangent[0] * dx + tangent[1] * dy < 0.0 {
+            sweep = if sweep >= 0.0 {
+                sweep - std::f64::consts::TAU
+            } else {
+                sweep + std::f64::consts::TAU
+            };
+        }
+        let score = (touch[0] - near[0]).hypot(touch[1] - near[1]);
+        let candidate = (centre, radius, start_angle, start_angle + sweep);
+        if best.as_ref().map(|(_, best_score)| score < *best_score).unwrap_or(true) {
+            best = Some((candidate, score));
+        }
+    }
+    best.map(|(candidate, _)| candidate)
+}
+
 pub fn foot_on_line(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> Option<[f64; 2]> {
     let direction = [b[0] - a[0], b[1] - a[1]];
     let length_squared = direction[0] * direction[0] + direction[1] * direction[1];
@@ -3928,6 +4007,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_tangent_arc_can_close_on_a_second_line() {
+        // Leave the end of a horizontal line heading +X, and close on the
+        // vertical line x = 15. The circle radius 5 touches both.
+        let (centre, radius, start_angle, end_angle) = tangent_arc_to_line(
+            [10.0, 0.0],
+            [1.0, 0.0],
+            [15.0, -10.0],
+            [15.0, 10.0],
+            [15.0, 5.0],
+        )
+        .expect("a tangent arc exists");
+        assert!((centre[0] - 10.0).abs() < 1e-9);
+        assert!((centre[1] - 5.0).abs() < 1e-9);
+        assert!((radius - 5.0).abs() < 1e-9);
+        assert!((start_angle + std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        let end = [
+            centre[0] + radius * end_angle.cos(),
+            centre[1] + radius * end_angle.sin(),
+        ];
+        assert!((end[0] - 15.0).abs() < 1e-6);
+        assert!((end[1] - 5.0).abs() < 1e-6);
     }
 
     #[test]

@@ -283,7 +283,7 @@ Loft/Boundary deixam de ser extrusões falsas.
 - [x] Testes de kernel: círculo→cilindro; retângulo+círculo→furo (dois wires).
 - [x] Testes de ida-e-volta do perfil analítico e da representação antiga (JSON em `rcad-geom`).
 - [x] Migração real: uma chapa `.rcad` gravada **antes** do B abriu e reconstruiu na app.
-- [x] Nenhuma regressão: suite verde, 4 medições ignoradas, 0 avisos (312 testes no fecho do C).
+- [x] Nenhuma regressão: suite verde, 4 medições ignoradas, 0 avisos (317 testes no fecho do C e das correções do teste1).
 - **Aceitação:** suite verde. ✅ (o golden de área/volume pode ficar para o Gate B.)
 
 ### B5 — Gate B
@@ -368,11 +368,17 @@ referências quebradas aparecem com “onde estavam” e substituto; dá para ed
 - [x] **RMB**: LMB seleciona; RMB curto (<450 ms) cicla candidatos como no Creo; RMB longo
       (>450 ms, sem arrastar) abre o menu contextual da feature com Edit / Edit References /
       Edit Definition / Suppress-Resume / Delete.
-- [x] **Multi-sketch para o futuro**: o modelo de referências já distingue o sketch de secção;
-      Sweep/VSS/Loft (com N secções/trajetórias) ficam para o bloco seguinte.
+- [x] **Corpos aditivos e disjuntos**: um segundo extrude soma material ao corpo atual; se for
+      disjunto fica como corpo separado (ambos visíveis); se duplicar um corpo existente funde-se
+      com ele. A cache incremental guarda a ação de corpo (`BodyAction`).
+- [x] **Eixo X do sketch preservado** ao resolver placement por datum/face: o extrude fica
+      alinhado com o sketch em vez de rodar para o X global.
+- [x] **Arco tangente a duas linhas** no tool Tangent Arc (segundo clique numa linha), com
+      constraints de tangência e endpoint sobre a segunda linha.
 - **Limites desta primeira versão:** o EDIT usa um HUD no canto do viewport (cotas ainda não
-  desenhadas sobre a geometria); o fillet 8.5 mm continua a reportar o erro do kernel em vez
-  de uma explicação geométrica; o catálogo de roles completo e a reparação automática são C4/C5.
+  desenhadas sobre a geometria); uma feature nova atua no corpo atual, sem seletor de corpo;
+  o fillet 8.5 mm continua a reportar o erro do kernel em vez de uma explicação geométrica;
+  o catálogo de roles completo e a reparação automática são C4/C5.
 
 ### C4 — Catálogo de nomes (roles) completo
 - [ ] Dar “roles” estáveis às features que hoje caem para a assinatura geométrica:

@@ -254,7 +254,7 @@ bar mostra 57 fps em software):
 
 ## 12. C — referências, visibilidade e edição (resultado)
 
-O núcleo do Bloco C ficou implementado e validado com 312 testes (0 avisos):
+O núcleo do Bloco C ficou implementado e validado com 317 testes (0 avisos):
 
 - **Grafo de dependências**: extrude/revolve dependem do sketch e do placement; fillet/chamfer
   das arestas; boolean da tool; thicken da superfície. Apagar uma feature com filhos é

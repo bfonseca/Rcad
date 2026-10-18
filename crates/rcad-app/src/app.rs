@@ -2450,6 +2450,11 @@ impl RcadApp {
                 Ok(project) => {
                     self.project = project;
                     self.current_path = Some(path);
+                    // The saved document carries the old visibility flags; the
+                    // dependency graph decides which sketches are consumed.
+                    for part in &mut self.project.parts {
+                        part.recompute_dependencies();
+                    }
                     self.last_error = None;
                     self.restore_view();
                 }
@@ -2524,8 +2529,11 @@ impl RcadApp {
     /// Open a document by path. The menu uses the file dialog; this is the
     /// headless path used by `--open` and by tests.
     pub fn open_document_at(&mut self, path: PathBuf) -> Result<(), String> {
-        let project =
+        let mut project =
             Project::load(&path).map_err(|e| format!("Failed to load {}: {e}", path.display()))?;
+        for part in &mut project.parts {
+            part.recompute_dependencies();
+        }
         self.project = project;
         self.current_path = Some(path);
         self.last_error = None;
@@ -3252,7 +3260,53 @@ impl RcadApp {
             SketchTool::ArcTangent => {
                 if let Some(span) = self.sketch_draft.tangent_arc().cloned() {
                     let before = sketch.clone();
-                    match sketch_ui::tangent_arc(span.start, span.direction, cursor) {
+                    // A click on a second line closes the arc tangent to that
+                    // line; a click in empty space keeps the free endpoint.
+                    let second_line = sketch_ui::hit_test(
+                        &sketch,
+                        rect,
+                        &self.camera,
+                        plane,
+                        pos,
+                        HIT_RADIUS,
+                    )
+                    .and_then(|hit| {
+                        if hit.kind != sketch_ui::SketchEntityKind::Line || hit.id == span.line {
+                            return None;
+                        }
+                        let line = sketch.lines.iter().find(|line| line.id == hit.id)?;
+                        let (a, b) = (
+                            sketch_ui::point_of(&sketch, line.a)?,
+                            sketch_ui::point_of(&sketch, line.b)?,
+                        );
+                        Some((line.id, a, b))
+                    });
+                    let (arc_geometry, tangent_to_second) = match second_line {
+                        Some((line_id, a, b)) => {
+                            match sketch_ui::tangent_arc_to_line(
+                                span.start,
+                                span.direction,
+                                a,
+                                b,
+                                cursor,
+                            ) {
+                                Some(geometry) => (Some(geometry), Some(line_id)),
+                                None => (
+                                    sketch_ui::tangent_arc(
+                                        span.start,
+                                        span.direction,
+                                        cursor,
+                                    ),
+                                    None,
+                                ),
+                            }
+                        }
+                        None => (
+                            sketch_ui::tangent_arc(span.start, span.direction, cursor),
+                            None,
+                        ),
+                    };
+                    match arc_geometry {
                         Some((centre, radius, start_angle, end_angle)) => {
                             let arc = sketch.add_arc(
                                 centre[0],
@@ -3262,23 +3316,48 @@ impl RcadApp {
                                 end_angle,
                             );
                             // The arc starts on the line end it was built from.
-                            if let Some(arc) =
-                                sketch.arcs.iter().find(|candidate| candidate.id == arc)
-                            {
-                                let start_point = arc.start_point;
+                            let arc_entity = sketch
+                                .arcs
+                                .iter()
+                                .find(|candidate| candidate.id == arc)
+                                .map(|arc| (arc.start_point, arc.end_point));
+                            if let Some((start_point, end_point)) = arc_entity {
                                 sketch.constraints.push(Constraint::Coincident {
                                     a: start_point,
                                     b: span.point,
                                 });
+                                if let Some(line_id) = tangent_to_second {
+                                    // Keep both tangencies and the endpoint on
+                                    // the second line when the solver runs.
+                                    sketch.constraints.push(Constraint::Tangent {
+                                        a: arc,
+                                        b: span.line,
+                                    });
+                                    sketch.constraints.push(Constraint::Tangent {
+                                        a: arc,
+                                        b: line_id,
+                                    });
+                                    sketch.constraints.push(Constraint::PointLineDistance {
+                                        point: end_point,
+                                        line: line_id,
+                                        value: 0.0,
+                                    });
+                                }
                             }
                             self.push_sketch_snapshot(before);
                             if let Err(error) = sketch.solve() {
                                 self.last_error = Some(format!("Constraints: {error}"));
                             }
-                            self.status = Some(format!(
-                                "Tangent arc drawn from the {} end.",
-                                sketch_ui::entity_label(&sketch, span.line)
-                            ));
+                            self.status = Some(match tangent_to_second {
+                                Some(line_id) => format!(
+                                    "Tangent arc drawn to the {} line.",
+                                    sketch_ui::entity_label(&sketch, line_id)
+                                ),
+                                None => format!(
+                                    "Tangent arc drawn from the {} end.",
+                                    sketch_ui::entity_label(&sketch, span.line)
+                                ),
+                            });
                             self.sketch_draft.begin(SketchTool::ArcTangent);
                         }
                         None => {
@@ -7591,6 +7670,72 @@ mod interaction_tests {
         assert!(session.app.feature_editor.is_some());
         let before = features(&session.app).len();
         assert_eq!(before, 0, "no feature is created until OK");
+    }
+
+    #[test]
+    fn the_tangent_arc_tool_closes_on_a_second_line() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        app.new_sketch();
+        app.sketch_plane = Some(([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]));
+        app.camera.look_from(glam::Vec3::Z);
+        let (rect, camera, plane) = {
+            let sketch = app.sketch.as_mut().expect("sketch");
+            let a = sketch.add_point(0.0, 0.0);
+            let b = sketch.add_point(10.0, 0.0);
+            sketch.add_line(a, b);
+            let c = sketch.add_point(15.0, -10.0);
+            let d = sketch.add_point(15.0, 10.0);
+            sketch.add_line(c, d);
+            sketch.in_placement_mode = false;
+            app.set_sketch_tool(SketchTool::ArcTangent);
+            (
+                viewport_rect(),
+                app.camera.clone(),
+                app.sketch_plane.expect("plane"),
+            )
+        };
+        let first = sketch_ui::sketch_to_screen(rect, &camera, plane, [10.0, 0.0]).unwrap();
+        let second = sketch_ui::sketch_to_screen(rect, &camera, plane, [15.0, 5.0]).unwrap();
+        assert!(app.sketch_click(rect, first, ClickMode::PLAIN));
+        assert!(app.sketch_click(rect, second, ClickMode::PLAIN));
+
+        let sketch = app.sketch.as_ref().expect("sketch");
+        assert_eq!(sketch.arcs.len(), 1, "the tangent arc was not created");
+        let arc = &sketch.arcs[0];
+        let center = sketch.point(arc.center).expect("the arc centre");
+        let end = [
+            center.x + arc.radius * arc.end_angle.cos(),
+            center.y + arc.radius * arc.end_angle.sin(),
+        ];
+        assert!(
+            (end[0] - 15.0).abs() < 0.2,
+            "the arc does not close on the second line: {end:?}"
+        );
+    }
+
+    #[test]
+    fn opening_a_document_recomputes_sketch_visibility() {
+        let (app, sketch_id, _) = app_with_extrude();
+        let dir = temp_project_dir();
+        std::fs::create_dir_all(&dir).expect("test project dir");
+        let path = dir.join("visibility.rcad");
+        app.project.save(&path).expect("save");
+        let mut reopened = RcadApp::default();
+        reopened.open_document_at(path).expect("open");
+        let sketch = reopened
+            .project
+            .parts
+            .first()
+            .unwrap()
+            .features
+            .iter()
+            .find(|feature| feature.id == sketch_id)
+            .expect("the sketch");
+        assert!(
+            !sketch.visible,
+            "a consumed sketch must be hidden right after opening"
+        );
     }
 
     #[test]

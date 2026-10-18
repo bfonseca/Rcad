@@ -44,6 +44,22 @@ fn compute_feature_hash(feature: &rcad_doc::Feature) -> u64 {
 
 /// One cached feature: its shape, the hash it was built from, and the
 /// feature-anchored reference of every face of that shape.
+/// How a feature's shape took part in the body list. Needed to replay the
+/// same body layout when a later rebuild reuses cached shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyAction {
+    /// First solid: it becomes the current body.
+    Append,
+    /// It replaced the current body (fillet, or an additive feature merged into it).
+    ReplaceCurrent,
+    /// It was disjoint from the current body: the old current was detached and
+    /// the new shape became current.
+    Split,
+    /// It merged into the detached body at this index; the old current was
+    /// detached in its place.
+    MergeDetached(usize),
+}
+
 struct CachedShape {
     hash: u64,
     shape: ShapeId,
@@ -51,6 +67,7 @@ struct CachedShape {
     /// Kernel edge id -> stable edge reference, so a fillet created later can
     /// resolve the edges the user picked on this shape.
     edge_refs: BTreeMap<u64, String>,
+    body_action: BodyAction,
 }
 
 /// Shape cache for incremental rebuilds
@@ -86,6 +103,20 @@ impl ShapeCache {
         let mut current_visible = true;
         let mut first_dirty_idx = None;
         let mut visible_shapes: Vec<ShapeId> = Vec::new();
+        // Additive features that do not touch the current body are kept as
+        // separate bodies; the last one stays `current` so fillets and booleans
+        // still have one body to act on.
+        let mut detached_bodies: Vec<(ShapeId, bool)> = Vec::new();
+        // A feature used as a boolean tool is a tool body, not added material:
+        // unioning it with the base first would make Subtract cut everything.
+        let boolean_tools: std::collections::HashSet<Uuid> = part
+            .features
+            .iter()
+            .filter_map(|feature| match &feature.kind {
+                FeatureKind::Boolean { tool_feature, .. } => Some(*tool_feature),
+                _ => None,
+            })
+            .collect();
         // The plane each sketch's orientation reference resolves to, so an
         // extrude built from that sketch follows the plane the sketch is on and
         // not a snapshot of it.
@@ -125,7 +156,30 @@ impl ShapeCache {
                         )
                     });
                     match resolved {
-                        Some(placement) => {
+                        Some(mut placement) => {
+                            // A sketch keeps the X axis it was drawn with. The
+                            // reference resolver only knows the plane, so it
+                            // rebuilds the basis from the global X; re-project
+                            // the sketch's own X onto the resolved plane so the
+                            // profile does not rotate or shift off its sketch.
+                            if let Some(normal) = unit(placement.normal) {
+                                let mut x = sketch.plane_x_axis;
+                                let along = x[0] * normal[0]
+                                    + x[1] * normal[1]
+                                    + x[2] * normal[2];
+                                for (value, axis) in x.iter_mut().zip(normal) {
+                                    *value -= axis * along;
+                                }
+                                let length =
+                                    (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt();
+                                if length > 1e-9 {
+                                    placement.x_direction = [
+                                        x[0] / length,
+                                        x[1] / length,
+                                        x[2] / length,
+                                    ];
+                                }
+                            }
                             resolved_sketch_planes.insert(feature.id, placement);
                         }
                         None => {
@@ -164,9 +218,10 @@ impl ShapeCache {
                             cached.shape,
                             cached.refs.clone(),
                             cached.edge_refs.clone(),
+                            cached.body_action,
                         )
                     });
-                if let Some((cached_hash, shape_id, refs, edge_refs)) = cached {
+                if let Some((cached_hash, shape_id, refs, edge_refs, body_action)) = cached {
                     if cached_hash == hash {
                         named.insert(feature.id, shape_id);
                         named_refs.insert(feature.id, refs.clone());
@@ -177,6 +232,22 @@ impl ShapeCache {
                                 visible_shapes.push(shape_id);
                             }
                         } else {
+                            match body_action {
+                                BodyAction::Append | BodyAction::ReplaceCurrent => {}
+                                BodyAction::Split => {
+                                    if let Some(previous) = current {
+                                        detached_bodies.push((previous, current_visible));
+                                    }
+                                }
+                                BodyAction::MergeDetached(index) => {
+                                    if index < detached_bodies.len() {
+                                        detached_bodies.remove(index);
+                                    }
+                                    if let Some(previous) = current {
+                                        detached_bodies.push((previous, current_visible));
+                                    }
+                                }
+                            }
                             current = Some(shape_id);
                             current_refs = Some(refs);
                             current_feature = Some(feature.id);
@@ -362,7 +433,78 @@ impl ShapeCache {
                 &edge_signatures,
                 plane,
             ) {
-                Ok(Some(new_shape)) => {
+                Ok(Some(mut new_shape)) => {
+                    // Additive features (a second extrude, a box, a revolve) add
+                    // material to an existing body instead of replacing it.
+                    // Try the current body first; if the new material is disjoint
+                    // from it, try the detached bodies (extruding the same sketch
+                    // again should merge with the body it duplicates, not float
+                    // over it). Only when nothing can merge is it a new body.
+                    let mut body_action = BodyAction::ReplaceCurrent;
+                    if feature_adds_material(&kind) && !boolean_tools.contains(&feature.id) {
+                        match current {
+                            None => body_action = BodyAction::Append,
+                            Some(base) if base == new_shape => {
+                                body_action = BodyAction::ReplaceCurrent;
+                            }
+                            Some(base) => {
+                                match backend.boolean(base, new_shape, BooleanOp::Union) {
+                                    Ok(merged) => {
+                                        backend.drop_shape(new_shape);
+                                        new_shape = merged;
+                                        body_action = BodyAction::ReplaceCurrent;
+                                    }
+                                    Err(error)
+                                        if error
+                                            .to_string()
+                                            .contains("Expected exactly one resulting Solid") =>
+                                    {
+                                        let mut merge: Option<(usize, ShapeId)> = None;
+                                        for (index, (body, _)) in
+                                            detached_bodies.iter().enumerate()
+                                        {
+                                            match backend.boolean(
+                                                *body,
+                                                new_shape,
+                                                BooleanOp::Union,
+                                            ) {
+                                                Ok(merged) => {
+                                                    merge = Some((index, merged));
+                                                    break;
+                                                }
+                                                Err(error)
+                                                    if error
+                                                        .to_string()
+                                                        .contains("Expected exactly one resulting Solid") =>
+                                                {
+                                                    continue;
+                                                }
+                                                Err(_) => continue,
+                                            }
+                                        }
+                                        if let Some((index, merged)) = merge {
+                                            backend.drop_shape(new_shape);
+                                            new_shape = merged;
+                                            detached_bodies.remove(index);
+                                            detached_bodies
+                                                .push((base, current_visible));
+                                            body_action = BodyAction::MergeDetached(index);
+                                        } else {
+                                            // Disjoint addition: show both bodies.
+                                            detached_bodies
+                                                .push((base, current_visible));
+                                            body_action = BodyAction::Split;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        backend.drop_shape(new_shape);
+                                        result.errors.push(format!("{}: {error}", feature.name));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // Name the new topology before any later feature can consume
                     // it: its faces inherit the reference of the source face
                     // they came from, or take a role from this feature.
@@ -400,6 +542,7 @@ impl ShapeCache {
                             shape: new_shape,
                             refs: refs.clone(),
                             edge_refs: edge_refs.clone(),
+                            body_action,
                         },
                     );
                     // Release the superseded shape; otherwise the backend
@@ -449,15 +592,32 @@ impl ShapeCache {
             }
         }
 
-        // Tessellate the current body (last solid/surface), unless the
-        // feature that produced it is hidden.
+        // Display every visible body: the current one and any disjoint bodies
+        // that later additive features could not merge into it.
+        let mut display_bodies: Vec<ShapeId> = detached_bodies
+            .iter()
+            .filter(|(_, visible)| *visible)
+            .map(|(shape, _)| *shape)
+            .collect();
         if let Some(shape) = current {
             if current_visible {
-                match backend.tessellate(shape) {
-                    Ok(mut mesh) => {
-                        // The mesh carries geometric signatures. Replace them
-                        // with the references this rebuild derived, and name
-                        // the edges from the two faces they bound.
+                display_bodies.push(shape);
+            }
+        }
+        if !display_bodies.is_empty() {
+            // Keep the one-body path on tessellate(): it is the common case and
+            // it carries the exact kernel face ids the naming pass expects.
+            let mesh = if display_bodies.len() == 1 {
+                backend.tessellate(display_bodies[0])
+            } else {
+                backend.tessellate_many(&display_bodies)
+            };
+            match mesh {
+                Ok(mut mesh) => {
+                    // The mesh carries geometric signatures. Replace them with
+                    // the references this rebuild derived for the current body;
+                    // detached bodies keep their honest signatures.
+                    if let Some(shape) = current {
                         let topology = backend.topology(shape).unwrap_or_default();
                         let empty = naming::RefMap::default();
                         naming::apply_references(
@@ -465,10 +625,10 @@ impl ShapeCache {
                             &topology,
                             current_refs.as_ref().unwrap_or(&empty),
                         );
-                        result.display_mesh = mesh;
                     }
-                    Err(e) => result.errors.push(e.to_string()),
+                    result.display_mesh = mesh;
                 }
+                Err(e) => result.errors.push(e.to_string()),
             }
         }
         
@@ -560,6 +720,18 @@ fn unit(v: [f64; 3]) -> Option<[f64; 3]> {
 pub fn rebuild_part(part: &Part, backend: &mut dyn GeometryBackend) -> RebuildResult {
     let mut cache = ShapeCache::new();
     cache.rebuild_part_incremental(part, backend)
+}
+
+/// Features that add material to the existing body instead of replacing it.
+fn feature_adds_material(kind: &FeatureKind) -> bool {
+    match kind {
+        FeatureKind::Box { .. }
+        | FeatureKind::Cylinder { .. }
+        | FeatureKind::Extrude { .. }
+        | FeatureKind::Revolve { .. } => true,
+        FeatureKind::Loft { solid, .. } => *solid,
+        _ => false,
+    }
 }
 
 fn eval_feature(
@@ -886,7 +1058,9 @@ mod tests {
             unimplemented!("not needed by the rebuild tests")
         }
         fn boolean(&mut self, _a: ShapeId, _b: ShapeId, _op: BooleanOp) -> GeomResult<ShapeId> {
-            unimplemented!("not needed by the rebuild tests")
+            // Additive features now union with the current body; the mock only
+            // needs a fresh live shape, not real topology.
+            Ok(self.insert())
         }
         fn translate(&mut self, _shape: ShapeId, _delta: DVec3) -> GeomResult<ShapeId> {
             unimplemented!("not needed by the rebuild tests")
@@ -1343,6 +1517,129 @@ mod tests {
             before,
             backend.live_shapes()
         );
+    }
+
+    #[test]
+    fn two_disjoint_extrudes_both_reach_the_display_mesh() {
+        let mut part = Part::new_solid("P");
+        let mut first = rcad_sketch::Sketch::new("First");
+        first.add_rectangle(0.0, 0.0, 10.0, 10.0);
+        let mut second = rcad_sketch::Sketch::new("Second");
+        second.add_rectangle(30.0, 0.0, 40.0, 10.0);
+
+        for (name, sketch) in [("First", first), ("Second", second)] {
+            part.features.push(Feature::new(
+                name,
+                FeatureKind::Extrude {
+                    profile: sketch.to_profile().expect("profile"),
+                    height: 5.0,
+                    placement: None,
+                    sketch: None,
+                },
+            ));
+        }
+
+        let mut backend = rcad_occt::OcctBackend::new();
+        let result = rebuild_part(&part, &mut backend);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let xs: Vec<f32> = result.display_mesh.positions.iter().map(|p| p[0]).collect();
+        assert!(
+            xs.iter().any(|x| *x < 10.0),
+            "the first extrusion disappeared: x range {xs:?}"
+        );
+        assert!(
+            xs.iter().any(|x| *x > 30.0),
+            "the second extrusion disappeared: x range {xs:?}"
+        );
+
+        // The cached rebuild has to replay the body split, not fall back to the
+        // old single-current-body behaviour.
+        let mut backend = rcad_occt::OcctBackend::new();
+        let mut cache = ShapeCache::new();
+        let first = cache.rebuild_part_incremental(&part, &mut backend);
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        let second = cache.rebuild_part_incremental(&part, &mut backend);
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        let xs: Vec<f32> = second.display_mesh.positions.iter().map(|p| p[0]).collect();
+        assert!(xs.iter().any(|x| *x < 10.0), "cached first body vanished");
+        assert!(xs.iter().any(|x| *x > 30.0), "cached second body vanished");
+    }
+
+    #[test]
+    fn an_extrude_follows_the_sketch_x_axis_not_the_global_one() {
+        let mut part = Part::new_solid("P");
+        let plane = Feature::new(
+            "TOP",
+            FeatureKind::Construction {
+                kind: ConstructionKind::Plane,
+                origin: [0.0, 0.0, 0.0],
+                direction: [0.0, 0.0, 1.0],
+            },
+        );
+        let plane_id = plane.id;
+        // Keep the datum out of the display mesh so the bounds are the solid's.
+        let mut plane = plane;
+        plane.visible = false;
+        part.features.push(plane);
+
+        let mut sketch = rcad_sketch::Sketch::new("Sketch1");
+        sketch.set_sketch_plane([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
+        sketch.add_circle(14.0, 11.0, 5.0);
+        let orientation = rcad_sketch::SketchReference {
+            reference: Some(plane_id.to_string()),
+            label: "TOP".into(),
+            role: rcad_sketch::SketchReferenceRole::Orientation,
+            origin: [0.0, 0.0, 0.0],
+            direction: [0.0, 0.0, 1.0],
+        };
+        let automatic = rcad_sketch::SketchReference {
+            reference: None,
+            label: "automatic".into(),
+            role: rcad_sketch::SketchReferenceRole::Automatic,
+            origin: [0.0, 0.0, 0.0],
+            direction: [0.0, 0.0, 1.0],
+        };
+        sketch.set_references(orientation, automatic);
+        let sketch_feature = Feature::new(
+            "Sketch1",
+            FeatureKind::Sketch {
+                sketch: sketch.clone(),
+            },
+        );
+        let sketch_id = sketch_feature.id;
+        part.features.push(sketch_feature);
+        part.features.push(Feature::new(
+            "Extrude1",
+            FeatureKind::Extrude {
+                profile: sketch.to_profile().expect("profile"),
+                height: 10.0,
+                placement: Some(rcad_doc::SketchPlacement {
+                    origin: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    x_direction: [0.0, 1.0, 0.0],
+                    reference: Some(plane_id.to_string()),
+                }),
+                sketch: Some(sketch_id),
+            },
+        ));
+        part.recompute_dependencies();
+
+        let mut backend = rcad_occt::OcctBackend::new();
+        let result = rebuild_part(&part, &mut backend);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let xs: Vec<f32> = result.display_mesh.positions.iter().map(|p| p[0]).collect();
+        let ys: Vec<f32> = result.display_mesh.positions.iter().map(|p| p[1]).collect();
+        let centre_x = (xs.iter().cloned().fold(f32::INFINITY, f32::min)
+            + xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max))
+            / 2.0;
+        let centre_y = (ys.iter().cloned().fold(f32::INFINITY, f32::min)
+            + ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max))
+            / 2.0;
+        // Sketch X is world Y, so (14, 11) lands at world (-11, 14).
+        assert!((centre_x + 11.0).abs() < 0.5, "x centre {centre_x}");
+        assert!((centre_y - 14.0).abs() < 0.5, "y centre {centre_y}");
     }
 
     #[test]
