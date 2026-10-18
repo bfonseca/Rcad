@@ -5,6 +5,7 @@ use rcad_geom::{NamedEdge, TriangleMesh};
 
 use crate::camera::OrbitCamera;
 use crate::selection::{Selected, Selection};
+use uuid::Uuid;
 
 /// 3D ray for picking
 #[derive(Debug, Clone, Copy)]
@@ -225,6 +226,8 @@ pub fn draw_viewport(
     grid_spacing: f32,
     // WGPU solid renderer; `None` falls back to the egui painter.
     solid_renderer: Option<&mut crate::render::SolidRenderer>,
+    // Sketch feature currently open in the editor; its own overlay draws it.
+    editing_sketch: Option<Uuid>,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
@@ -292,6 +295,12 @@ pub fn draw_viewport(
     // Solid edges are only drawn when they matter: selected or hovered.
     draw_edges(&painter, rect, camera, mesh, selection, hover);
 
+    // Sketches are reference geometry: visible until a feature consumes them,
+    // and drawn read-only unless the sketcher is open on them (foundation C1).
+    if let Some(part) = part {
+        draw_visible_sketches(&painter, rect, camera, part, editing_sketch);
+    }
+
     // Draw construction geometry from part features
     if let Some(part) = part {
         draw_construction_geometry(&painter, rect, camera, part, selection, hover);
@@ -301,6 +310,229 @@ pub fn draw_viewport(
     draw_corner_cys(&painter, rect, camera);
 
     response
+}
+
+/// Colour of read-only sketch geometry, distinct from datums and the solid.
+const SKETCH_CURVE_COLOUR: Color32 = Color32::from_rgb(158, 132, 226);
+
+/// Pick a visible sketch near the cursor, so a sketch can be selected or the
+/// long right-click menu can target it.
+pub fn pick_sketch_feature(
+    cursor: Pos2,
+    rect: Rect,
+    camera: &OrbitCamera,
+    part: &Part,
+    editing_sketch: Option<Uuid>,
+) -> Option<Selected> {
+    let vp = view_proj(rect, camera);
+    let mut best: Option<(f32, Selected)> = None;
+    for feature in &part.features {
+        if feature.suppressed || !feature.visible || editing_sketch == Some(feature.id) {
+            continue;
+        }
+        let FeatureKind::Sketch { sketch } = &feature.kind else {
+            continue;
+        };
+        let origin = Vec3::new(
+            sketch.plane_origin[0] as f32,
+            sketch.plane_origin[1] as f32,
+            sketch.plane_origin[2] as f32,
+        );
+        let (u, v) = sketch_basis(sketch.plane_normal, sketch.plane_x_axis);
+        let u = Vec3::from(u);
+        let v = Vec3::from(v);
+        let world = |p: [f64; 2]| origin + u * p[0] as f32 + v * p[1] as f32;
+        let mut test_polyline = |points: &[Pos2]| {
+            for pair in points.windows(2) {
+                let distance = distance_to_screen_segment(cursor, pair[0], pair[1]);
+                if distance <= 6.0
+                    && best.as_ref().map(|(best, _)| distance < *best).unwrap_or(true)
+                {
+                    best = Some((
+                        distance,
+                        Selected::Feature {
+                            feature: feature.id,
+                            label: feature.name.clone(),
+                        },
+                    ));
+                }
+            }
+        };
+        for line in &sketch.lines {
+            let (Some(a), Some(b)) = (sketch.point(line.a), sketch.point(line.b)) else {
+                continue;
+            };
+            if let (Some(a), Some(b)) = (
+                project(vp, rect, world([a.x, a.y])),
+                project(vp, rect, world([b.x, b.y])),
+            ) {
+                test_polyline(&[a, b]);
+            }
+        }
+        for circle in &sketch.circles {
+            let Some(center) = sketch.point(circle.center) else {
+                continue;
+            };
+            let points: Vec<Pos2> = (0..=32)
+                .filter_map(|step| {
+                    let angle = std::f64::consts::TAU * step as f64 / 32.0;
+                    project(
+                        vp,
+                        rect,
+                        world([
+                            center.x + circle.radius * angle.cos(),
+                            center.y + circle.radius * angle.sin(),
+                        ]),
+                    )
+                })
+                .collect();
+            test_polyline(&points);
+        }
+        for arc in &sketch.arcs {
+            let Some(center) = sketch.point(arc.center) else {
+                continue;
+            };
+            let mut sweep = arc.end_angle - arc.start_angle;
+            if sweep <= 0.0 {
+                sweep += std::f64::consts::TAU;
+            }
+            let points: Vec<Pos2> = (0..=24)
+                .filter_map(|step| {
+                    let angle = arc.start_angle + sweep * step as f64 / 24.0;
+                    project(
+                        vp,
+                        rect,
+                        world([
+                            center.x + arc.radius * angle.cos(),
+                            center.y + arc.radius * angle.sin(),
+                        ]),
+                    )
+                })
+                .collect();
+            test_polyline(&points);
+        }
+        for conic in &sketch.conics {
+            let points: Vec<Pos2> = sketch
+                .conic_points(conic.id, 24)
+                .into_iter()
+                .filter_map(|point| project(vp, rect, world(point)))
+                .collect();
+            test_polyline(&points);
+        }
+    }
+    best.map(|(_, selected)| selected)
+}
+
+fn distance_to_screen_segment(point: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let length_sq = ab.length_sq();
+    if length_sq <= 1e-9 {
+        return (point - a).length();
+    }
+    let t = ((point - a).dot(ab) / length_sq).clamp(0.0, 1.0);
+    (point - (a + ab * t)).length()
+}
+
+/// Draw every visible Sketch feature that is not open in the sketcher.
+fn draw_visible_sketches(
+    painter: &egui::Painter,
+    rect: Rect,
+    camera: &OrbitCamera,
+    part: &Part,
+    editing_sketch: Option<Uuid>,
+) {
+    let vp = view_proj(rect, camera);
+    for feature in &part.features {
+        if feature.suppressed || !feature.visible || editing_sketch == Some(feature.id) {
+            continue;
+        }
+        let FeatureKind::Sketch { sketch } = &feature.kind else {
+            continue;
+        };
+        let origin = Vec3::new(
+            sketch.plane_origin[0] as f32,
+            sketch.plane_origin[1] as f32,
+            sketch.plane_origin[2] as f32,
+        );
+        let (u, v) = sketch_basis(sketch.plane_normal, sketch.plane_x_axis);
+        let u = Vec3::from(u);
+        let v = Vec3::from(v);
+        let world = |p: [f64; 2]| origin + u * p[0] as f32 + v * p[1] as f32;
+        let stroke = Stroke::new(1.5_f32, SKETCH_CURVE_COLOUR);
+
+        for line in &sketch.lines {
+            let (Some(a), Some(b)) = (sketch.point(line.a), sketch.point(line.b)) else {
+                continue;
+            };
+            if let (Some(a), Some(b)) = (
+                project(vp, rect, world([a.x, a.y])),
+                project(vp, rect, world([b.x, b.y])),
+            ) {
+                painter.line_segment([a, b], stroke);
+            }
+        }
+
+        for circle in &sketch.circles {
+            let Some(center) = sketch.point(circle.center) else {
+                continue;
+            };
+            let mut points = Vec::new();
+            for step in 0..=64 {
+                let angle = std::f64::consts::TAU * step as f64 / 64.0;
+                let point = world([
+                    center.x + circle.radius * angle.cos(),
+                    center.y + circle.radius * angle.sin(),
+                ]);
+                if let Some(point) = project(vp, rect, point) {
+                    points.push(point);
+                }
+            }
+            if points.len() >= 2 {
+                painter.add(Shape::line(points, stroke));
+            }
+        }
+
+        for arc in &sketch.arcs {
+            let Some(center) = sketch.point(arc.center) else {
+                continue;
+            };
+            let mut sweep = arc.end_angle - arc.start_angle;
+            if sweep <= 0.0 {
+                sweep += std::f64::consts::TAU;
+            }
+            let mut points = Vec::new();
+            for step in 0..=48 {
+                let angle = arc.start_angle + sweep * step as f64 / 48.0;
+                let point = world([
+                    center.x + arc.radius * angle.cos(),
+                    center.y + arc.radius * angle.sin(),
+                ]);
+                if let Some(point) = project(vp, rect, point) {
+                    points.push(point);
+                }
+            }
+            if points.len() >= 2 {
+                painter.add(Shape::line(points, stroke));
+            }
+        }
+
+        for conic in &sketch.conics {
+            let points: Vec<Pos2> = sketch
+                .conic_points(conic.id, 24)
+                .into_iter()
+                .filter_map(|point| project(vp, rect, world(point)))
+                .collect();
+            if points.len() >= 2 {
+                painter.add(Shape::line(points, stroke));
+            }
+        }
+
+        for point in &sketch.points {
+            if let Some(projected) = project(vp, rect, world([point.x, point.y])) {
+                painter.circle_filled(projected, 1.5, SKETCH_CURVE_COLOUR);
+            }
+        }
+    }
 }
 
 fn view_proj(rect: Rect, camera: &OrbitCamera) -> Mat4 {

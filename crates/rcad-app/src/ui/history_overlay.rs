@@ -248,17 +248,20 @@ impl HistoryOverlay {
     ) {
         let features = &part.features;
         
-        // Compute parent-child relationships
+        // The tree is chronological; only an internal sketch (created from a
+        // feature's Define sketch…) is nested under its owner. Dependency
+        // parent/child links are kept for delete protection and Edit References,
+        // not for nesting, so a fillet does not disappear under its body.
         let mut children_map: HashMap<EntityId, Vec<usize>> = HashMap::new();
         for (i, feature) in features.iter().enumerate() {
-            for parent_id in &feature.parent_features {
-                children_map.entry(*parent_id).or_default().push(i);
+            if let Some(owner) = feature.sub_feature_of {
+                children_map.entry(owner).or_default().push(i);
             }
         }
         
-        // Find root features (no parents)
+        // Find root features (not internal sub-features)
         let root_indices: Vec<usize> = features.iter().enumerate()
-            .filter(|(_, f)| f.parent_features.is_empty())
+            .filter(|(_, f)| f.sub_feature_of.is_none())
             .map(|(i, _)| i)
             .collect();
         
@@ -486,7 +489,15 @@ impl HistoryOverlay {
                         .show(ui, |ui| {
                             ui.set_min_width(200.0);
                             
-                            // Edit Definition
+                            // Edit (dimensions in the viewport)
+                            if ui.button("Edit").clicked() {
+                                on_action(HistoryOverlayAction::EditFeature(feature_id));
+                                self.close_context_menu();
+                            }
+                            if ui.button("Edit References...").clicked() {
+                                on_action(HistoryOverlayAction::EditReferences(feature_id));
+                                self.close_context_menu();
+                            }
                             if ui.button("Edit Definition...  Ctrl+E").clicked() {
                                 on_action(HistoryOverlayAction::EditDefinition(feature_id));
                                 self.close_context_menu();
@@ -574,6 +585,8 @@ pub enum HistoryOverlayAction {
         toggle: bool,
     },
     OpenContextMenu(EntityId, egui::Pos2),
+    EditFeature(EntityId),
+    EditReferences(EntityId),
     EditDefinition(EntityId),
     SuppressFeature(EntityId),
     ResumeFeature(EntityId),

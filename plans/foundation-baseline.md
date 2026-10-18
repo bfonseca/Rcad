@@ -252,8 +252,35 @@ bar mostra 57 fps em software):
 
 ![B analytic plate](../docs/baseline/b-analytic-plate.png)
 
-## 12. Próximo passo
+## 12. C — referências, visibilidade e edição (resultado)
 
-**Bloco C** — referências, pai/filho e rebuild condicionado. O Bloco A está fechado
-(Gate A aprovado) e o Bloco B está concluído no núcleo; Loft/Boundary e BSpline
-ficam como follow-up. O “antes” continua congelado nas imagens desta página.
+O núcleo do Bloco C ficou implementado e validado com 312 testes (0 avisos):
+
+- **Grafo de dependências**: extrude/revolve dependem do sketch e do placement; fillet/chamfer
+  das arestas; boolean da tool; thicken da superfície. Apagar uma feature com filhos é
+  bloqueado e lista os filhos pelo nome.
+- **Insert Here/Rollback**: as novas features entram no marcador; o rebuild pára no rollback.
+- **Visibilidade do sketch**: depois do OK o sketch fica visível; quando um feature o consome
+  passa a hidden; se o consumidor é suprimido/apagado, volta. O olho pode forçar a escolha.
+  As duas imagens seguintes são o mesmo sketch antes e depois de ser consumido por um extrude:
+
+  ![Sketch visível](../docs/baseline/c-visible-sketch.png)
+  ![Sketch consumido](../docs/baseline/c-consumed-sketch.png)
+
+- **Sub-sketch**: Extrude/Revolve abrem um painel com coletor de sketch (existente ou
+  “Define sketch…”), pré-visualização e OK/Cancel; o sketch interno fica aninhado no feature.
+- **Três modos de edição** na árvore ou no RMB longo do viewport: EDIT (HUD de cotas),
+  EDIT REFERENCES (modal de referências) e EDIT DEFINITION (painel/sketcher).
+- **RMB**: LMB seleciona; RMB curto (<450 ms) cicla candidatos; RMB longo (>450 ms, sem
+  arrastar) abre o menu contextual da feature com Edit/Edit References/Edit Definition/
+  Suppress-Resume/Delete.
+
+Limites desta primeira versão: o EDIT usa um HUD no canto do viewport (ainda não desenha as
+cotas sobre a geometria); o catálogo de roles e a reparação automática (C4/C5) continuam
+por fazer; Sweep/VSS/Loft multi-sketch ficam para o bloco seguinte.
+
+## 13. Próximo passo
+
+**Fechar o Bloco C** — C4 (roles estáveis), C5 (reparação ligada ao grafo), C2 (contagem/
+destaque e Rename) e o Gate C com o guião do utilizador; os follow-ups do Bloco B
+(Loft/Boundary/BSpline) ficam na mesma fila. O “antes” continua congelado nas imagens desta página.

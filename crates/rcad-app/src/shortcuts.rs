@@ -218,11 +218,14 @@ pub fn handle_shortcuts(app: &mut crate::app::RcadApp, ctx: &egui::Context, shor
     }
     
     // Feature operations
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::E)) {
+        app.edit_definition_selected();
+    }
     if shortcuts.plain_pressed(ctx, shortcuts.feature_extrude) {
-        app.extrude_sketch();
+        app.open_feature_editor(crate::app::FeatureEditorKind::Extrude, None);
     }
     if shortcuts.plain_pressed(ctx, shortcuts.feature_revolve) {
-        app.revolve_sketch();
+        app.open_feature_editor(crate::app::FeatureEditorKind::Revolve, None);
     }
     if shortcuts.plain_pressed(ctx, shortcuts.feature_box) {
         app.add_box_feature();

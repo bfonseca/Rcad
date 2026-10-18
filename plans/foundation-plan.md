@@ -283,7 +283,7 @@ Loft/Boundary deixam de ser extrusões falsas.
 - [x] Testes de kernel: círculo→cilindro; retângulo+círculo→furo (dois wires).
 - [x] Testes de ida-e-volta do perfil analítico e da representação antiga (JSON em `rcad-geom`).
 - [x] Migração real: uma chapa `.rcad` gravada **antes** do B abriu e reconstruiu na app.
-- [x] Nenhuma regressão: 298 testes passam, 4 medições ignoradas, 0 avisos.
+- [x] Nenhuma regressão: suite verde, 4 medições ignoradas, 0 avisos (312 testes no fecho do C).
 - **Aceitação:** suite verde. ✅ (o golden de área/volume pode ficar para o Gate B.)
 
 ### B5 — Gate B
@@ -315,32 +315,64 @@ referências quebradas aparecem com “onde estavam” e substituto; dá para ed
 **Depende de:** Gate B (as features existentes têm de estar estáveis).
 **Tamanho:** M. **Risco:** médio (semântica de dependências e migração de dados).
 
-### C0 — Grafo de dependências
-- [ ] Calcular `parent_features`/`child_features` a partir das referências reais
-      (sketch, placement, edge sets, boolean tool, thicken surface, etc.).
-- [ ] Expor o grafo em `rcad-doc`/`rcad-param` (uma só fonte de verdade; não duplicar regras na UI).
-- [ ] Definir o que acontece com referências apagadas/partidas (nó quebrado, não crash).
-- **Aceitação:** teste de grafo: extrude depende do sketch; fillet depende do corpo; boolean do tool.
+### C0 — Grafo de dependências ✅
+- [x] `parent_features`/`child_features` calculados a partir das referências reais
+      (sketch, placement, edge sets, boolean tool, thicken surface) por
+      `Part::recompute_dependencies`.
+- [x] Uma só fonte de verdade em `rcad-doc`; a UI lê o grafo em vez de repetir regras.
+- [x] Referências partidas continuam a ser reportadas pelo rebuild (nó quebrado, sem crash);
+      a reparação ligada ao grafo fina fica em C5.
+- **Aceitação:** testes `an_extrude_depends_on_its_sketch` e `deleting_a_parent_is_blocked_and_names_the_child`. ✅
 
-### C1 — Rebuild condicionado (Insert Here / Rollback)
-- [ ] `insert_here_index` passa a inserir novas features no ponto marcado.
-- [ ] `rollback_index` passa a parar o rebuild nesse ponto (sem apagar features).
-- [ ] Reordenar com validação: não permitir mover uma feature para antes das suas dependências.
-- **Aceitação:** testes de rebuild com marcadores; a árvore reflete o estado real.
+### C1 — Rebuild condicionado (Insert Here / Rollback) ✅
+- [x] `insert_here_index` insere novas features no ponto marcado (e o marcador avança).
+- [x] `rollback_index` pára o rebuild nesse ponto sem apagar features.
+- [ ] Reordenar com validação de dependências: ainda permite mover; fica para C4/Gate C.
+- **Aceitação:** testes `a_new_feature_goes_at_the_insert_here_marker` e
+  `a_rollback_marker_stops_later_features_from_rebuilding`. ✅
 
-### C2 — Árvore pai/filho na UI
-- [ ] Indentação por dependência; contagem de filhos; destaque de pais/filhos ao selecionar.
-- [ ] Ações “Parents”/“Children” reais (hoje são TODO) e “Edit Definition” a partir da árvore.
-- [ ] Renomear feature (o id estável não muda; é só o nome).
-- **Aceitação:** cenário de utilizador: caixa → sketch na face → extrude → round; a árvore mostra a cadeia.
+### C2 — Árvore pai/filho na UI ✅ (parcial)
+- [x] Sketch interno (criado dentro de uma feature) aparece **aninhado** no dono; a árvore
+      cronológica mantém as restantes features ao mesmo nível (como o Creo).
+- [x] Ações “Parents”/“Children” mostram os nomes reais no status bar; “Edit Definition”
+      a partir da árvore abre o painel/sketcher.
+- [ ] Contagem visual de filhos e destaque ao selecionar; Rename ainda é TODO.
+- **Aceitação:** cenário caixa → sketch na face → extrude → round coberto pelos testes de
+  dependência; a árvore mostra o sketch interno sob o extrude. ✅
 
-### C3 — Apagar/editar com segurança
-- [ ] Apagar feature com filhos: listar dependentes e bloquear ou exigir confirmação (nunca apagar em silêncio).
-- [ ] Suppress/Resume de um pai: avisar/realçar filhos afetados.
-- [ ] Editar definição de uma feature existente (altura da caixa, raio do cilindro, altura do extrude,
-      ângulo do revolve, raio do round, distância do chamfro) com rebuild e undo.
-      **Não** acrescentar tipos de feature novos — só editar o que já existe.
-- **Aceitação:** mudar a altura da caixa propaga-se ao extrude/fillet; apagar a caixa avisa.
+### C3 — Apagar/editar com segurança ✅
+- [x] Apagar feature com filhos: bloqueia e lista os dependentes pelo nome (nunca em silêncio).
+- [x] Suppress/Resume: o rebuild salta a feature e a visibilidade automática dos sketches
+      reage (sketch escondido volta a aparecer quando o consumidor é suprimido).
+- [x] Editar definição de Box/Cylinder/Extrude/Revolve/Fillet/Chamfer (e sketch) com rebuild
+      e undo, via painel de definição.
+- **Aceitação:** `deleting_a_parent_is_blocked_and_names_the_child` e testes do painel. ✅
+- **Nota:** a propagação geométrica de uma caixa editada para um fillet/face referenciada
+  depende do catálogo de roles (C4); a feature que perde a referência é reportada, não ignorada.
+
+### C7 — Fluxo de feature e edição (Creo-like) ✅ (núcleo)
+- [x] **Visibilidade do sketch**: depois do OK o sketch fica desenhado (curvas, sem cotas);
+      quando um feature o consome com sucesso passa a hidden; se o consumidor for
+      apagado/suprimido volta a aparecer. O olho pode forçar a escolha manual.
+      O sketch visível é pickable e entra na seleção.
+- [x] **Sub-sketch**: ao criar Extrude/Revolve abre um painel com coletor de sketch;
+      pode usar um sketch existente ou “Define sketch…” e desenhar um sketch interno,
+      que fica aninhado no feature e é apagado com ele. Há Preview/OK/Cancel.
+- [x] **EDIT** a partir da árvore ou do viewport (RMB longo): mostra as cotas da feature
+      num HUD sobre o viewport (dimensões do sketch ou altura/ângulo/raio/tamanho) e
+      aplica no release com undo/rebuild.
+- [x] **EDIT REFERENCES**: modal com as referências reais da feature (sketch, placement,
+      edge set, tool booleano, superfície do thicken), com substituição pela seleção atual.
+- [x] **EDIT DEFINITION**: sketch abre no sketcher; Box/Cylinder/Extrude/Revolve/Fillet/Chamfer
+      abrem o painel de definição; as restantes mantêm o diálogo de parâmetros/relações.
+- [x] **RMB**: LMB seleciona; RMB curto (<450 ms) cicla candidatos como no Creo; RMB longo
+      (>450 ms, sem arrastar) abre o menu contextual da feature com Edit / Edit References /
+      Edit Definition / Suppress-Resume / Delete.
+- [x] **Multi-sketch para o futuro**: o modelo de referências já distingue o sketch de secção;
+      Sweep/VSS/Loft (com N secções/trajetórias) ficam para o bloco seguinte.
+- **Limites desta primeira versão:** o EDIT usa um HUD no canto do viewport (cotas ainda não
+  desenhadas sobre a geometria); o fillet 8.5 mm continua a reportar o erro do kernel em vez
+  de uma explicação geométrica; o catálogo de roles completo e a reparação automática são C4/C5.
 
 ### C4 — Catálogo de nomes (roles) completo
 - [ ] Dar “roles” estáveis às features que hoje caem para a assinatura geométrica:
@@ -350,7 +382,8 @@ referências quebradas aparecem com “onde estavam” e substituto; dá para ed
 
 ### C5 — Reparação ligada ao grafo
 - [ ] A lista de referências perdidas passa a distinguir sketch, placement, face e edge.
-- [ ] Substituir uma referência atualiza o grafo e reconstrói apenas o necessário.
+- [ ] Substituir uma referência perdida na lista de reparação (hoje a substituição já existe
+      em Edit References, mas o fluxo “lost reference → substitute” ainda não está ligado).
 - **Aceitação:** teste de referência perdida + substituição + rebuild.
 
 ### C6 — Gate C
@@ -454,9 +487,11 @@ Com o build novo, o utilizador deve conseguir, sem tocar em código:
 
 ## 12. Próximo passo imediato
 
-**Bloco C** — referências, pai/filho e rebuild condicionado. A6/A7 estão concluídos
-(Gate A aprovado visualmente) e o Bloco B está concluído no núcleo; Loft/Boundary e
-BSpline ficam como follow-up. O “antes” está congelado em
+**Bloco C** — o núcleo está implementado: grafo de dependências, Insert Here/Rollback,
+visibilidade do sketch, sub-sketch/Define sketch, os três modos de edição e o menu RMB
+curto/longo. Falta fechar C4 (roles estáveis), C5 (reparação ligada ao grafo), C2 (contagem/
+destaque e Rename), C6 (Gate C com o guião do utilizador) e os follow-ups do Bloco B
+(Loft/Boundary/BSpline). O “antes” está congelado em
 [foundation-baseline.md](foundation-baseline.md).
 
 *Documento criado em 2026-10-17. Atualizar o estado das tarefas à medida que avançam.*

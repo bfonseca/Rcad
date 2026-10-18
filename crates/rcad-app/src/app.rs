@@ -1,6 +1,8 @@
 use eframe::egui;
 use crate::selection::{ClickMode, Selected, Selection};
-use crate::viewport::{draw_sketch_plane, draw_viewport, pick_candidates, sketch_basis};
+use crate::viewport::{
+    draw_sketch_plane, draw_viewport, pick_candidates, pick_sketch_feature, sketch_basis,
+};
 use crate::camera::{OrbitCamera, Projection};
 use crate::settings::AppSettings;
 use crate::undo::UndoStack;
@@ -204,6 +206,18 @@ pub struct RcadApp {
     feature_dialog_tab: usize,
     /// Draft values for the feature dialog's "add parameter" row.
     new_parameter: NewParameterDraft,
+    /// Open feature definition panel, if any.
+    feature_editor: Option<FeatureEditor>,
+    /// Feature whose dimensions are shown over the viewport (Edit).
+    edit_dimensions: Option<Uuid>,
+    /// Feature whose reference list is open (Edit References).
+    edit_references: Option<Uuid>,
+    /// Right mouse button pressed: start time, position, and whether it moved.
+    secondary_press: Option<(std::time::Instant, egui::Pos2, bool)>,
+    /// Context menu opened by a long right-click over a feature.
+    viewport_menu: Option<(egui::Pos2, Option<Uuid>)>,
+    /// Editor waiting for a sketch that is being drawn for it.
+    pending_editor: Option<FeatureEditor>,
     /// Quick-action strip floating over the viewport.
     floating_bar: FloatingBar,
     /// True while placing a component: the floating bar then shows the
@@ -295,6 +309,116 @@ pub struct DimensionEditor {
     /// True until the field has taken the focus and selected its text, so
     /// typing replaces the value instead of appending to it.
     pub fresh: bool,
+}
+
+/// Which feature the definition panel is editing (foundation C2/C3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatureEditorKind {
+    Extrude,
+    Revolve,
+    Box,
+    Cylinder,
+    Fillet,
+    Chamfer,
+}
+
+impl FeatureEditorKind {
+    fn title(self) -> &'static str {
+        match self {
+            FeatureEditorKind::Extrude => "Extrude",
+            FeatureEditorKind::Revolve => "Revolve",
+            FeatureEditorKind::Box => "Box",
+            FeatureEditorKind::Cylinder => "Cylinder",
+            FeatureEditorKind::Fillet => "Round",
+            FeatureEditorKind::Chamfer => "Chamfer",
+        }
+    }
+
+    fn needs_sketch(self) -> bool {
+        matches!(self, FeatureEditorKind::Extrude | FeatureEditorKind::Revolve)
+    }
+}
+
+/// The Creo-style feature definition panel: collectors plus the feature's
+/// parameters. One instance is edited at a time.
+#[derive(Debug, Clone)]
+pub struct FeatureEditor {
+    pub kind: FeatureEditorKind,
+    /// The feature being edited, or `None` when creating a new one.
+    pub target: Option<Uuid>,
+    /// The sketch the feature consumes (Extrude/Revolve).
+    pub sketch: Option<Uuid>,
+    /// A sketch created inside this editor, nested under the feature on OK.
+    pub internal_sketch: Option<Uuid>,
+    pub name: String,
+    pub height: f64,
+    pub angle_deg: f64,
+    pub radius: f64,
+    pub distance: f64,
+    pub size: [f64; 3],
+    pub cylinder_radius: f64,
+    pub cylinder_height: f64,
+    /// Temporary feature shown by the Preview button.
+    pub preview: Option<Uuid>,
+}
+
+impl FeatureEditor {
+    fn new(kind: FeatureEditorKind) -> Self {
+        Self {
+            kind,
+            target: None,
+            sketch: None,
+            internal_sketch: None,
+            name: kind.title().to_string(),
+            height: 10.0,
+            angle_deg: 360.0,
+            radius: 2.0,
+            distance: 1.0,
+            size: [40.0, 30.0, 10.0],
+            cylinder_radius: 5.0,
+            cylinder_height: 20.0,
+            preview: None,
+        }
+    }
+}
+
+/// One reference replacement from Edit References (foundation C3).
+#[derive(Debug, Clone)]
+enum ReferenceChange {
+    Sketch(Uuid),
+    Plane(String),
+    Edges(Vec<String>),
+    Tool(Uuid),
+    Surface(Uuid),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReferenceRowKind {
+    Sketch,
+    Plane,
+    Edges,
+    Tool,
+    Surface,
+    ReadOnly,
+}
+
+#[derive(Debug, Clone)]
+struct ReferenceRow {
+    label: String,
+    current: String,
+    kind: ReferenceRowKind,
+}
+
+/// One dimension edited from the viewport HUD (foundation C3).
+#[derive(Debug, Clone)]
+enum FeatureDimensionEdit {
+    SketchConstraint { index: usize, value: f64 },
+    ExtrudeHeight(f64),
+    RevolveAngle(f64),
+    BoxSize([f64; 3]),
+    Cylinder { radius: f64, height: f64 },
+    FilletRadius(f64),
+    ChamferDistance(f64),
 }
 
 /// Transient state for the feature dialog's "add parameter" row.
@@ -410,6 +534,12 @@ impl RcadApp {
             needs_fit: true,
             feature_dialog_tab: 0,
             new_parameter: NewParameterDraft::default(),
+            feature_editor: None,
+            pending_editor: None,
+            edit_dimensions: None,
+            edit_references: None,
+            secondary_press: None,
+            viewport_menu: None,
             floating_bar: FloatingBar::default(),
             placing_component: false,
             settings: settings.clone(),
@@ -603,6 +733,14 @@ impl RcadApp {
             self.frame_time_ms * 0.9 + dt_ms * 0.1
         };
 
+        // Keep the dependency graph and automatic sketch visibility current
+        // before the tree and the viewport draw them.
+        if self.needs_rebuild {
+            if let Some(part) = self.get_active_part_mut() {
+                part.recompute_dependencies();
+            }
+        }
+
         // Nothing can be modelled before a project exists: every component
         // reads the project tolerances, variables and colours.
         if self.project_root.is_none() {
@@ -783,11 +921,11 @@ impl RcadApp {
                         ui.close();
                     }
                     if ui.button("Extrude  E").clicked() {
-                        self.extrude_sketch();
+                        self.open_feature_editor(FeatureEditorKind::Extrude, None);
                         ui.close();
                     }
                     if ui.button("Revolve  V").clicked() {
-                        self.revolve_sketch();
+                        self.open_feature_editor(FeatureEditorKind::Revolve, None);
                         ui.close();
                     }
                     ui.separator();
@@ -920,6 +1058,7 @@ impl RcadApp {
                 self.settings.show_grid,
                 self.settings.grid_spacing,
                 self.solid_renderer.as_mut(),
+                self.sketch_feature,
             );
 
             self.viewport_rect = Some(response.rect);
@@ -999,21 +1138,32 @@ impl RcadApp {
                 let pos = ui
                     .input(|i| i.pointer.hover_pos())
                     .unwrap_or(response.rect.center());
-                let candidates = pick_candidates(
+                let mut candidates = pick_candidates(
                     pos,
                     response.rect,
                     &self.mesh,
                     &self.camera,
                     part_clone.as_ref(),
                 );
+                // Visible sketch curves are pickable too, after faces/edges, so
+                // they can be selected or targeted by the long right-click menu.
+                if let Some(part) = part_clone.as_ref() {
+                    if let Some(sketch) = pick_sketch_feature(
+                        pos,
+                        response.rect,
+                        &self.camera,
+                        part,
+                        self.sketch_feature,
+                    ) {
+                        candidates.push(sketch);
+                    }
+                }
                 if candidates != self.hover_candidates {
                     self.hover_candidates = candidates;
                     self.hover_cycle = 0;
                 }
-                if ui.input(|i| i.pointer.secondary_clicked()) && !self.hover_candidates.is_empty() {
-                    self.hover_cycle = (self.hover_cycle + 1) % self.hover_candidates.len();
-                }
                 self.hover = self.hover_candidates.get(self.hover_cycle).cloned();
+                self.handle_secondary_button(ui, pos);
 
                 if ui.input(|i| i.pointer.primary_clicked()) {
                     let mode = ui.input(|i| ClickMode::from_modifiers(&i.modifiers));
@@ -1143,6 +1293,13 @@ impl RcadApp {
             self.handle_floating_action(action);
         }
         
+        // Feature definition panel (Extrude/Revolve/parameters) and the Edit
+        // dimension HUD.
+        self.draw_feature_editor(ctx);
+        self.draw_feature_dimension_editor(ctx);
+        self.draw_edit_references(ctx);
+        self.draw_viewport_menu(ctx);
+
         // Show relations dialog if requested
         if let Some(feature_id) = self.show_relations_dialog {
             let mut open = true;
@@ -2214,6 +2371,9 @@ impl RcadApp {
     /// backend and the incremental `ShapeCache`. Marking the part dirty keeps
     /// this cheap enough to call from every mutation site.
     fn rebuild_active_part(&mut self) {
+        if let Some(part) = self.get_active_part_mut() {
+            part.recompute_dependencies();
+        }
         self.needs_rebuild = true;
     }
 
@@ -2648,6 +2808,7 @@ impl RcadApp {
         self.undo_stack.push(self.project.clone());
         let editing = self.sketch_feature;
         let mut feature_name = None;
+        let mut created_sketch = None;
         if let Some(part) = self.get_active_part_mut() {
             let updated = editing.and_then(|id| {
                 part.features
@@ -2664,12 +2825,14 @@ impl RcadApp {
                 Some(name) => Some(name),
                 None => {
                     let name = rcad_features::unique_feature_name(part, "Sketch");
-                    part.features.push(Feature::new(
+                    let feature = Feature::new(
                         name.clone(),
                         FeatureKind::Sketch {
                             sketch: sketch.clone(),
                         },
-                    ));
+                    );
+                    created_sketch = Some(feature.id);
+                    part.features.push(feature);
                     Some(name)
                 }
             };
@@ -2719,6 +2882,19 @@ impl RcadApp {
             None => "Sketch saved.".to_string(),
         });
         self.close_sketch_session();
+
+        // A sketch that was started from a feature's "Define sketch…" button
+        // returns to that feature panel; OK there creates the consuming feature.
+        if let Some(mut editor) = self.pending_editor.take() {
+            let saved_sketch = created_sketch.or(editing);
+            if let Some(sketch_id) = saved_sketch {
+                editor.sketch = Some(sketch_id);
+                if created_sketch == Some(sketch_id) {
+                    editor.internal_sketch = Some(sketch_id);
+                }
+            }
+            self.feature_editor = Some(editor);
+        }
     }
 
     /// Cancel: leave the sketch without keeping anything.
@@ -2726,6 +2902,10 @@ impl RcadApp {
         self.status = Some("Sketch cancelled; nothing was saved.".to_string());
         self.last_error = None;
         self.close_sketch_session();
+        // Return to the panel that asked for the sketch, without one selected.
+        if let Some(editor) = self.pending_editor.take() {
+            self.feature_editor = Some(editor);
+        }
     }
 
     /// Leave the sketch edit session and drop its transient state.
@@ -4515,6 +4695,1246 @@ impl RcadApp {
         );
     }
     
+    // ===== Feature definition panel (foundation C2/C3) =====
+
+    // ===== Edit Definition routing (foundation C3) =====
+
+    /// Open Edit Definition for the selected tree feature (Ctrl+E).
+    pub fn edit_definition_selected(&mut self) {
+        let feature_id = self.selection.items().iter().find_map(|item| match item {
+            Selected::Feature { feature, .. } | Selected::Datum { feature, .. } => Some(*feature),
+            _ => None,
+        });
+        if let Some(feature_id) = feature_id {
+            self.edit_definition_feature(feature_id);
+        } else {
+            self.last_error = Some("Select a feature in the tree first.".to_string());
+        }
+    }
+
+    fn edit_definition_feature(&mut self, feature_id: Uuid) {
+        let kind = self
+            .get_active_part()
+            .and_then(|part| part.features.iter().find(|feature| feature.id == feature_id))
+            .map(|feature| feature.kind.clone());
+        match kind {
+            Some(FeatureKind::Sketch { .. }) => {
+                if let Err(message) = self.edit_sketch_feature(feature_id) {
+                    self.last_error = Some(message);
+                }
+            }
+            Some(FeatureKind::Extrude { .. }) => {
+                self.open_feature_editor(FeatureEditorKind::Extrude, Some(feature_id))
+            }
+            Some(FeatureKind::Revolve { .. }) => {
+                self.open_feature_editor(FeatureEditorKind::Revolve, Some(feature_id))
+            }
+            Some(FeatureKind::Box { .. }) => {
+                self.open_feature_editor(FeatureEditorKind::Box, Some(feature_id))
+            }
+            Some(FeatureKind::Cylinder { .. }) => {
+                self.open_feature_editor(FeatureEditorKind::Cylinder, Some(feature_id))
+            }
+            Some(FeatureKind::Fillet { .. }) => {
+                self.open_feature_editor(FeatureEditorKind::Fillet, Some(feature_id))
+            }
+            Some(FeatureKind::Chamfer { .. }) => {
+                self.open_feature_editor(FeatureEditorKind::Chamfer, Some(feature_id))
+            }
+            _ => self.show_relations_dialog = Some(feature_id),
+        }
+    }
+
+    // ===== Edit References (foundation C3) =====
+
+    fn selected_plane_reference(&self) -> Option<String> {
+        let part = self.get_active_part()?;
+        for item in self.selection.items() {
+            match item {
+                Selected::Face { reference, .. } | Selected::Edge { reference, .. } => {
+                    return Some(reference.clone());
+                }
+                Selected::Datum { feature, .. } | Selected::Feature { feature, .. } => {
+                    if let Some(candidate) = part.features.iter().find(|f| f.id == *feature) {
+                        if matches!(
+                            candidate.kind,
+                            FeatureKind::Construction {
+                                kind: ConstructionKind::Plane,
+                                ..
+                            }
+                        ) {
+                            return Some(feature.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn selected_sketch_id(&self) -> Option<Uuid> {
+        let part = self.get_active_part()?;
+        self.selection.items().iter().find_map(|item| match item {
+            Selected::Feature { feature, .. } => part
+                .features
+                .iter()
+                .find(|candidate| {
+                    candidate.id == *feature
+                        && matches!(candidate.kind, FeatureKind::Sketch { .. })
+                })
+                .map(|candidate| candidate.id),
+            _ => None,
+        })
+    }
+
+    fn selected_edge_references(&self) -> Vec<String> {
+        self.selection
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                Selected::Edge { reference, .. } => Some(reference.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn selected_feature_of_kind(&self, sketch_only: bool) -> Option<Uuid> {
+        let part = self.get_active_part()?;
+        self.selection.items().iter().find_map(|item| match item {
+            Selected::Feature { feature, .. }
+            | Selected::Datum { feature, .. } => {
+                let candidate = part.features.iter().find(|f| f.id == *feature)?;
+                if sketch_only && !matches!(candidate.kind, FeatureKind::Sketch { .. }) {
+                    return None;
+                }
+                Some(candidate.id)
+            }
+            _ => None,
+        })
+    }
+
+    fn draw_edit_references(&mut self, ctx: &egui::Context) {
+        let Some(feature_id) = self.edit_references else {
+            return;
+        };
+        let Some(part) = self.get_active_part() else {
+            self.edit_references = None;
+            return;
+        };
+        let Some(feature) = part
+            .features
+            .iter()
+            .find(|feature| feature.id == feature_id)
+            .cloned()
+        else {
+            self.edit_references = None;
+            return;
+        };
+        let feature_name = feature.name.clone();
+        let sketch_name = |id: Option<Uuid>| {
+            id.and_then(|id| {
+                part.features
+                    .iter()
+                    .find(|candidate| candidate.id == id)
+                    .map(|candidate| candidate.name.clone())
+            })
+        };
+        let feature_name_of = |id: Uuid| {
+            part.features
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .map(|candidate| candidate.name.clone())
+                .unwrap_or_else(|| "(missing)".to_string())
+        };
+        let mut rows: Vec<ReferenceRow> = Vec::new();
+        match &feature.kind {
+            FeatureKind::Sketch { sketch } => {
+                let orientation = sketch.reference(SketchReferenceRole::Orientation);
+                rows.push(ReferenceRow {
+                    label: "Placement".into(),
+                    current: orientation
+                        .map(|reference| reference.label.clone())
+                        .unwrap_or_else(|| "(none)".into()),
+                    kind: ReferenceRowKind::Plane,
+                });
+                let automatic = sketch.reference(SketchReferenceRole::Automatic);
+                rows.push(ReferenceRow {
+                    label: "Second reference".into(),
+                    current: automatic
+                        .map(|reference| reference.label.clone())
+                        .unwrap_or_else(|| "(automatic)".into()),
+                    kind: ReferenceRowKind::ReadOnly,
+                });
+            }
+            FeatureKind::Extrude {
+                sketch,
+                placement,
+                ..
+            }
+            | FeatureKind::Revolve {
+                sketch,
+                placement,
+                ..
+            } => {
+                rows.push(ReferenceRow {
+                    label: "Sketch".into(),
+                    current: sketch_name(*sketch).unwrap_or_else(|| "(none)".into()),
+                    kind: ReferenceRowKind::Sketch,
+                });
+                rows.push(ReferenceRow {
+                    label: "Placement".into(),
+                    current: placement
+                        .as_ref()
+                        .and_then(|placement| placement.reference.clone())
+                        .unwrap_or_else(|| "(automatic)".into()),
+                    kind: ReferenceRowKind::Plane,
+                });
+            }
+            FeatureKind::Fillet { edges, .. } | FeatureKind::Chamfer { edges, .. } => {
+                let current = match edges {
+                    EdgeSet::References(references) => {
+                        format!("{} edge(s)", references.len())
+                    }
+                    EdgeSet::All => "all edges".to_string(),
+                    EdgeSet::Outer => "outer edges".to_string(),
+                    EdgeSet::Inner => "inner edges".to_string(),
+                    EdgeSet::Vertical { axis } => format!("vertical ({})", feature_name_of(*axis)),
+                    EdgeSet::Horizontal { axis } => {
+                        format!("horizontal ({})", feature_name_of(*axis))
+                    }
+                };
+                rows.push(ReferenceRow {
+                    label: "Edges".into(),
+                    current,
+                    kind: ReferenceRowKind::Edges,
+                });
+            }
+            FeatureKind::Boolean { tool_feature, .. } => {
+                rows.push(ReferenceRow {
+                    label: "Tool feature".into(),
+                    current: feature_name_of(*tool_feature),
+                    kind: ReferenceRowKind::Tool,
+                });
+            }
+            FeatureKind::Thicken {
+                surface_feature, ..
+            } => {
+                rows.push(ReferenceRow {
+                    label: "Surface".into(),
+                    current: feature_name_of(*surface_feature),
+                    kind: ReferenceRowKind::Surface,
+                });
+            }
+            _ => {
+                rows.push(ReferenceRow {
+                    label: "References".into(),
+                    current: "This feature has no editable references yet.".into(),
+                    kind: ReferenceRowKind::ReadOnly,
+                });
+            }
+        }
+
+        let mut open = true;
+        let mut change: Option<ReferenceChange> = None;
+        egui::Window::new(format!("Edit References — {feature_name}"))
+            .open(&mut open)
+            .resizable(false)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label("Each row can be replaced from the current selection:");
+                ui.separator();
+                for row in &rows {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}:", row.label));
+                        ui.monospace(&row.current);
+                        match row.kind {
+                            ReferenceRowKind::Sketch => {
+                                if ui.button("Use selected sketch").clicked() {
+                                    if let Some(id) = self.selected_sketch_id() {
+                                        change = Some(ReferenceChange::Sketch(id));
+                                    } else {
+                                        self.last_error = Some(
+                                            "Select a sketch feature in the tree first.".into(),
+                                        );
+                                    }
+                                }
+                            }
+                            ReferenceRowKind::Plane => {
+                                if ui.button("Use selected plane/face").clicked() {
+                                    if let Some(reference) = self.selected_plane_reference() {
+                                        change = Some(ReferenceChange::Plane(reference));
+                                    } else {
+                                        self.last_error = Some(
+                                            "Select a planar face or datum plane first.".into(),
+                                        );
+                                    }
+                                }
+                            }
+                            ReferenceRowKind::Edges => {
+                                if ui.button("Use selected edges").clicked() {
+                                    let edges = self.selected_edge_references();
+                                    if edges.is_empty() {
+                                        self.last_error =
+                                            Some("Select one or more edges first.".into());
+                                    } else {
+                                        change = Some(ReferenceChange::Edges(edges));
+                                    }
+                                }
+                            }
+                            ReferenceRowKind::Tool => {
+                                if ui.button("Use selected feature").clicked() {
+                                    if let Some(id) = self.selected_feature_of_kind(false) {
+                                        change = Some(ReferenceChange::Tool(id));
+                                    } else {
+                                        self.last_error =
+                                            Some("Select a solid feature first.".into());
+                                    }
+                                }
+                            }
+                            ReferenceRowKind::Surface => {
+                                if ui.button("Use selected feature").clicked() {
+                                    if let Some(id) = self.selected_feature_of_kind(false) {
+                                        change = Some(ReferenceChange::Surface(id));
+                                    } else {
+                                        self.last_error =
+                                            Some("Select a surface feature first.".into());
+                                    }
+                                }
+                            }
+                            ReferenceRowKind::ReadOnly => {}
+                        }
+                    });
+                }
+                ui.separator();
+                ui.label("The rebuild validates the new reference; a bad one is reported.");
+            });
+
+        if !open {
+            self.edit_references = None;
+            return;
+        }
+        if let Some(change) = change {
+            self.apply_reference_change(feature_id, change);
+        }
+    }
+
+    fn apply_reference_change(&mut self, feature_id: Uuid, change: ReferenceChange) {
+        self.undo_stack.push(self.project.clone());
+        let mut sketch_update: Option<Sketch> = None;
+        let replacement_sketch = if let ReferenceChange::Sketch(sketch_id) = &change {
+            self.get_active_part()
+                .and_then(|part| part.features.iter().find(|c| c.id == *sketch_id))
+                .and_then(|candidate| match &candidate.kind {
+                    FeatureKind::Sketch { sketch } => Some(sketch.clone()),
+                    _ => None,
+                })
+        } else {
+            None
+        };
+        if let Some(part) = self.get_active_part_mut() {
+            let Some(feature) = part.features.iter_mut().find(|feature| feature.id == feature_id)
+            else {
+                return;
+            };
+            match change {
+                ReferenceChange::Sketch(sketch_id) => {
+                    let Some(sketch) = replacement_sketch else {
+                        return;
+                    };
+                    if let Some(profile) = sketch.to_profile() {
+                        let placement = Self::placement_from_sketch(&sketch);
+                        match &mut feature.kind {
+                            FeatureKind::Extrude {
+                                sketch: source,
+                                profile: stored,
+                                placement: stored_placement,
+                                ..
+                            }
+                            | FeatureKind::Revolve {
+                                sketch: source,
+                                profile: stored,
+                                placement: stored_placement,
+                                ..
+                            } => {
+                                *source = Some(sketch_id);
+                                *stored = profile;
+                                *stored_placement = Some(placement);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                ReferenceChange::Plane(reference) => match &mut feature.kind {
+                    FeatureKind::Extrude { placement, .. }
+                    | FeatureKind::Revolve { placement, .. } => {
+                        let placement = placement.get_or_insert(SketchPlacement {
+                            origin: [0.0, 0.0, 0.0],
+                            normal: [0.0, 0.0, 1.0],
+                            x_direction: [1.0, 0.0, 0.0],
+                            reference: None,
+                        });
+                        placement.reference = Some(reference);
+                    }
+                    FeatureKind::Sketch { sketch } => {
+                        let mut updated = sketch.clone();
+                        let automatic = updated
+                            .reference(SketchReferenceRole::Automatic)
+                            .cloned()
+                            .unwrap_or_else(|| SketchReference {
+                                reference: None,
+                                label: "automatic".into(),
+                                role: SketchReferenceRole::Automatic,
+                                origin: updated.plane_origin,
+                                direction: updated.plane_normal,
+                            });
+                        let orientation = SketchReference {
+                            reference: Some(reference),
+                            label: "reference".into(),
+                            role: SketchReferenceRole::Orientation,
+                            origin: updated.plane_origin,
+                            direction: updated.plane_normal,
+                        };
+                        updated.set_references(orientation, automatic);
+                        sketch_update = Some(updated);
+                    }
+                    _ => {}
+                },
+                ReferenceChange::Edges(references) => {
+                    if let FeatureKind::Fillet { edges, .. } | FeatureKind::Chamfer { edges, .. } =
+                        &mut feature.kind
+                    {
+                        *edges = EdgeSet::References(references);
+                    }
+                }
+                ReferenceChange::Tool(tool_feature) => {
+                    if let FeatureKind::Boolean {
+                        tool_feature: tool,
+                        ..
+                    } = &mut feature.kind
+                    {
+                        *tool = tool_feature;
+                    }
+                }
+                ReferenceChange::Surface(surface_feature) => {
+                    if let FeatureKind::Thicken {
+                        surface_feature: surface,
+                        ..
+                    } = &mut feature.kind
+                    {
+                        *surface = surface_feature;
+                    }
+                }
+            }
+        }
+        if let Some(sketch) = sketch_update {
+            if let Some(part) = self.get_active_part_mut() {
+                if let Some(feature) = part.features.iter_mut().find(|f| f.id == feature_id) {
+                    feature.kind = FeatureKind::Sketch { sketch };
+                }
+            }
+        }
+        self.rebuild_active_part();
+        self.last_error = None;
+        self.status = Some("References updated; rebuild running.".to_string());
+    }
+
+    // ===== Edit: dimensions in the viewport (foundation C3) =====
+
+    fn open_feature_dimensions(&mut self, feature_id: Uuid) {
+        let known = self
+            .get_active_part()
+            .map(|part| part.features.iter().any(|feature| feature.id == feature_id))
+            .unwrap_or(false);
+        if known {
+            self.edit_dimensions = Some(feature_id);
+            self.last_error = None;
+        } else {
+            self.last_error = Some("That feature no longer exists.".to_string());
+        }
+    }
+
+    /// The floating dimension HUD shown by Edit. It lists the feature's driving
+    /// dimensions (or, for a sketch, every dimension in it) and applies a value
+    /// when the user releases the drag/commits the text.
+    fn draw_feature_dimension_editor(&mut self, ctx: &egui::Context) {
+        let Some(feature_id) = self.edit_dimensions else {
+            return;
+        };
+        let Some(part) = self.get_active_part() else {
+            self.edit_dimensions = None;
+            return;
+        };
+        let Some(feature) = part
+            .features
+            .iter()
+            .find(|feature| feature.id == feature_id)
+            .cloned()
+        else {
+            self.edit_dimensions = None;
+            return;
+        };
+        let anchor = self
+            .viewport_rect
+            .map(|rect| rect.left_top() + egui::vec2(18.0, 18.0))
+            .unwrap_or(egui::pos2(24.0, 80.0));
+        let mut close = false;
+        let mut edit: Option<FeatureDimensionEdit> = None;
+
+        egui::Area::new(egui::Id::new("feature_dimensions"))
+            .fixed_pos(anchor)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(250.0);
+                    ui.horizontal(|ui| {
+                        ui.strong(format!("Edit — {}", feature.name));
+                        if ui.small_button("✕").clicked() {
+                            close = true;
+                        }
+                    });
+                    ui.separator();
+                    match &feature.kind {
+                        FeatureKind::Sketch { sketch } => {
+                            let mut shown = 0;
+                            for (index, _) in sketch.constraints.iter().enumerate() {
+                                let Some(value) = sketch.dimension_value(index) else {
+                                    continue;
+                                };
+                                let label = match sketch.constraints.get(index) {
+                                    Some(rcad_sketch::Constraint::Distance { .. }) => "distance",
+                                    Some(rcad_sketch::Constraint::Angle { .. }) => "angle",
+                                    Some(rcad_sketch::Constraint::LineDistance { .. }) => "line distance",
+                                    Some(rcad_sketch::Constraint::HorizontalDistance { .. }) => "horizontal",
+                                    Some(rcad_sketch::Constraint::VerticalDistance { .. }) => "vertical",
+                                    Some(rcad_sketch::Constraint::Radius { .. }) => "radius",
+                                    Some(rcad_sketch::Constraint::Diameter { .. }) => "diameter",
+                                    Some(rcad_sketch::Constraint::PointLineDistance { .. }) => "point–line",
+                                    Some(rcad_sketch::Constraint::LineCurveDistance { .. }) => "line–curve",
+                                    _ => "dimension",
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{label} {}", index + 1));
+                                    let mut edited = value;
+                                    let response = ui.add(
+                                        egui::DragValue::new(&mut edited)
+                                            .speed(0.1)
+                                            .range(-1.0e6..=1.0e6),
+                                    );
+                                    if response.drag_stopped() || response.lost_focus() {
+                                        edit = Some(FeatureDimensionEdit::SketchConstraint {
+                                            index,
+                                            value: edited,
+                                        });
+                                    }
+                                });
+                                shown += 1;
+                            }
+                            if shown == 0 {
+                                ui.label("This sketch has no dimensions.");
+                                ui.label("Edit Definition shows its geometry.");
+                            }
+                        }
+                        FeatureKind::Extrude { height, .. } => {
+                            ui.horizontal(|ui| {
+                                ui.label("depth (mm)");
+                                let mut value = *height;
+                                let response = ui.add(egui::DragValue::new(&mut value).speed(0.1));
+                                if response.drag_stopped() || response.lost_focus() {
+                                    edit = Some(FeatureDimensionEdit::ExtrudeHeight(value));
+                                }
+                            });
+                        }
+                        FeatureKind::Revolve { angle_deg, .. } => {
+                            ui.horizontal(|ui| {
+                                ui.label("angle (°)");
+                                let mut value = *angle_deg;
+                                let response = ui.add(egui::DragValue::new(&mut value).speed(1.0));
+                                if response.drag_stopped() || response.lost_focus() {
+                                    edit = Some(FeatureDimensionEdit::RevolveAngle(value));
+                                }
+                            });
+                        }
+                        FeatureKind::Box { size } => {
+                            ui.horizontal(|ui| {
+                                let mut values = *size;
+                                ui.label("x");
+                                let x = ui.add(egui::DragValue::new(&mut values[0]).speed(0.1));
+                                ui.label("y");
+                                let y = ui.add(egui::DragValue::new(&mut values[1]).speed(0.1));
+                                ui.label("z");
+                                let z = ui.add(egui::DragValue::new(&mut values[2]).speed(0.1));
+                                if x.drag_stopped()
+                                    || y.drag_stopped()
+                                    || z.drag_stopped()
+                                    || x.lost_focus()
+                                    || y.lost_focus()
+                                    || z.lost_focus()
+                                {
+                                    edit = Some(FeatureDimensionEdit::BoxSize(values));
+                                }
+                            });
+                        }
+                        FeatureKind::Cylinder { radius, height } => {
+                            ui.horizontal(|ui| {
+                                let mut r = *radius;
+                                let mut h = *height;
+                                ui.label("radius");
+                                let radius_response =
+                                    ui.add(egui::DragValue::new(&mut r).speed(0.1));
+                                ui.label("height");
+                                let height_response =
+                                    ui.add(egui::DragValue::new(&mut h).speed(0.1));
+                                if radius_response.drag_stopped()
+                                    || height_response.drag_stopped()
+                                    || radius_response.lost_focus()
+                                    || height_response.lost_focus()
+                                {
+                                    edit = Some(FeatureDimensionEdit::Cylinder {
+                                        radius: r,
+                                        height: h,
+                                    });
+                                }
+                            });
+                        }
+                        FeatureKind::Fillet { radius, .. } => {
+                            ui.horizontal(|ui| {
+                                ui.label("radius");
+                                let mut value = *radius;
+                                let response = ui.add(egui::DragValue::new(&mut value).speed(0.1));
+                                if response.drag_stopped() || response.lost_focus() {
+                                    edit = Some(FeatureDimensionEdit::FilletRadius(value));
+                                }
+                            });
+                        }
+                        FeatureKind::Chamfer { distance, .. } => {
+                            ui.horizontal(|ui| {
+                                ui.label("distance");
+                                let mut value = *distance;
+                                let response = ui.add(egui::DragValue::new(&mut value).speed(0.1));
+                                if response.drag_stopped() || response.lost_focus() {
+                                    edit = Some(FeatureDimensionEdit::ChamferDistance(value));
+                                }
+                            });
+                        }
+                        _ => {
+                            ui.label("This feature has no dimensions exposed yet.");
+                        }
+                    }
+                });
+            });
+
+        if close {
+            self.edit_dimensions = None;
+            return;
+        }
+        if let Some(edit) = edit {
+            self.apply_feature_dimension(feature_id, edit);
+        }
+    }
+
+    fn apply_feature_dimension(&mut self, feature_id: Uuid, edit: FeatureDimensionEdit) {
+        self.undo_stack.push(self.project.clone());
+        let mut sketch_update: Option<Sketch> = None;
+        if let Some(part) = self.get_active_part_mut() {
+            let Some(feature) = part.features.iter_mut().find(|feature| feature.id == feature_id)
+            else {
+                return;
+            };
+            match edit {
+                FeatureDimensionEdit::SketchConstraint { index, value } => {
+                    if let FeatureKind::Sketch { sketch } = &mut feature.kind {
+                        if sketch.set_dimension_value(index, value) {
+                            let _ = sketch.solve();
+                            sketch_update = Some(sketch.clone());
+                        }
+                    }
+                }
+                FeatureDimensionEdit::ExtrudeHeight(value) => {
+                    if let FeatureKind::Extrude { height, .. } = &mut feature.kind {
+                        *height = value;
+                    }
+                }
+                FeatureDimensionEdit::RevolveAngle(value) => {
+                    if let FeatureKind::Revolve { angle_deg, .. } = &mut feature.kind {
+                        *angle_deg = value;
+                    }
+                }
+                FeatureDimensionEdit::BoxSize(value) => {
+                    if let FeatureKind::Box { size } = &mut feature.kind {
+                        *size = value;
+                    }
+                }
+                FeatureDimensionEdit::Cylinder { radius, height } => {
+                    if let FeatureKind::Cylinder {
+                        radius: r,
+                        height: h,
+                    } = &mut feature.kind
+                    {
+                        *r = radius;
+                        *h = height;
+                    }
+                }
+                FeatureDimensionEdit::FilletRadius(value) => {
+                    if let FeatureKind::Fillet { radius, .. } = &mut feature.kind {
+                        *radius = value;
+                    }
+                }
+                FeatureDimensionEdit::ChamferDistance(value) => {
+                    if let FeatureKind::Chamfer { distance, .. } = &mut feature.kind {
+                        *distance = value;
+                    }
+                }
+            }
+        }
+
+        // A sketch dimension changes the profile the consuming feature stores.
+        if let Some(sketch) = sketch_update {
+            if let Some(part) = self.get_active_part_mut() {
+                if let Some(profile) = sketch.to_profile() {
+                    let placement = Self::placement_from_sketch(&sketch);
+                    for feature in &mut part.features {
+                        let (source, stored_profile, stored_placement) = match &mut feature.kind {
+                            FeatureKind::Extrude {
+                                sketch,
+                                profile,
+                                placement,
+                                ..
+                            }
+                            | FeatureKind::Revolve {
+                                sketch,
+                                profile,
+                                placement,
+                                ..
+                            } => (sketch, profile, placement),
+                            _ => continue,
+                        };
+                        if *source == Some(feature_id) {
+                            *stored_profile = profile.clone();
+                            *stored_placement = Some(placement.clone());
+                        }
+                    }
+                }
+            }
+        }
+        self.rebuild_active_part();
+        self.last_error = None;
+    }
+
+    /// Open the definition panel for a new feature or for editing an existing
+    /// one. Extrude/Revolve ask for a sketch; the other kinds edit parameters.
+    pub fn open_feature_editor(&mut self, kind: FeatureEditorKind, target: Option<Uuid>) {
+        if self.sketch.is_some() {
+            self.last_error = Some(
+                "Finish (OK) or cancel the open sketch before starting another feature."
+                    .to_string(),
+            );
+            return;
+        }
+        let mut editor = FeatureEditor::new(kind);
+        editor.target = target;
+        if let Some(target) = target {
+            let Some(part) = self.get_active_part() else {
+                return;
+            };
+            let Some(feature) = part.features.iter().find(|feature| feature.id == target) else {
+                return;
+            };
+            editor.name = feature.name.clone();
+            editor.internal_sketch = part
+                .features
+                .iter()
+                .find(|candidate| {
+                    candidate.sub_feature_of == Some(target)
+                        && matches!(candidate.kind, FeatureKind::Sketch { .. })
+                })
+                .map(|candidate| candidate.id);
+            match (&feature.kind, kind) {
+                (
+                    FeatureKind::Extrude {
+                        sketch,
+                        height,
+                        ..
+                    },
+                    FeatureEditorKind::Extrude,
+                ) => {
+                    editor.sketch = *sketch;
+                    editor.height = *height;
+                }
+                (
+                    FeatureKind::Revolve {
+                        sketch,
+                        angle_deg,
+                        ..
+                    },
+                    FeatureEditorKind::Revolve,
+                ) => {
+                    editor.sketch = *sketch;
+                    editor.angle_deg = *angle_deg;
+                }
+                (FeatureKind::Box { size }, FeatureEditorKind::Box) => editor.size = *size,
+                (FeatureKind::Cylinder { radius, height }, FeatureEditorKind::Cylinder) => {
+                    editor.cylinder_radius = *radius;
+                    editor.cylinder_height = *height;
+                }
+                (FeatureKind::Fillet { radius, .. }, FeatureEditorKind::Fillet) => {
+                    editor.radius = *radius;
+                }
+                (FeatureKind::Chamfer { distance, .. }, FeatureEditorKind::Chamfer) => {
+                    editor.distance = *distance;
+                }
+                _ => {
+                    self.last_error = Some(format!(
+                        "{} cannot be edited in this panel.",
+                        kind.title()
+                    ));
+                    return;
+                }
+            }
+        } else if kind.needs_sketch() {
+            editor.sketch = self.selected_sketch_feature();
+        } else if let Some(part) = self.get_active_part() {
+            editor.name = rcad_features::unique_feature_name(part, kind.title());
+        }
+        if target.is_none() && kind.needs_sketch() {
+            if let Some(part) = self.get_active_part() {
+                editor.name = rcad_features::unique_feature_name(part, kind.title());
+            }
+        }
+        editor.sketch = editor
+            .sketch
+            .or_else(|| if kind.needs_sketch() { self.selected_sketch_feature() } else { None });
+        self.feature_editor = Some(editor);
+    }
+
+    fn selected_sketch_feature(&self) -> Option<Uuid> {
+        let part = self.get_active_part()?;
+        self.selection.items().iter().find_map(|item| match item {
+            Selected::Feature { feature, .. }
+                if part
+                    .features
+                    .iter()
+                    .any(|candidate| {
+                        candidate.id == *feature
+                            && matches!(candidate.kind, FeatureKind::Sketch { .. })
+                    }) =>
+            {
+                Some(*feature)
+            }
+            _ => None,
+        })
+    }
+
+    fn placement_from_sketch(sketch: &Sketch) -> SketchPlacement {
+        SketchPlacement {
+            origin: sketch.plane_origin,
+            normal: sketch.plane_normal,
+            x_direction: sketch.plane_x_axis,
+            reference: sketch
+                .reference(SketchReferenceRole::Orientation)
+                .and_then(|reference| reference.reference.clone()),
+        }
+    }
+
+    /// Draw the definition panel. It owns the editor while the window is open.
+    fn draw_feature_editor(&mut self, ctx: &egui::Context) {
+        let Some(mut editor) = self.feature_editor.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut apply = false;
+        let mut cancel = false;
+        let mut define_sketch = false;
+        let mut preview = false;
+
+        egui::Window::new(format!("{} — definition", editor.kind.title()))
+            .open(&mut open)
+            .resizable(false)
+            .default_width(340.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("name");
+                    ui.text_edit_singleline(&mut editor.name);
+                });
+                ui.separator();
+
+                if editor.kind.needs_sketch() {
+                    ui.strong("References");
+                    let sketches: Vec<(Uuid, String)> = self
+                        .get_active_part()
+                        .map(|part| {
+                            part.features
+                                .iter()
+                                .filter(|feature| {
+                                    !feature.suppressed
+                                        && matches!(feature.kind, FeatureKind::Sketch { .. })
+                                })
+                                .map(|feature| (feature.id, feature.name.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let selected_name = editor
+                        .sketch
+                        .and_then(|id| sketches.iter().find(|(id2, _)| *id2 == id))
+                        .map(|(_, name)| name.clone())
+                        .unwrap_or_else(|| "— none —".to_string());
+                    egui::ComboBox::from_label("sketch")
+                        .selected_text(selected_name)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut editor.sketch, None, "— none —");
+                            for (id, name) in &sketches {
+                                ui.selectable_value(&mut editor.sketch, Some(*id), name);
+                            }
+                        });
+                    ui.horizontal(|ui| {
+                        if ui.button("Define sketch…").clicked() {
+                            define_sketch = true;
+                        }
+                        if let Some(id) = editor.sketch {
+                            if ui.button("Edit sketch").clicked() {
+                                self.feature_editor = Some(editor.clone());
+                                if let Err(error) = self.edit_sketch_feature(id) {
+                                    self.last_error = Some(error);
+                                }
+                                return;
+                            }
+                        }
+                    });
+                    if editor.sketch.is_none() {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_RED,
+                            "A sketch is required before the feature can be created.",
+                        );
+                    }
+                    ui.separator();
+                }
+
+                ui.strong("Parameters");
+                match editor.kind {
+                    FeatureEditorKind::Extrude => {
+                        ui.horizontal(|ui| {
+                            ui.label("depth (mm)");
+                            ui.add(egui::DragValue::new(&mut editor.height).speed(0.1));
+                        });
+                    }
+                    FeatureEditorKind::Revolve => {
+                        ui.horizontal(|ui| {
+                            ui.label("angle (°)");
+                            ui.add(
+                                egui::DragValue::new(&mut editor.angle_deg)
+                                    .speed(1.0)
+                                    .range(-360.0..=360.0),
+                            );
+                        });
+                    }
+                    FeatureEditorKind::Box => {
+                        ui.horizontal(|ui| {
+                            ui.label("x");
+                            ui.add(egui::DragValue::new(&mut editor.size[0]).speed(0.1));
+                            ui.label("y");
+                            ui.add(egui::DragValue::new(&mut editor.size[1]).speed(0.1));
+                            ui.label("z");
+                            ui.add(egui::DragValue::new(&mut editor.size[2]).speed(0.1));
+                        });
+                    }
+                    FeatureEditorKind::Cylinder => {
+                        ui.horizontal(|ui| {
+                            ui.label("radius");
+                            ui.add(egui::DragValue::new(&mut editor.cylinder_radius).speed(0.1));
+                            ui.label("height");
+                            ui.add(egui::DragValue::new(&mut editor.cylinder_height).speed(0.1));
+                        });
+                    }
+                    FeatureEditorKind::Fillet => {
+                        ui.horizontal(|ui| {
+                            ui.label("radius");
+                            ui.add(
+                                egui::DragValue::new(&mut editor.radius)
+                                    .speed(0.1)
+                                    .range(0.01..=1000.0),
+                            );
+                        });
+                    }
+                    FeatureEditorKind::Chamfer => {
+                        ui.horizontal(|ui| {
+                            ui.label("distance");
+                            ui.add(egui::DragValue::new(&mut editor.distance).speed(0.1));
+                        });
+                    }
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_apply = !editor.kind.needs_sketch() || editor.sketch.is_some();
+                    if ui
+                        .add_enabled(can_apply, egui::Button::new("OK"))
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            can_apply && editor.target.is_none(),
+                            egui::Button::new("Preview"),
+                        )
+                        .clicked()
+                    {
+                        preview = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if define_sketch {
+            self.pending_editor = Some(editor);
+            self.feature_editor = None;
+            self.new_sketch();
+            return;
+        }
+        if preview {
+            self.preview_feature_editor(editor);
+            return;
+        }
+        if apply {
+            self.apply_feature_editor(editor);
+        } else if cancel || !open {
+            self.cancel_feature_editor(editor);
+        } else if self.feature_editor.is_none() {
+            self.feature_editor = Some(editor);
+        }
+    }
+
+    fn preview_feature_editor(&mut self, mut editor: FeatureEditor) {
+        if let Some(preview) = editor.preview.take() {
+            if let Some(part) = self.get_active_part_mut() {
+                part.features.retain(|feature| feature.id != preview);
+            }
+        }
+        let kind = match editor.kind {
+            FeatureEditorKind::Extrude | FeatureEditorKind::Revolve => {
+                let Some(part) = self.get_active_part() else {
+                    return;
+                };
+                let Some(sketch_id) = editor.sketch else {
+                    self.last_error = Some("Choose or define a sketch first.".to_string());
+                    self.feature_editor = Some(editor);
+                    return;
+                };
+                let Some(FeatureKind::Sketch { sketch }) = part
+                    .features
+                    .iter()
+                    .find(|feature| feature.id == sketch_id)
+                    .map(|feature| &feature.kind)
+                else {
+                    self.last_error = Some("The chosen sketch no longer exists.".to_string());
+                    self.feature_editor = Some(editor);
+                    return;
+                };
+                let Some(profile) = sketch.to_profile() else {
+                    self.last_error = Some("The chosen sketch has no closed profile.".to_string());
+                    self.feature_editor = Some(editor);
+                    return;
+                };
+                let placement = Self::placement_from_sketch(sketch);
+                if editor.kind == FeatureEditorKind::Extrude {
+                    FeatureKind::Extrude {
+                        profile,
+                        height: editor.height,
+                        placement: Some(placement),
+                        sketch: Some(sketch_id),
+                    }
+                } else {
+                    FeatureKind::Revolve {
+                        profile,
+                        angle_deg: editor.angle_deg,
+                        placement: Some(placement),
+                        sketch: Some(sketch_id),
+                    }
+                }
+            }
+            FeatureEditorKind::Box => FeatureKind::Box { size: editor.size },
+            FeatureEditorKind::Cylinder => FeatureKind::Cylinder {
+                radius: editor.cylinder_radius,
+                height: editor.cylinder_height,
+            },
+            FeatureEditorKind::Fillet | FeatureEditorKind::Chamfer => {
+                self.last_error = Some("Preview is not available for this feature yet.".into());
+                self.feature_editor = Some(editor);
+                return;
+            }
+        };
+        let mut preview_id = None;
+        if let Some(part) = self.get_active_part_mut() {
+            let feature = Feature::new("Preview", kind);
+            preview_id = Some(feature.id);
+            part.features.push(feature);
+        }
+        if let Some(preview) = preview_id {
+            editor.preview = Some(preview);
+            self.feature_editor = Some(editor);
+            self.rebuild_active_part();
+            self.status = Some("Preview shown. OK keeps it; Cancel removes it.".to_string());
+        }
+    }
+
+    fn cancel_feature_editor(&mut self, editor: FeatureEditor) {
+        if let Some(preview) = editor.preview {
+            if let Some(part) = self.get_active_part_mut() {
+                part.features.retain(|feature| feature.id != preview);
+            }
+        }
+        if let Some(sketch) = editor.internal_sketch {
+            let used = self
+                .get_active_part()
+                .map(|part| {
+                    part.features
+                        .iter()
+                        .any(|feature| feature.parent_features.contains(&sketch))
+                })
+                .unwrap_or(false);
+            if !used {
+                if let Some(part) = self.get_active_part_mut() {
+                    part.features.retain(|feature| feature.id != sketch);
+                }
+            }
+        }
+        self.feature_editor = None;
+        self.pending_editor = None;
+        self.rebuild_active_part();
+    }
+
+    fn apply_feature_editor(&mut self, editor: FeatureEditor) {
+        if let Some(preview) = editor.preview {
+            if let Some(part) = self.get_active_part_mut() {
+                part.features.retain(|feature| feature.id != preview);
+            }
+        }
+        let profile_and_placement = if editor.kind.needs_sketch() {
+            let Some(sketch_id) = editor.sketch else {
+                self.last_error = Some("Choose or define a sketch first.".to_string());
+                self.feature_editor = Some(editor);
+                return;
+            };
+            let Some(part) = self.get_active_part() else {
+                return;
+            };
+            let Some(FeatureKind::Sketch { sketch }) = part
+                .features
+                .iter()
+                .find(|feature| feature.id == sketch_id)
+                .map(|feature| &feature.kind)
+            else {
+                self.last_error = Some("The chosen sketch no longer exists.".to_string());
+                self.feature_editor = Some(editor);
+                return;
+            };
+            let Some(profile) = sketch.to_profile() else {
+                self.last_error = Some("The chosen sketch has no closed profile.".to_string());
+                self.feature_editor = Some(editor);
+                return;
+            };
+            Some((profile, Self::placement_from_sketch(sketch)))
+        } else {
+            None
+        };
+
+        self.undo_stack.push(self.project.clone());
+        let mut applied_id = editor.target;
+        if let Some(part) = self.get_active_part_mut() {
+            let kind = match editor.kind {
+                FeatureEditorKind::Extrude => {
+                    let (profile, placement) = profile_and_placement.clone().unwrap();
+                    FeatureKind::Extrude {
+                        profile,
+                        height: editor.height,
+                        placement: Some(placement),
+                        sketch: editor.sketch,
+                    }
+                }
+                FeatureEditorKind::Revolve => {
+                    let (profile, placement) = profile_and_placement.clone().unwrap();
+                    FeatureKind::Revolve {
+                        profile,
+                        angle_deg: editor.angle_deg,
+                        placement: Some(placement),
+                        sketch: editor.sketch,
+                    }
+                }
+                FeatureEditorKind::Box => FeatureKind::Box { size: editor.size },
+                FeatureEditorKind::Cylinder => FeatureKind::Cylinder {
+                    radius: editor.cylinder_radius,
+                    height: editor.cylinder_height,
+                },
+                FeatureEditorKind::Fillet => {
+                    let edges = part
+                        .features
+                        .iter()
+                        .find(|feature| feature.id == editor.target.unwrap_or_default())
+                        .and_then(|feature| match &feature.kind {
+                            FeatureKind::Fillet { edges, .. } => Some(edges.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    FeatureKind::Fillet {
+                        radius: editor.radius,
+                        edges,
+                    }
+                }
+                FeatureEditorKind::Chamfer => {
+                    let edges = part
+                        .features
+                        .iter()
+                        .find(|feature| feature.id == editor.target.unwrap_or_default())
+                        .and_then(|feature| match &feature.kind {
+                            FeatureKind::Chamfer { edges, .. } => Some(edges.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    FeatureKind::Chamfer {
+                        distance: editor.distance,
+                        edges,
+                    }
+                }
+            };
+
+            if let Some(target) = editor.target {
+                if let Some(feature) = part.features.iter_mut().find(|feature| feature.id == target) {
+                    feature.kind = kind;
+                    feature.name = editor.name.clone();
+                    feature.visible = true;
+                }
+            } else {
+                let name = if editor.name.trim().is_empty() {
+                    rcad_features::unique_feature_name(part, editor.kind.title())
+                } else {
+                    editor.name.clone()
+                };
+                let feature = Feature::new(name, kind);
+                applied_id = Some(feature.id);
+                part.features.push(feature);
+            }
+
+            if let (Some(feature_id), Some(sketch_id)) = (applied_id, editor.internal_sketch) {
+                if let Some(sketch_feature) = part.features.iter_mut().find(|f| f.id == sketch_id) {
+                    sketch_feature.sub_feature_of = Some(feature_id);
+                    sketch_feature.visibility_manual = false;
+                }
+            }
+        }
+
+        self.feature_editor = None;
+        self.pending_editor = None;
+        self.rebuild_active_part();
+        self.last_error = None;
+        self.status = Some(format!(
+            "{} {}.",
+            editor.kind.title(),
+            if editor.target.is_some() { "updated" } else { "added" }
+        ));
+    }
+
+    #[allow(dead_code)]
     pub fn extrude_sketch(&mut self) {
         if self.sketch.is_some() {
             self.last_error = Some(
@@ -4538,6 +5958,7 @@ impl RcadApp {
         }
     }
     
+    #[allow(dead_code)]
     pub fn revolve_sketch(&mut self) {
         if self.sketch.is_some() {
             self.last_error = Some(
@@ -4692,8 +6113,12 @@ impl RcadApp {
             }
             
             ToolbarAction::ModelBox => self.add_box_feature(),
-            ToolbarAction::ModelExtrude => self.extrude_sketch(),
-            ToolbarAction::ModelRevolve => self.revolve_sketch(),
+            ToolbarAction::ModelExtrude => {
+                self.open_feature_editor(FeatureEditorKind::Extrude, None)
+            }
+            ToolbarAction::ModelRevolve => {
+                self.open_feature_editor(FeatureEditorKind::Revolve, None)
+            }
             ToolbarAction::ModelSweep => {
                 // TODO: Sweep
             }
@@ -4951,6 +6376,114 @@ impl RcadApp {
         };
     }
 
+    /// The feature whose geometry is under the cursor. Face and edge names start
+    /// with the creating feature's id, datums and tree items carry it directly.
+    fn feature_under_cursor(&self) -> Option<Uuid> {
+        let item = self.hover.as_ref().or_else(|| self.selection.items().last())?;
+        match item {
+            Selected::Feature { feature, .. } | Selected::Datum { feature, .. } => Some(*feature),
+            Selected::Face { reference, .. } | Selected::Edge { reference, .. } => {
+                let head = reference.split('/').next()?.trim();
+                Uuid::parse_str(head).ok()
+            }
+        }
+    }
+
+    /// Short right-click cycles the selection candidates (Creo query); a long
+    /// press followed by release opens the feature context menu.
+    fn handle_secondary_button(&mut self, ui: &egui::Ui, pos: egui::Pos2) {
+        let (pressed, released) = ui.input(|i| {
+            (
+                i.pointer.button_pressed(egui::PointerButton::Secondary),
+                i.pointer.button_released(egui::PointerButton::Secondary),
+            )
+        });
+        if pressed {
+            self.secondary_press = Some((std::time::Instant::now(), pos, false));
+        }
+        let Some((started, start_pos, moved)) = self.secondary_press else {
+            return;
+        };
+        let moved = moved || (pos - start_pos).length() > 4.0;
+        if !released {
+            self.secondary_press = Some((started, start_pos, moved));
+            return;
+        }
+        self.secondary_press = None;
+        let long_press = started.elapsed() >= std::time::Duration::from_millis(450);
+        if long_press && !moved {
+            let feature = self.feature_under_cursor();
+            self.viewport_menu = Some((pos, feature));
+        } else if !moved && !self.hover_candidates.is_empty() {
+            self.hover_cycle = (self.hover_cycle + 1) % self.hover_candidates.len();
+            self.hover = self.hover_candidates.get(self.hover_cycle).cloned();
+        }
+    }
+
+    fn draw_viewport_menu(&mut self, ctx: &egui::Context) {
+        let Some((pos, feature)) = self.viewport_menu else {
+            return;
+        };
+        let mut close = false;
+        let mut action: Option<HistoryOverlayAction> = None;
+        egui::Area::new(egui::Id::new("viewport_feature_menu"))
+            .fixed_pos(pos)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(210.0);
+                    match feature {
+                        Some(feature_id) => {
+                            let (name, suppressed) = self
+                                .get_active_part()
+                                .and_then(|part| {
+                                    part.features
+                                        .iter()
+                                        .find(|candidate| candidate.id == feature_id)
+                                })
+                                .map(|candidate| (candidate.name.clone(), candidate.suppressed))
+                                .unwrap_or_else(|| ("(missing)".to_string(), false));
+                            ui.strong(name);
+                            ui.separator();
+                            if ui.button("Edit").clicked() {
+                                action = Some(HistoryOverlayAction::EditFeature(feature_id));
+                            }
+                            if ui.button("Edit References...").clicked() {
+                                action = Some(HistoryOverlayAction::EditReferences(feature_id));
+                            }
+                            if ui.button("Edit Definition...").clicked() {
+                                action = Some(HistoryOverlayAction::EditDefinition(feature_id));
+                            }
+                            ui.separator();
+                            if suppressed {
+                                if ui.button("Resume").clicked() {
+                                    action = Some(HistoryOverlayAction::ResumeFeature(feature_id));
+                                }
+                            } else if ui.button("Suppress").clicked() {
+                                action = Some(HistoryOverlayAction::SuppressFeature(feature_id));
+                            }
+                            if ui.button("Delete").clicked() {
+                                action = Some(HistoryOverlayAction::DeleteFeature(feature_id));
+                            }
+                        }
+                        None => {
+                            ui.label("No feature under the cursor.");
+                            if ui.button("Close").clicked() {
+                                close = true;
+                            }
+                        }
+                    }
+                });
+            });
+        if let Some(action) = action {
+            self.handle_history_action(action);
+            close = true;
+        }
+        if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.viewport_menu = None;
+        }
+    }
+
     fn handle_history_action(&mut self, action: HistoryOverlayAction) {
         use crate::ui::HistoryOverlayAction;
         
@@ -4967,21 +6500,14 @@ impl RcadApp {
             HistoryOverlayAction::OpenContextMenu(feature_id, pos) => {
                 self.history_overlay.open_context_menu(feature_id, pos);
             }
+            HistoryOverlayAction::EditFeature(feature_id) => {
+                self.open_feature_dimensions(feature_id);
+            }
+            HistoryOverlayAction::EditReferences(feature_id) => {
+                self.edit_references = Some(feature_id);
+            }
             HistoryOverlayAction::EditDefinition(feature_id) => {
-                // A sketch opens back into its editor; every other feature
-                // opens the feature dialog.
-                let is_sketch = self
-                    .get_active_part()
-                    .and_then(|part| part.features.iter().find(|feature| feature.id == feature_id))
-                    .map(|feature| matches!(feature.kind, FeatureKind::Sketch { .. }))
-                    .unwrap_or(false);
-                if is_sketch {
-                    if let Err(message) = self.edit_sketch_feature(feature_id) {
-                        self.last_error = Some(message);
-                    }
-                } else {
-                    self.show_relations_dialog = Some(feature_id);
-                }
+                self.edit_definition_feature(feature_id);
             }
             HistoryOverlayAction::SuppressFeature(feature_id) => {
                 if let Some(part) = self.get_active_part_mut() {
@@ -5023,6 +6549,7 @@ impl RcadApp {
                 if let Some(part) = self.get_active_part_mut() {
                     if let Some(idx) = part.features.iter().position(|f| f.id == feature_id) {
                         part.features[idx].visible = !part.features[idx].visible;
+                        part.features[idx].visibility_manual = true;
                         self.rebuild_active_part();
                     }
                 }
@@ -5055,11 +6582,23 @@ impl RcadApp {
                 if let Some(part) = self.get_active_part_mut() {
                     if let Some(idx) = part.features.iter().position(|f| f.id == feature_id) {
                         // Check for children
-                        let has_children = part.features.iter().any(|f| f.parent_features.contains(&feature_id));
-                        if has_children {
-                            self.last_error = Some(format!("Feature has children. Delete anyway? (Not implemented)"));
+                        let children: Vec<String> = part
+                            .features
+                            .iter()
+                            .filter(|f| f.parent_features.contains(&feature_id))
+                            .map(|f| f.name.clone())
+                            .collect();
+                        if !children.is_empty() {
+                            self.last_error = Some(format!(
+                                "Cannot delete this feature: {} depend(s) on it ({}). Delete or edit the children first.",
+                                children.len(),
+                                children.join(", ")
+                            ));
                         } else {
                             part.features.remove(idx);
+                            // An internal sketch belongs to its feature.
+                            part.features
+                                .retain(|f| f.sub_feature_of != Some(feature_id));
                             self.rebuild_active_part();
                         }
                     }
@@ -5076,15 +6615,55 @@ impl RcadApp {
             HistoryOverlayAction::PasteSpecialFeature(_feature_id) => {
                 // TODO: Paste special
             }
-            HistoryOverlayAction::ShowParents(_feature_id) => {
+            HistoryOverlayAction::ShowParents(feature_id) => {
                 self.history_overlay.show_parents = true;
                 self.history_overlay.show_children = false;
-                // TODO: Highlight parents
+                let ids = self
+                    .get_active_part()
+                    .and_then(|part| part.features.iter().find(|f| f.id == feature_id))
+                    .map(|feature| feature.parent_features.clone())
+                    .unwrap_or_default();
+                let names: Vec<String> = ids
+                    .iter()
+                    .filter_map(|id| {
+                        self.get_active_part().and_then(|part| {
+                            part.features
+                                .iter()
+                                .find(|feature| feature.id == *id)
+                                .map(|feature| feature.name.clone())
+                        })
+                    })
+                    .collect();
+                self.status = Some(if names.is_empty() {
+                    "This feature has no parents.".to_string()
+                } else {
+                    format!("Parents of this feature: {}.", names.join(", "))
+                });
             }
-            HistoryOverlayAction::ShowChildren(_feature_id) => {
+            HistoryOverlayAction::ShowChildren(feature_id) => {
                 self.history_overlay.show_children = true;
                 self.history_overlay.show_parents = false;
-                // TODO: Highlight children
+                let ids = self
+                    .get_active_part()
+                    .and_then(|part| part.features.iter().find(|f| f.id == feature_id))
+                    .map(|feature| feature.child_features.clone())
+                    .unwrap_or_default();
+                let names: Vec<String> = ids
+                    .iter()
+                    .filter_map(|id| {
+                        self.get_active_part().and_then(|part| {
+                            part.features
+                                .iter()
+                                .find(|feature| feature.id == *id)
+                                .map(|feature| feature.name.clone())
+                        })
+                    })
+                    .collect();
+                self.status = Some(if names.is_empty() {
+                    "This feature has no children.".to_string()
+                } else {
+                    format!("Features that depend on this one: {}.", names.join(", "))
+                });
             }
             HistoryOverlayAction::ShowInfo(feature_id) => {
                 // TODO: Show info dialog
@@ -5214,6 +6793,12 @@ impl Default for RcadApp {
             needs_fit: true,
             feature_dialog_tab: 0,
             new_parameter: NewParameterDraft::default(),
+            feature_editor: None,
+            pending_editor: None,
+            edit_dimensions: None,
+            edit_references: None,
+            secondary_press: None,
+            viewport_menu: None,
             floating_bar: FloatingBar::default(),
             placing_component: false,
             settings: settings.clone(),
@@ -5994,6 +7579,38 @@ mod interaction_tests {
     }
 
     #[test]
+    fn the_extrude_toolbar_opens_the_definition_panel() {
+        let mut session = Session::new(RcadApp::default());
+        session.click_toolbar(ToolbarAction::ModelExtrude);
+        assert!(
+            session.app.feature_editor.is_some(),
+            "Extrude must open its definition panel, not add a feature immediately"
+        );
+        // Drawing the panel must not panic before a sketch is chosen.
+        session.frame();
+        assert!(session.app.feature_editor.is_some());
+        let before = features(&session.app).len();
+        assert_eq!(before, 0, "no feature is created until OK");
+    }
+
+    #[test]
+    fn the_edit_hud_and_references_window_draw_without_panicking() {
+        let (mut app, _, extrude_id) = app_with_extrude();
+        app.project_root = Some(temp_project_dir());
+        let mut session = Session::without_project(app);
+
+        session.app.edit_dimensions = Some(extrude_id);
+        session.frame();
+        session.frame();
+
+        session.app.edit_dimensions = None;
+        session.app.edit_references = Some(extrude_id);
+        session.frame();
+        session.frame();
+        assert!(session.app.edit_references.is_some());
+    }
+
+    #[test]
     fn clicking_box_twice_creates_two_uniquely_named_features() {
         let mut session = Session::new(RcadApp::default());
         session.click_toolbar(ToolbarAction::ModelBox);
@@ -6505,6 +8122,259 @@ mod interaction_tests {
             "the sketch profile should have become an extrude: {:?}",
             app.last_error
         );
+    }
+
+    /// Foundation C1: OK leaves the sketch visible; a successful consumer hides
+    /// it, and suppressing that consumer brings it back.
+    #[test]
+    fn a_finished_sketch_stays_visible_until_a_feature_consumes_it() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        app.new_sketch();
+        app.add_sketch_rectangle(-25.0, -25.0, 25.0, 25.0);
+        app.solve_sketch();
+        app.confirm_sketch();
+
+        let sketch_id = {
+            let part = app.project.parts.first().unwrap();
+            let sketch = part
+                .features
+                .iter()
+                .find(|feature| matches!(feature.kind, FeatureKind::Sketch { .. }))
+                .expect("the sketch is in the history");
+            assert!(sketch.visible, "OK must leave the sketch visible");
+            sketch.id
+        };
+
+        app.extrude_sketch();
+
+        let part = app.project.parts.first().unwrap();
+        let sketch = part.features.iter().find(|f| f.id == sketch_id).unwrap();
+        assert!(
+            !sketch.visible,
+            "a consuming extrude must hide the sketch"
+        );
+        let extrude_id = part
+            .features
+            .iter()
+            .find(|f| matches!(f.kind, FeatureKind::Extrude { .. }))
+            .unwrap()
+            .id;
+        assert_eq!(sketch.child_features, vec![extrude_id]);
+
+        // Suppress the consumer: the sketch comes back.
+        if let Some(part) = app.get_active_part_mut() {
+            part.features
+                .iter_mut()
+                .find(|f| f.id == extrude_id)
+                .unwrap()
+                .suppressed = true;
+        }
+        app.rebuild_active_part();
+        let sketch = app
+            .project
+            .parts
+            .first()
+            .unwrap()
+            .features
+            .iter()
+            .find(|f| f.id == sketch_id)
+            .unwrap();
+        assert!(sketch.visible, "the sketch returns when its consumer is suppressed");
+    }
+
+    /// Foundation C2: an Extrude panel can create a feature from an existing
+    /// sketch, and an internal sketch is nested under the feature on OK.
+    #[test]
+    fn the_extrude_panel_consumes_an_internal_sketch() {
+        let mut app = RcadApp::default();
+        let _ = app.create_default_datum_geometry();
+        app.new_sketch();
+        app.add_sketch_rectangle(-10.0, -10.0, 10.0, 10.0);
+        app.solve_sketch();
+
+        // Simulate clicking Define sketch… in an Extrude panel: the pending
+        // editor is waiting when the sketcher confirms.
+        let mut editor = FeatureEditor::new(FeatureEditorKind::Extrude);
+        editor.name = "Extrude1".to_string();
+        app.pending_editor = Some(editor);
+        app.confirm_sketch();
+
+        let editor = app.feature_editor.as_ref().expect("back in the Extrude panel");
+        assert!(editor.sketch.is_some(), "the new sketch is selected");
+        assert!(editor.internal_sketch.is_some(), "the sketch is internal");
+        let sketch_id = editor.sketch.unwrap();
+        let editor = app.feature_editor.take().unwrap();
+        app.apply_feature_editor(editor);
+
+        let part = app.project.parts.first().unwrap();
+        let extrude = part
+            .features
+            .iter()
+            .find(|f| matches!(f.kind, FeatureKind::Extrude { .. }))
+            .expect("an extrude feature");
+        let sketch = part.features.iter().find(|f| f.id == sketch_id).unwrap();
+        assert_eq!(sketch.sub_feature_of, Some(extrude.id));
+        assert!(sketch.parent_features.contains(&extrude.id) == false);
+        assert!(!sketch.visible);
+    }
+
+    fn app_with_extrude() -> (RcadApp, Uuid, Uuid) {
+        let mut app = RcadApp::default();
+        let mut sketch = Sketch::new("Sketch1");
+        sketch.add_rectangle(-10.0, -10.0, 10.0, 10.0);
+        let sketch_feature = Feature::new("Sketch1", FeatureKind::Sketch { sketch: sketch.clone() });
+        let sketch_id = sketch_feature.id;
+        let extrude = Feature::new(
+            "Extrude1",
+            FeatureKind::Extrude {
+                profile: sketch.to_profile().expect("profile"),
+                height: 10.0,
+                placement: None,
+                sketch: Some(sketch_id),
+            },
+        );
+        let extrude_id = extrude.id;
+        if let Some(part) = app.get_active_part_mut() {
+            part.features.push(sketch_feature);
+            part.features.push(extrude);
+        }
+        app.rebuild_active_part();
+        (app, sketch_id, extrude_id)
+    }
+
+    #[test]
+    fn edit_definition_updates_an_extrude_height() {
+        let (mut app, _, extrude_id) = app_with_extrude();
+        app.open_feature_editor(FeatureEditorKind::Extrude, Some(extrude_id));
+        let mut editor = app.feature_editor.take().expect("the panel opened");
+        editor.height = 25.0;
+        app.apply_feature_editor(editor);
+
+        let part = app.project.parts.first().unwrap();
+        let height = part
+            .features
+            .iter()
+            .find_map(|feature| match &feature.kind {
+                FeatureKind::Extrude { height, .. } if feature.id == extrude_id => Some(*height),
+                _ => None,
+            })
+            .expect("the extrude");
+        assert!((height - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn edit_references_can_replace_the_sketch_of_an_extrude() {
+        let (mut app, first_sketch, extrude_id) = app_with_extrude();
+        let mut second = Sketch::new("Sketch2");
+        second.add_rectangle(-5.0, -5.0, 15.0, 15.0);
+        let second_feature = Feature::new("Sketch2", FeatureKind::Sketch { sketch: second.clone() });
+        let second_id = second_feature.id;
+        app.get_active_part_mut()
+            .unwrap()
+            .features
+            .push(second_feature);
+        if let Some(part) = app.get_active_part_mut() {
+            part.recompute_dependencies();
+        }
+        app.apply_reference_change(extrude_id, ReferenceChange::Sketch(second_id));
+
+        let part = app.project.parts.first().unwrap();
+        let extrude = part.features.iter().find(|f| f.id == extrude_id).unwrap();
+        match &extrude.kind {
+            FeatureKind::Extrude { sketch, .. } => {
+                assert_eq!(*sketch, Some(second_id));
+                assert_ne!(*sketch, Some(first_sketch));
+            }
+            _ => panic!("not an extrude"),
+        }
+    }
+
+    #[test]
+    fn deleting_a_parent_is_blocked_and_names_the_child() {
+        let (mut app, _, extrude_id) = app_with_extrude();
+        let sketch_id = app
+            .project
+            .parts
+            .first()
+            .unwrap()
+            .features
+            .iter()
+            .find(|f| matches!(f.kind, FeatureKind::Sketch { .. }))
+            .unwrap()
+            .id;
+        app.handle_history_action(HistoryOverlayAction::DeleteFeature(sketch_id));
+        let part = app.project.parts.first().unwrap();
+        assert!(part.features.iter().any(|f| f.id == sketch_id));
+        assert!(app
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Extrude1"));
+
+        app.handle_history_action(HistoryOverlayAction::DeleteFeature(extrude_id));
+        assert!(!app
+            .project
+            .parts
+            .first()
+            .unwrap()
+            .features
+            .iter()
+            .any(|f| f.id == extrude_id));
+    }
+
+    #[test]
+    fn a_face_reference_maps_back_to_its_feature_for_the_context_menu() {
+        let (mut app, _, extrude_id) = app_with_extrude();
+        app.hover = Some(Selected::Face {
+            reference: format!("{extrude_id}/box/z+"),
+            label: "top".into(),
+            triangle: 0,
+        });
+        assert_eq!(app.feature_under_cursor(), Some(extrude_id));
+    }
+
+    #[test]
+    fn preview_shows_the_feature_and_cancel_removes_it() {
+        let (mut app, sketch_id, _) = app_with_extrude();
+        // Remove the existing extrude so the sketch is free again.
+        if let Some(part) = app.get_active_part_mut() {
+            part.features
+                .retain(|feature| !matches!(feature.kind, FeatureKind::Extrude { .. }));
+            part.recompute_dependencies();
+        }
+        let mut editor = FeatureEditor::new(FeatureEditorKind::Extrude);
+        editor.sketch = Some(sketch_id);
+        editor.height = 7.0;
+        app.preview_feature_editor(editor);
+        let part = app.project.parts.first().unwrap();
+        assert!(part.features.iter().any(|f| f.name == "Preview"));
+        let sketch = part.features.iter().find(|f| f.id == sketch_id).unwrap();
+        assert!(!sketch.visible, "preview consumes the sketch");
+
+        let editor = app.feature_editor.take().expect("panel still open");
+        app.cancel_feature_editor(editor);
+        let part = app.project.parts.first().unwrap();
+        assert!(!part.features.iter().any(|f| f.name == "Preview"));
+        let sketch = part.features.iter().find(|f| f.id == sketch_id).unwrap();
+        assert!(sketch.visible, "cancelling the preview frees the sketch");
+    }
+
+    #[test]
+    fn the_edit_hud_changes_an_extrude_depth() {
+        let (mut app, _, extrude_id) = app_with_extrude();
+        app.edit_dimensions = Some(extrude_id);
+        app.apply_feature_dimension(extrude_id, FeatureDimensionEdit::ExtrudeHeight(30.0));
+        let part = app.project.parts.first().unwrap();
+        let height = part
+            .features
+            .iter()
+            .find_map(|feature| match &feature.kind {
+                FeatureKind::Extrude { height, .. } if feature.id == extrude_id => Some(*height),
+                _ => None,
+            })
+            .unwrap();
+        assert!((height - 30.0).abs() < 1e-9);
     }
 
     /// Off the XY plane the profile now carries its plane, so the sweep follows

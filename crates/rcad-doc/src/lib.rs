@@ -263,6 +263,111 @@ impl Part {
         p
     }
 
+    /// Recompute the feature dependency graph and the automatic sketch
+    /// visibility from the references the features actually store.
+    ///
+    /// `parent_features` are the features a feature depends on (upstream);
+    /// `child_features` are the features that depend on it. A sketch is visible
+    /// until a non-suppressed consumer exists, unless the user toggled its eye
+    /// icon (`visibility_manual`).
+    pub fn recompute_dependencies(&mut self) {
+        let ids: std::collections::HashSet<EntityId> =
+            self.features.iter().map(|feature| feature.id).collect();
+
+        let mut parents: BTreeMap<EntityId, Vec<EntityId>> = BTreeMap::new();
+        for feature in &self.features {
+            let mut dependencies: Vec<EntityId> = Vec::new();
+            let push_reference = |dependencies: &mut Vec<EntityId>, reference: &str| {
+                if let Some(id) = reference_feature_id(reference) {
+                    if id != feature.id && ids.contains(&id) {
+                        dependencies.push(id);
+                    }
+                }
+            };
+
+            match &feature.kind {
+                FeatureKind::Sketch { sketch } => {
+                    for role in [
+                        rcad_sketch::SketchReferenceRole::Orientation,
+                        rcad_sketch::SketchReferenceRole::Automatic,
+                    ] {
+                        if let Some(reference) = sketch
+                            .reference(role)
+                            .and_then(|reference| reference.reference.as_deref())
+                        {
+                            push_reference(&mut dependencies, reference);
+                        }
+                    }
+                }
+                FeatureKind::Extrude {
+                    sketch, placement, ..
+                }
+                | FeatureKind::Revolve {
+                    sketch, placement, ..
+                } => {
+                    if let Some(sketch) = sketch {
+                        dependencies.push(*sketch);
+                    }
+                    if let Some(reference) = placement
+                        .as_ref()
+                        .and_then(|placement| placement.reference.as_deref())
+                    {
+                        push_reference(&mut dependencies, reference);
+                    }
+                }
+                FeatureKind::Boolean { tool_feature, .. } => {
+                    dependencies.push(*tool_feature);
+                }
+                FeatureKind::Fillet { edges, .. } | FeatureKind::Chamfer { edges, .. } => {
+                    match edges {
+                        EdgeSet::References(references) => {
+                            for reference in references {
+                                push_reference(&mut dependencies, reference);
+                            }
+                        }
+                        EdgeSet::Vertical { axis } | EdgeSet::Horizontal { axis } => {
+                            dependencies.push(*axis);
+                        }
+                        EdgeSet::All | EdgeSet::Outer | EdgeSet::Inner => {}
+                    }
+                }
+                FeatureKind::Thicken {
+                    surface_feature, ..
+                } => dependencies.push(*surface_feature),
+                _ => {}
+            }
+
+            dependencies.retain(|id| ids.contains(id));
+            dependencies.sort();
+            dependencies.dedup();
+            parents.insert(feature.id, dependencies);
+        }
+
+        let mut children: BTreeMap<EntityId, Vec<EntityId>> = BTreeMap::new();
+        for (feature_id, dependencies) in &parents {
+            for dependency in dependencies {
+                children.entry(*dependency).or_default().push(*feature_id);
+            }
+        }
+
+        for feature in &mut self.features {
+            feature.parent_features = parents.get(&feature.id).cloned().unwrap_or_default();
+            feature.child_features = children.get(&feature.id).cloned().unwrap_or_default();
+        }
+
+        let consumed: std::collections::HashSet<EntityId> = self
+            .features
+            .iter()
+            .filter(|feature| !feature.suppressed)
+            .flat_map(|feature| feature.parent_features.iter().copied())
+            .collect();
+        for feature in &mut self.features {
+            if matches!(feature.kind, FeatureKind::Sketch { .. }) && !feature.visibility_manual {
+                feature.visible = !consumed.contains(&feature.id);
+            }
+        }
+    }
+
     /// Tag a face with a logical colour id from the project vocabulary.
     ///
     /// `face_name` is the stable name reported by the kernel for that face.
@@ -428,6 +533,15 @@ pub struct Feature {
     /// editing the project updates every component that uses it.
     #[serde(default)]
     pub colour_id: Option<String>,
+    /// Owner when this is an internal sketch created inside another feature
+    /// (foundation C2). The feature tree nests it under its owner and the
+    /// owner deletes it.
+    #[serde(default)]
+    pub sub_feature_of: Option<EntityId>,
+    /// The user toggled the eye icon: automatic sketch visibility must not
+    /// override that choice (foundation C1).
+    #[serde(default)]
+    pub visibility_manual: bool,
 }
 
 impl Feature {
@@ -445,6 +559,8 @@ impl Feature {
             insert_here_marker: false,
             rollback_marker: false,
             visible: true,  // Visible by default
+            sub_feature_of: None,
+            visibility_manual: false,
             created_timestamp: chrono::Utc::now().to_rfc3339(),
             modified_timestamp: chrono::Utc::now().to_rfc3339(),
             colour_id: None,
@@ -697,6 +813,16 @@ pub struct LostReference {
     pub last_description: Option<String>,
 }
 
+/// The feature id embedded at the start of a stable reference.
+///
+/// References are written as `<feature uuid>/<role>` (or are a bare uuid for
+/// internal owners); geometric signatures like `F:plane:a200` have no uuid and
+/// are ignored.
+fn reference_feature_id(reference: &str) -> Option<EntityId> {
+    let head = reference.split('/').next()?.trim();
+    Uuid::parse_str(head).ok()
+}
+
 pub fn dvec3_from(a: [f64; 3]) -> DVec3 {
     DVec3::new(a[0], a[1], a[2])
 }
@@ -860,5 +986,67 @@ mod face_colour_tests {
 
         let all = vec![FACE.to_string(), "F:deleted-face".to_string()];
         assert!(part.unmatched_face_colours(&all).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+
+    fn part_with_sketch_and_extrude() -> (Part, EntityId, EntityId) {
+        let mut part = Part::new_solid("P");
+        let sketch = Feature::new(
+            "Sketch1",
+            FeatureKind::Sketch {
+                sketch: rcad_sketch::Sketch::new("Sketch1"),
+            },
+        );
+        let sketch_id = sketch.id;
+        part.features.push(sketch);
+
+        let extrude = Feature::new(
+            "Extrude1",
+            FeatureKind::Extrude {
+                profile: Profile2D::from_polygon(vec![
+                    [0.0, 0.0],
+                    [10.0, 0.0],
+                    [10.0, 10.0],
+                ]),
+                height: 5.0,
+                placement: None,
+                sketch: Some(sketch_id),
+            },
+        );
+        let extrude_id = extrude.id;
+        part.features.push(extrude);
+        part.recompute_dependencies();
+        (part, sketch_id, extrude_id)
+    }
+
+    #[test]
+    fn an_extrude_depends_on_its_sketch() {
+        let (part, sketch_id, extrude_id) = part_with_sketch_and_extrude();
+
+        assert_eq!(part.features[1].parent_features, vec![sketch_id]);
+        assert_eq!(part.features[0].child_features, vec![extrude_id]);
+    }
+
+    #[test]
+    fn a_consumed_sketch_is_hidden_and_comes_back_when_the_consumer_is_gone() {
+        let (mut part, sketch_id, _) = part_with_sketch_and_extrude();
+        let sketch_index = part.features.iter().position(|f| f.id == sketch_id).unwrap();
+        assert!(!part.features[sketch_index].visible, "consumed sketch is hidden");
+
+        // Suppress the consumer: the sketch shows again.
+        part.features[1].suppressed = true;
+        part.recompute_dependencies();
+        assert!(part.features[sketch_index].visible, "unconsumed sketch is visible");
+
+        // Manual visibility wins over the automatic rule.
+        part.features[sketch_index].visibility_manual = true;
+        part.features[sketch_index].visible = false;
+        part.features[1].suppressed = false;
+        part.recompute_dependencies();
+        assert!(!part.features[sketch_index].visible);
     }
 }

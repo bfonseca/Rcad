@@ -8,7 +8,15 @@ use rcad_sketch::Sketch;
 /// Push a feature onto the tree and return its id.
 fn push_feature(part: &mut Part, feature: Feature) -> EntityId {
     let id = feature.id;
-    part.features.push(feature);
+    // Insert Here sets where the next feature goes; without it features append.
+    let index = part
+        .insert_here_index
+        .map(|marker| (marker + 1).min(part.features.len()))
+        .unwrap_or(part.features.len());
+    part.features.insert(index, feature);
+    if part.insert_here_index.is_some() {
+        part.insert_here_index = Some(index);
+    }
     id
 }
 
@@ -282,6 +290,22 @@ mod helper_tests {
         assert_eq!(get_insert_position(&part), 2);
         part.insert_here_index = Some(0);
         assert_eq!(get_insert_position(&part), 1);
+    }
+
+    #[test]
+    fn a_new_feature_goes_at_the_insert_here_marker() {
+        let mut part = Part::new_solid("P");
+        add_box(&mut part, "A", [1.0, 1.0, 1.0]);
+        add_box(&mut part, "B", [1.0, 1.0, 1.0]);
+        part.insert_here_index = Some(0);
+        add_box(&mut part, "C", [1.0, 1.0, 1.0]);
+        let names: Vec<&str> = part
+            .features
+            .iter()
+            .map(|feature| feature.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["A", "C", "B"]);
+        assert_eq!(part.insert_here_index, Some(1));
     }
 
     #[test]

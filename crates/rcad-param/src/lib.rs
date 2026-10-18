@@ -93,6 +93,13 @@ impl ShapeCache {
             HashMap::new();
 
         for (idx, feature) in part.features.iter().enumerate() {
+            // Rollback Here: features after the marker are history, not part of
+            // the current model (foundation C1).
+            if let Some(rollback) = part.rollback_index {
+                if idx > rollback {
+                    break;
+                }
+            }
             if feature.suppressed || part.suppressed.contains(&feature.id) {
                 continue;
             }
@@ -1336,6 +1343,22 @@ mod tests {
             before,
             backend.live_shapes()
         );
+    }
+
+    #[test]
+    fn a_rollback_marker_stops_later_features_from_rebuilding() {
+        let mut part = Part::new_solid("P");
+        part.features
+            .push(Feature::new("Box1", FeatureKind::Box { size: [1.0; 3] }));
+        part.features
+            .push(Feature::new("Box2", FeatureKind::Box { size: [2.0; 3] }));
+        part.rollback_index = Some(0);
+
+        let mut backend = MockBackend::default();
+        let result = rebuild_part(&part, &mut backend);
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(backend.box_calls, 1, "only the feature before the marker built");
     }
 }
 

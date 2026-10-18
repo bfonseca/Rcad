@@ -300,7 +300,7 @@ and its state reconciliation.
 - [x] STEP/STL export through OCCT; STEP import in the kernel (not in the UI)
 - [x] MCP server (`rcad-mcp`, stdio, 13 tools + 3 resources; no prompts/TCP)
 - [x] CI workflow (`.github/workflows/ci.yml`): build + test blocking, clippy/fmt advisory
-- [x] 298 tests passing (4 ignored measurements) and a warning-free
+- [x] 312 tests passing (4 ignored measurements) and a warning-free
       `cargo check --workspace --all-targets`
 - [x] **WGPU solid pipeline** (depth 24/stencil 8, 4x MSAA, Blinn-Phong, per-face colours,
       selection/hover tint) with the painter kept as fallback — foundation A2/A3. Validated
@@ -316,7 +316,11 @@ and its state reconciliation.
       conics are sampled, splines and real Loft/Boundary are follow-ups. The 8-hole benchmark
       plate rebuilds ~36× faster (15.2 s → 0.43 s) because the holes are cylinders, not
       32-sided polygons.
-- [ ] **Parent/child dependency graph, real Insert Here/Rollback, Edit Definition** — foundation C
+- [x] **Dependency graph, Insert Here/Rollback, sketch visibility, sub-sketch panel and the
+      three edit modes** — foundation C core: sketches stay visible after OK and hide when a
+      feature consumes them; Extrude/Revolve collect an existing or internal sketch; EDIT,
+      Edit References and Edit Definition work from the tree and the long right-click menu.
+      The remaining C work is stable `role` names, automatic reference repair and Rename.
 - [ ] Adaptive history overlay with blur (the overlay is solid today)
 - [ ] Assembly UI and the 11 PTC placement constraints
 - [ ] Underlay / skeleton / external-table integration in the app
